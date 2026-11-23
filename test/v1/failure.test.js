@@ -1,0 +1,141 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { after, describe, test } from 'node:test';
+import { AgentError } from '../../dist/v1/errors.js';
+import { connectProcess, openWorkspace } from '../../dist/v1/operations.js';
+
+const binary = process.env.FLEET_AGENT_BIN ?? path.resolve('agent/target/debug/fleet-agent');
+const available = fs.existsSync(binary);
+const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-v1-fail-'));
+const state = path.join(base, 'state');
+const root = path.join(base, 'replica');
+process.env.FLEET_AGENT_STATE_DIR = state;
+fs.mkdirSync(state, { recursive: true });
+after(() => fs.rmSync(base, { recursive: true, force: true }));
+
+function lease(client, operationId) {
+  return client.request('workspace.lease', { workspaceId: 'fail-demo', operationId, ttlMs: 60_000 });
+}
+
+describe('two controllers (WS-03)', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('the second lease is refused and released when the first connection dies', async () => {
+    const first = await connectProcess(binary);
+    const second = await connectProcess(binary);
+    try {
+      await openWorkspace(first, 'fail-demo', root, true);
+      await openWorkspace(second, 'fail-demo', root, true);
+      await lease(first, 'op-first');
+      await assert.rejects(lease(second, 'op-second'), (error) => error instanceof AgentError && error.code === 'WORKSPACE_BUSY');
+
+      first.close();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const granted = await lease(second, 'op-second');
+      assert.ok(granted.leaseId);
+    } finally {
+      second.close();
+      first.close();
+    }
+  });
+});
+
+describe('recovery after a dead controller (FAIL-01)', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('an unfinished transaction is reported and can be aborted after a restart', async () => {
+    const first = await connectProcess(binary);
+    const workspace = await openWorkspace(first, 'fail-demo', root, true);
+    await lease(first, 'op-crash');
+    const begin = await first.request('sync.begin', {
+      workspaceId: 'fail-demo',
+      leaseId: 'op-crash',
+      baseGeneration: workspace.generation,
+      policy: {},
+    });
+    await first.request('sync.entries', {
+      txnId: begin.txnId,
+      entries: [{ path: 'x.txt', type: 'file', mode: '0644', size: 1, mtimeMs: 0 }],
+    });
+    await first.request('sync.plan', { txnId: begin.txnId });
+    first.close();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const second = await connectProcess(binary);
+    try {
+      const reopened = await openWorkspace(second, 'fail-demo', root, true);
+      assert.equal(reopened.recovery, true);
+      await assert.rejects(lease(second, 'op-after'), (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED');
+
+      const inspected = await second.request('sync.inspect', { workspaceId: 'fail-demo' });
+      assert.equal(inspected.state, 'RECOVERY');
+      assert.equal(inspected.txnId, begin.txnId);
+
+      await second.request('sync.abort', { txnId: begin.txnId });
+      const status = await second.request('workspace.status', { workspaceId: 'fail-demo' });
+      assert.equal(status.recovery, false);
+      assert.equal(status.generation, workspace.generation);
+      const after = await lease(second, 'op-after');
+      assert.ok(after.leaseId);
+    } finally {
+      second.close();
+    }
+  });
+});
+
+describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('a commit with the wrong plan digest is refused', async () => {
+    const client = await connectProcess(binary);
+    try {
+      const workspace = await openWorkspace(client, 'fail-demo', root, true);
+      await lease(client, 'op-plan');
+      const begin = await client.request('sync.begin', { workspaceId: 'fail-demo', leaseId: 'op-plan', baseGeneration: workspace.generation, policy: {} });
+      await client.request('sync.entries', { txnId: begin.txnId, entries: [] });
+      await client.request('sync.plan', { txnId: begin.txnId });
+      await assert.rejects(
+        client.request('sync.commit', { txnId: begin.txnId, planDigest: 'sha256:' + '0'.repeat(64) }),
+        (error) => error instanceof AgentError && error.code === 'PLAN_MISMATCH',
+      );
+      await client.request('sync.abort', { txnId: begin.txnId });
+    } finally {
+      client.close();
+    }
+  });
+
+  test('a blob whose bytes do not match its digest is refused', async () => {
+    const client = await connectProcess(binary);
+    try {
+      const workspace = await openWorkspace(client, 'fail-demo', root, true);
+      await lease(client, 'op-blob');
+      const digest = 'sha256:' + '1'.repeat(64);
+      const begin = await client.request('sync.begin', { workspaceId: 'fail-demo', leaseId: 'op-blob', baseGeneration: workspace.generation, policy: {} });
+      await client.request('sync.entries', {
+        txnId: begin.txnId,
+        entries: [{ path: 'blob.txt', type: 'file', mode: '0644', size: 3, mtimeMs: 0, digest }],
+      });
+      await client.request('sync.plan', { txnId: begin.txnId });
+      const put = await client.request('blob.put', { txnId: begin.txnId, digest, size: 3 });
+      await assert.rejects(client.upload(put.streamId, Buffer.from('abc')), (error) => error instanceof AgentError && error.code === 'BLOB_CORRUPT');
+      await client.request('sync.abort', { txnId: begin.txnId });
+    } finally {
+      client.close();
+    }
+  });
+
+  test('exec refuses an unexpected generation', async () => {
+    const client = await connectProcess(binary);
+    try {
+      await openWorkspace(client, 'fail-demo', root, true);
+      await lease(client, 'op-gen');
+      await assert.rejects(
+        client.request('exec.start', {
+          workspaceId: 'fail-demo',
+          leaseId: 'op-gen',
+          expectedGeneration: 999,
+          argv: ['true'],
+        }),
+        (error) => error instanceof AgentError && error.code === 'GENERATION_MISMATCH',
+      );
+    } finally {
+      client.close();
+    }
+  });
+});

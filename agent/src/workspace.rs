@@ -47,6 +47,7 @@ impl LeaseHandle {
     }
 }
 
+#[derive(Clone)]
 pub struct Workspace {
     pub id: String,
     pub root: PathBuf,
@@ -68,6 +69,10 @@ impl Registry {
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Workspace> {
         self.workspaces.get_mut(id)
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        self.workspaces.keys().cloned().collect()
     }
 
     pub fn insert(&mut self, workspace: Workspace) {

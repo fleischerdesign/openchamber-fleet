@@ -14,6 +14,10 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Exclude/preserve matcher | SYNC-04 | `agent/src/model.rs` tests |
 | Plan, commit, idempotence | SYNC-01, SYNC-02 | `agent/src/sync.rs` tests |
 | Preserve on delete | SYNC-03 | `agent/src/sync.rs` tests |
+| Two controllers, lease release on death | WS-03 | `test/v1/failure.test.js` |
+| Recovery after a dead controller | FAIL-01 | `test/v1/failure.test.js` |
+| Plan digest and blob corruption refusals | SYNC-06, SYNC-07 | `test/v1/failure.test.js` |
+| Spool backpressure | EXEC-06 | `agent/src/exec.rs` buffer test |
 | Generation precondition | WS-04 | `agent/src/sync.rs` tests |
 | Exec output, exit code | EXEC-01, EXEC-02 | `agent/src/exec.rs`, `session.rs` tests |
 | Timeout, cancel | EXEC-03, EXEC-04 | `agent/src/exec.rs` tests |
@@ -28,8 +32,8 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 
 | IDs | Why not yet |
 |---|---|
-| WS-02, WS-03, WS-05, WS-06 | Need two processes for the lease and a spawn-kill harness for the journal |
-| SYNC-06…SYNC-10 | Blob corruption, plan mismatch, crash during apply, two controllers, symlink apply |
+| WS-02, WS-05, WS-06 | Need a spawn-kill harness for the journal and a permission test |
+| SYNC-08…SYNC-10 | Crash during apply, disconnect at each phase, symlink apply |
 | EXEC-05, EXEC-07, EXEC-08 | Environment isolation test, disconnect cancel, crash-unknown |
 | ART-03, CTL-01, CTL-03 | Artifact refusals, digest parity fixture, SSH argv unit test |
 | FAIL-01…FAIL-05 | Disconnect matrix, disk full, output flood, 200k benchmark, traversal attacks |

@@ -608,19 +608,42 @@ impl Session {
         let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
             return usage_error(request, "txnId is required");
         };
-        let Some(record) = self.transactions.remove(txn_id) else {
+        let workspace_id = match self.transactions.remove(txn_id) {
+            Some(record) => Some(record.workspace),
+            None => {
+                // The transaction may survive a restart only as a journal. Find its workspace.
+                let mut found = None;
+                for id in self.registry.ids() {
+                    if let Some(workspace) = self.registry.get(&id) {
+                        if let Ok(Some(record)) = workspace::read_journal(&workspace.state) {
+                            if record.get("txnId").and_then(Value::as_str) == Some(txn_id) {
+                                found = Some(id);
+                                break;
+                            }
+                        }
+                    }
+                }
+                found
+            }
+        };
+        let Some(workspace_id) = workspace_id else {
             return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
         };
-        let Some(workspace) = self.registry.get(&record.workspace) else {
+        let Some(workspace) = self.registry.get(&workspace_id).cloned() else {
             return Action::Reply(rpc::error(
                 &request.id,
                 "WORKSPACE_UNKNOWN",
-                "workspace",
+                &workspace_id,
                 false,
             ));
         };
-        match sync::abort(workspace) {
-            Ok(()) => Action::Reply(rpc::response(&request.id, json!({"ok": true}))),
+        match sync::abort(&workspace) {
+            Ok(()) => {
+                if let Some(entry) = self.registry.get_mut(&workspace_id) {
+                    entry.recovery = None;
+                }
+                Action::Reply(rpc::response(&request.id, json!({"ok": true})))
+            }
             Err(error) => Action::Reply(error_response(&request.id, &error)),
         }
     }

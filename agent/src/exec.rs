@@ -162,7 +162,10 @@ pub fn spawn(request: SpawnRequest) -> Result<Job, String> {
     }
     command.env_clear();
     command.env("HOME", std::env::var("HOME").unwrap_or_default());
-    command.env("PATH", std::env::var("PATH").unwrap_or_else(|_| DEFAULT_PATH.to_string()));
+    command.env(
+        "PATH",
+        std::env::var("PATH").unwrap_or_else(|_| DEFAULT_PATH.to_string()),
+    );
     command.env("LANG", "C.UTF-8");
     command.env("TZ", "UTC");
     for (key, value) in &request.env {
@@ -410,5 +413,53 @@ mod tests {
             record.state,
             JobState::Cancelled | JobState::Failed
         ));
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn spool_blocks_at_the_limit_until_drained() {
+        let buffer = Buffer::new();
+        let producer_buffer = buffer.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let producer_finished = finished.clone();
+        let producer = thread::spawn(move || {
+            let chunk = vec![7u8; CHUNK];
+            for _ in 0..(SPOOL_LIMIT / CHUNK + 4) {
+                producer_buffer.push(&chunk);
+            }
+            producer_finished.store(true, Ordering::SeqCst);
+        });
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "producer must block at the spool limit"
+        );
+        let mut drained = 0usize;
+        for _ in 0..2000 {
+            match buffer.take(CHUNK) {
+                Some(bytes) if !bytes.is_empty() => drained += bytes.len(),
+                Some(_) => {
+                    if finished.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                None => break,
+            }
+        }
+        producer.join().unwrap();
+        while let Some(bytes) = buffer.take(CHUNK) {
+            if bytes.is_empty() {
+                break;
+            }
+            drained += bytes.len();
+        }
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(drained >= SPOOL_LIMIT);
     }
 }
