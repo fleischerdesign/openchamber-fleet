@@ -1,0 +1,26 @@
+{
+  "codes": [
+    { "code": "INVALID_FRAME", "retryable": false, "meaning": "malformed framing, unknown kind, oversize frame" },
+    { "code": "INVALID_REQUEST", "retryable": false, "meaning": "unknown method, missing or wrong parameters" },
+    { "code": "NOT_INITIALIZED", "retryable": false, "meaning": "method before a successful session.initialize" },
+    { "code": "UNSUPPORTED_PROTOCOL", "retryable": false, "meaning": "major version mismatch" },
+    { "code": "UNSUPPORTED_CAPABILITY", "retryable": false, "meaning": "a required capability is not provided" },
+    { "code": "WORKSPACE_UNKNOWN", "retryable": false, "meaning": "workspaceId was not opened on this agent" },
+    { "code": "WORKSPACE_BUSY", "retryable": true, "meaning": "another lease or transaction holds the workspace" },
+    { "code": "RECOVERY_REQUIRED", "retryable": true, "meaning": "an unfinished transaction must be resolved first" },
+    { "code": "GENERATION_MISMATCH", "retryable": false, "meaning": "expected generation is not the current one" },
+    { "code": "LEASE_UNKNOWN", "retryable": false, "meaning": "leaseId is not held by this session" },
+    { "code": "LEASE_EXPIRED", "retryable": true, "meaning": "lease expired and must be reacquired" },
+    { "code": "PATH_UNSAFE", "retryable": false, "meaning": "path escapes the workspace, traverses a symlink, or is malformed" },
+    { "code": "UNSUPPORTED_METADATA", "retryable": false, "meaning": "hardlink, special file, or non-portable mode" },
+    { "code": "PLAN_MISMATCH", "retryable": false, "meaning": "commit planDigest differs from the planned one" },
+    { "code": "BLOB_MISSING", "retryable": true, "meaning": "a promised blob was not uploaded" },
+    { "code": "BLOB_CORRUPT", "retryable": false, "meaning": "uploaded bytes do not match their digest or size" },
+    { "code": "DISK_FULL", "retryable": true, "meaning": "no space left; nothing was committed" },
+    { "code": "PERMISSION_DENIED", "retryable": false, "meaning": "the agent user may not perform the operation" },
+    { "code": "RESOURCE_EXHAUSTED", "retryable": true, "meaning": "a limit was reached (streams, entries, spool)" },
+    { "code": "OPERATION_UNKNOWN", "retryable": false, "meaning": "the outcome of the operation is unknown; inspect before replay" },
+    { "code": "CANCELLED", "retryable": false, "meaning": "the operation was cancelled" },
+    { "code": "INTERNAL", "retryable": false, "meaning": "an unexpected agent failure" }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "name": "handshake",
+  "spec": "SPEC.md §5",
+  "cases": [
+    {
+      "name": "happy-path",
+      "frames": [
+        {
+          "send": {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "session.initialize",
+            "params": {
+              "protocol": { "major": 1, "minor": 0 },
+              "client": { "name": "fleet", "version": "0.2.0", "instance": "test" },
+              "capabilities": ["workspace.sync@1", "exec@1", "artifact@1"]
+            }
+          }
+        },
+        {
+          "expect": {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+              "protocol": { "major": 1, "minor": 0 },
+              "agent": { "os": "string", "arch": "string", "installationId": "string", "version": "string" },
+              "capabilities": { "workspace.sync": 1, "exec": 1, "artifact": 1 },
+              "limits": { "maxControl": "number", "maxData": "number", "maxStreams": "number" }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "major-version-mismatch",
+      "frames": [
+        {
+          "send": {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "session.initialize",
+            "params": { "protocol": { "major": 2, "minor": 0 }, "client": { "name": "fleet" } }
+          }
+        },
+        {
+          "expect": {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "error": { "code": "UNSUPPORTED_PROTOCOL", "retryable": false }
+          },
+          "thenClose": true
+        }
+      ]
+    },
+    {
+      "name": "method-before-handshake",
+      "frames": [
+        { "send": { "jsonrpc": "2.0", "id": "3", "method": "workspace.status", "params": {} } },
+        {
+          "expect": {
+            "jsonrpc": "2.0",
+            "id": "3",
+            "error": { "code": "NOT_INITIALIZED", "retryable": false }
+          }
+        }
+      ]
+    }
+  ]
+}
