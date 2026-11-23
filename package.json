@@ -1,0 +1,50 @@
+{
+  "name": "openchamber-fleet",
+  "version": "0.1.0",
+  "description": "Replicate a workspace to a remote machine and run one command there — for OpenCode and OpenChamber agents.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "fleet": "bin/fleet.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin/index.d.ts",
+      "import": "./dist/plugin/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"test/**/*.test.js\"",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "openchamber",
+    "remote",
+    "rsync",
+    "ssh",
+    "agents"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.0"
+  }
+}
