@@ -117,3 +117,18 @@ The integration tests use a fake SSH transport that runs the remote command loca
 ## License
 
 MIT.
+
+## Protocol
+
+v1 is a protocol-first rewrite: one versioned wire contract, a Rust agent spoken to over SSH stdio,
+and no bash or rsync backend.
+
+- [`protocol/SPEC.md`](protocol/SPEC.md) — normative framing, handshake, workspaces, transactions,
+  execution, errors, limits.
+- [`protocol/STATE.md`](protocol/STATE.md) — state machines including crash windows.
+- [`protocol/errors.json`](protocol/errors.json) — stable error codes.
+- [`protocol/fixtures/`](protocol/fixtures/) — conformance fixtures.
+
+Status: the protocol is specified and the Rust agent implements framing, identity and the session
+handshake. Workspaces, synchronization and execution follow. The current TypeScript tool remains the
+0.x implementation until the cutover passes the failure suite; it is a migration, not a fallback.
