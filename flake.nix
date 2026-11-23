@@ -21,10 +21,26 @@
           src = ./agent;
           cargoLock.lockFile = ./agent/Cargo.lock;
         };
+      mkController =
+        pkgs:
+        pkgs.buildNpmPackage {
+          pname = "openchamber-fleet";
+          version = "0.1.0";
+          src = self;
+          npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
+          buildPhase = ''
+            npm run build
+          '';
+          installPhase = ''
+            mkdir -p $out/lib/node_modules/openchamber-fleet
+            cp -r package.json dist bin $out/lib/node_modules/openchamber-fleet/
+          '';
+        };
     in
     {
       packages = each (pkgs: {
         fleet-agent = mkAgent pkgs;
+        controller = mkController pkgs;
         default = mkAgent pkgs;
       });
 
