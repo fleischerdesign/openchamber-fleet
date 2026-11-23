@@ -29,23 +29,24 @@
       });
 
       checks = each (pkgs: {
-        build-and-test = pkgs.runCommand "openchamber-fleet-checks" {
+        build-and-test = pkgs.buildNpmPackage {
+          pname = "openchamber-fleet-checks";
+          version = "0.1.0";
+          src = self;
+          npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
           nativeBuildInputs = with pkgs; [
-            nodejs_22
-            typescript
             rsync
             openssh
             bash
             coreutils
           ];
-        } ''
-          cp -r ${self} source
-          chmod -R u+w source
-          cd source
-          tsc -p tsconfig.json
-          node --test 'test/**/*.test.js'
-          touch $out
-        '';
+          checkPhase = ''
+            node --test 'test/**/*.test.js'
+          '';
+          installPhase = ''
+            mkdir -p $out
+          '';
+        };
       });
 
       formatter = each (pkgs: pkgs.nixfmt);
