@@ -1,17 +1,18 @@
 /**
- * OpenCode plugin surface. Five tools, no dependencies, no daemon: the core does the work.
- *
- * The plugin is compiled to plain ESM, so it loads in the Bun runtime OpenCode uses and in Node.
+ * OpenCode plugin surface over fleet.agent.v1. Four tools, no daemon: each call opens a session,
+ * performs one operation and closes it.
  */
 
-import { loadConfig } from '../config.js';
+import { compileExcludes, loadConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
-import { FleetError, formatError } from '../errors.js';
-import { cancelRun, execRemote } from '../exec.js';
-import { fetchArtifacts } from '../fetch.js';
-import { buildOutputHints } from '../hints.js';
-import { statusReport } from '../status.js';
-import { applyWorkspace, planWorkspace, verifyWorkspace } from '../sync.js';
+import { AgentError } from '../v1/errors.js';
+import {
+  connectSsh,
+  execCommand,
+  fetchArtifact,
+  status,
+  syncWorkspace,
+} from '../v1/operations.js';
 
 interface ToolResult { content: string; metadata?: Record<string, unknown> }
 interface ToolDefinition {
@@ -30,23 +31,21 @@ function configFromCwd(): WorkspaceConfig {
 
 function hostOf(config: WorkspaceConfig, input: Record<string, unknown>): HostConfig {
   const alias = input.host;
-  if (typeof alias !== 'string') throw new FleetError('usage', 'host is required');
+  if (typeof alias !== 'string') throw new Error('host is required');
   const host = config.hosts[alias];
-  if (!host) {
-    throw new FleetError('usage', `unknown host ${JSON.stringify(alias)}`, { known: Object.keys(config.hosts).join(', ') });
-  }
+  if (!host) throw new Error(`unknown host ${JSON.stringify(alias)}; known: ${Object.keys(config.hosts).join(', ')}`);
   return host;
 }
 
 function failure(error: unknown): ToolResult {
-  return { content: formatError(error) };
+  if (error instanceof AgentError) {
+    return { content: `${error.code}: ${error.message}${error.retryable ? ' (retryable)' : ''}` };
+  }
+  return { content: error instanceof Error ? error.message : String(error) };
 }
 
-function formatPlan(alias: string, result: { entries: { action: string; path: string }[]; digest: string }): string {
-  const lines = [`${alias}: ${result.entries.length} change(s) ${result.digest}`];
-  for (const entry of result.entries.slice(0, 40)) lines.push(`  ${entry.action} ${entry.path}`);
-  if (result.entries.length > 40) lines.push(`  … ${result.entries.length - 40} more`);
-  return lines.join('\n');
+function agentPath(input: Record<string, unknown>): string {
+  return typeof input.agentPath === 'string' ? input.agentPath : process.env.FLEET_AGENT_PATH ?? 'fleet-agent';
 }
 
 export default {
@@ -55,22 +54,25 @@ export default {
     await ctx.tool.transform((tools) => {
       tools.add({
         name: 'fleet_status',
-        description: 'Show declared hosts, the canonical revision, replica state and any running lease.',
+        description: 'Show the replica generation and recovery state of a host.',
         options: { codemode: false },
         input: {
           type: 'object',
-          properties: { check: { type: 'boolean', description: 'Re-verify over SSH instead of trusting recorded state' } },
+          properties: { host: { type: 'string' } },
+          required: ['host'],
           additionalProperties: false,
         },
         async execute(input) {
           try {
             const config = configFromCwd();
-            const report = await statusReport(config, { check: input.check === true });
-            const lines = [`workspace ${report.workspace} at ${report.revision}`];
-            for (const host of report.hosts) {
-              lines.push(`${host.alias}: ${host.state}${host.lease ? ` (run ${host.lease.runId})` : ''}${host.changes === undefined ? '' : ` — ${host.changes} change(s)`}`);
+            const host = hostOf(config, input);
+            const client = await connectSsh(host, { agentPath: agentPath(input) });
+            try {
+              const info = await status(client, config.name, host.root);
+              return { content: `${config.name}@${host.alias}: generation ${info.generation} ${info.manifestDigest}${info.recovery ? ' RECOVERY' : ''}` };
+            } finally {
+              client.close();
             }
-            return { content: lines.join('\n') };
           } catch (error) {
             return failure(error);
           }
@@ -79,19 +81,19 @@ export default {
 
       tools.add({
         name: 'fleet_sync',
-        description: 'Replicate the workspace to a host. mode=plan shows changes, apply transfers and verifies.',
+        description: 'Replicate the workspace to a host. mode=plan shows changes, apply transfers and commits.',
         options: { codemode: false },
         input: {
           type: 'object',
           properties: {
             host: { type: 'string' },
-            mode: { type: 'string', enum: ['plan', 'apply', 'verify'] },
-            content: { type: 'boolean', description: 'Compare file contents, not just size and mtime' },
+            mode: { type: 'string', enum: ['plan', 'apply'] },
             excludes: {
               type: 'array',
               items: { type: 'string' },
               description: 'Additional excludes for this call, e.g. ["dist/", "target/"]',
             },
+            adopt: { type: 'boolean', description: 'Take over an existing unmanaged directory' },
           },
           required: ['host', 'mode'],
           additionalProperties: false,
@@ -100,28 +102,25 @@ export default {
           try {
             const config = configFromCwd();
             const host = hostOf(config, input);
-            const mode = input.mode;
-            const checksum = input.content === true;
-            const excludes = Array.isArray(input.excludes) ? input.excludes.map(String) : undefined;
-            if (mode === 'apply') {
-              const result = await applyWorkspace(config, host, { checksum, excludes });
-              return { content: `applied ${result.applied} change(s) to ${host.alias}\n${result.plan.revision}` };
+            const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
+            const excludes = [...new Set([...config.excludes, ...extra])];
+            const client = await connectSsh(host, { agentPath: agentPath(input) });
+            try {
+              const result = await syncWorkspace(client, compileExcludes(excludes), {
+                workspaceId: config.name,
+                source: config.dir,
+                root: host.root,
+                excludes,
+                mode: input.mode === 'apply' ? 'apply' : 'plan',
+                adopt: input.adopt === true,
+              });
+              const lines = [`${host.alias}: ${result.changes.length} change(s) ${result.planDigest}`];
+              for (const change of result.changes.slice(0, 40)) lines.push(`  ${change.action} ${change.path}`);
+              if (result.generation !== undefined) lines.push(`generation ${result.generation}`);
+              return { content: lines.join('\n') };
+            } finally {
+              client.close();
             }
-            if (mode === 'verify') {
-              const result = await verifyWorkspace(config, host, { checksum, excludes });
-              return {
-                content: result.entries.length === 0
-                  ? `${host.alias}: replica matches ${result.revision}`
-                  : formatPlan(host.alias, { entries: result.entries, digest: '' }),
-              };
-            }
-            if (mode !== 'plan') throw new FleetError('usage', 'mode must be plan, apply or verify');
-            const plan = await planWorkspace(config, host, { checksum, excludes });
-            const hints = buildOutputHints(plan.entries);
-            const note = hints.length > 0
-              ? `\nnote: generated output would be replicated: ${hints.join(', ')} — add it to excludes if a build produces it`
-              : '';
-            return { content: formatPlan(host.alias, plan) + note };
           } catch (error) {
             return failure(error);
           }
@@ -130,40 +129,49 @@ export default {
 
       tools.add({
         name: 'fleet_exec',
-        description: 'Run a command in the synced replica on a host. Refuses to run on a stale replica unless allowStale.',
+        description: 'Run a command in the synced replica on a host and return its output and exit code.',
         options: { codemode: false },
         input: {
           type: 'object',
           properties: {
             host: { type: 'string' },
-            command: { type: 'string', description: 'Shell string, run through the configured shell' },
-            argv: { type: 'array', items: { type: 'string' }, description: 'Argument vector; preferred over command' },
+            argv: { type: 'array', items: { type: 'string' } },
+            cwd: { type: 'string' },
+            env: { type: 'object', additionalProperties: { type: 'string' } },
             timeoutSeconds: { type: 'number' },
-            allowStale: { type: 'boolean' },
           },
-          required: ['host'],
+          required: ['host', 'argv'],
           additionalProperties: false,
         },
         async execute(input) {
           try {
             const config = configFromCwd();
             const host = hostOf(config, input);
-            const argv = Array.isArray(input.argv) ? input.argv.map(String) : undefined;
-            const command = typeof input.command === 'string' ? input.command : undefined;
+            const argv = Array.isArray(input.argv) ? input.argv.map(String) : [];
             const timeout = typeof input.timeoutSeconds === 'number' ? input.timeoutSeconds : undefined;
-            const result = await execRemote({
-              config,
-              host,
-              argv,
-              shell: command,
-              timeoutMs: timeout === undefined ? undefined : timeout * 1000,
-              allowStale: input.allowStale === true,
-            });
-            const header = `exit ${result.exitCode} in ${(result.durationMs / 1000).toFixed(1)}s (${host.alias})`;
-            const text = result.output.trimEnd();
-            const body = text.length > 0 ? text : '(no stdout)';
-            const note = result.truncated ? `\n… truncated; full log: ${result.logPath}` : '';
-            return { content: `${header}\n${body}${note}`, metadata: { exitCode: result.exitCode, runId: result.runId } };
+            const env = input.env && typeof input.env === 'object' ? Object.fromEntries(Object.entries(input.env).map(([key, value]) => [key, String(value)])) : {};
+            const client = await connectSsh(host, { agentPath: agentPath(input) });
+            try {
+              const result = await execCommand(client, {
+                workspaceId: config.name,
+                root: host.root,
+                argv,
+                cwd: typeof input.cwd === 'string' ? input.cwd : undefined,
+                env,
+                timeoutMs: timeout === undefined ? undefined : timeout * 1000,
+              });
+              const header = `exit ${result.exitCode ?? `signal ${result.signal}`} (${host.alias})`;
+              const stdout = result.stdout.toString().trimEnd();
+              const stderr = result.stderr.toString().trimEnd();
+              const body = stdout.length > 0 ? stdout : '(no stdout)';
+              const note = stderr.length > 0 ? `\nstderr:\n${stderr}` : '';
+              return {
+                content: `${header}\n${body}${note}`,
+                metadata: { exitCode: result.exitCode, state: result.state, jobId: result.jobId },
+              };
+            } finally {
+              client.close();
+            }
           } catch (error) {
             return failure(error);
           }
@@ -172,58 +180,36 @@ export default {
 
       tools.add({
         name: 'fleet_fetch',
-        description: 'Bring named artifacts from the replica to a local directory.',
+        description: 'Copy one named artifact from the replica to a local directory, verifying its digest.',
         options: { codemode: false },
         input: {
           type: 'object',
           properties: {
             host: { type: 'string' },
-            paths: { type: 'array', items: { type: 'string' } },
+            artifact: { type: 'string' },
             dest: { type: 'string' },
             overwrite: { type: 'boolean' },
-            verify: { type: 'boolean' },
           },
-          required: ['host', 'paths', 'dest'],
+          required: ['host', 'artifact', 'dest'],
           additionalProperties: false,
         },
         async execute(input) {
           try {
             const config = configFromCwd();
             const host = hostOf(config, input);
-            const paths = Array.isArray(input.paths) ? input.paths.map(String) : [];
-            const dest = typeof input.dest === 'string' ? input.dest : '';
-            const result = await fetchArtifacts({
-              config,
-              host,
-              paths,
-              dest,
-              overwrite: input.overwrite === true,
-              verify: input.verify === true,
-            });
-            return { content: `fetched ${result.paths.length} path(s), ${result.bytes} bytes` };
-          } catch (error) {
-            return failure(error);
-          }
-        },
-      });
-
-      tools.add({
-        name: 'fleet_cancel',
-        description: 'Signal the remote process of a recorded run.',
-        options: { codemode: false },
-        input: {
-          type: 'object',
-          properties: { host: { type: 'string' }, runId: { type: 'string' } },
-          required: ['host', 'runId'],
-          additionalProperties: false,
-        },
-        async execute(input) {
-          try {
-            const config = configFromCwd();
-            const host = hostOf(config, input);
-            const runId = typeof input.runId === 'string' ? input.runId : '';
-            await cancelRun(host, runId);
-            return { content: `sent SIGTERM for run ${runId}` };
+            const client = await connectSsh(host, { agentPath: agentPath(input) });
+            try {
+              const result = await fetchArtifact(client, {
+                workspaceId: config.name,
+                root: host.root,
+                artifact: String(input.artifact),
+                dest: String(input.dest),
+                overwrite: input.overwrite === true,
+              });
+              return { content: `fetched ${result.file} (${result.bytes} bytes) ${result.digest}` };
+            } finally {
+              client.close();
+            }
           } catch (error) {
             return failure(error);
           }

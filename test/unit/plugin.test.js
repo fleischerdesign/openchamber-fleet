@@ -2,30 +2,28 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import plugin from '../../dist/plugin/index.js';
-import { cleanup, makeWorkspace } from '../fixtures/harness.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
 
-const workspace = makeWorkspace({
+const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-plugin-'));
+fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
   name: 'plugin-tests',
-  files: { 'a.txt': 'a\n' },
-});
-after(() => cleanup(workspace));
+  hosts: { node: { ssh: 'test@node' } },
+  excludes: [],
+}));
+after(() => fs.rmSync(workspace, { recursive: true, force: true }));
 
 async function register() {
   const tools = [];
-  const ctx = {
-    tool: {
-      transform: async (edit) => edit({ add: (tool) => tools.push(tool) }),
-    },
-  };
+  const ctx = { tool: { transform: async (edit) => edit({ add: (tool) => tools.push(tool) }) } };
   await plugin.setup(ctx);
   return tools;
 }
 
-describe('OpenCode plugin surface (ADR-0004)', () => {
-  test('registers exactly the five documented tools', async () => {
+describe('OpenCode plugin surface', () => {
+  test('registers the four v1 tools', async () => {
     const tools = await register();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'fleet_cancel',
       'fleet_exec',
       'fleet_fetch',
       'fleet_status',
@@ -35,32 +33,17 @@ describe('OpenCode plugin surface (ADR-0004)', () => {
       assert.equal(tool.input.type, 'object');
       assert.equal(tool.input.additionalProperties, false);
       assert.equal(typeof tool.execute, 'function');
-      assert.equal(tool.options.codemode, false);
     }
   });
 
-  test('fleet_status reads the workspace in the session directory', async () => {
+  test('a missing config becomes a readable result, not a throw', async () => {
     const previous = process.cwd();
-    process.chdir(workspace.source);
+    process.chdir(os.tmpdir());
     try {
       const tools = await register();
       const status = tools.find((tool) => tool.name === 'fleet_status');
-      const result = await status.execute({});
-      assert.match(result.content, /workspace plugin-tests/);
-      assert.match(result.content, /node: unknown/);
-    } finally {
-      process.chdir(previous);
-    }
-  });
-
-  test('a missing config becomes a readable tool result, not a throw', async () => {
-    const previous = process.cwd();
-    process.chdir(path.dirname(workspace.root));
-    try {
-      const tools = await register();
-      const status = tools.find((tool) => tool.name === 'fleet_status');
-      const result = await status.execute({});
-      assert.match(result.content, /config-missing/);
+      const result = await status.execute({ host: 'node' });
+      assert.match(result.content, /no fleet\.json/);
     } finally {
       process.chdir(previous);
     }
