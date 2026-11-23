@@ -28,6 +28,22 @@
         };
       });
 
+      packages = each (pkgs: {
+        default = pkgs.buildNpmPackage {
+          pname = "openchamber-fleet";
+          version = "0.1.0";
+          src = self;
+          npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
+          buildPhase = ''
+            npm run build
+          '';
+          installPhase = ''
+            mkdir -p $out/lib/node_modules/openchamber-fleet
+            cp -r package.json dist bin $out/lib/node_modules/openchamber-fleet/
+          '';
+        };
+      });
+
       checks = each (pkgs: {
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
