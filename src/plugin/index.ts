@@ -15,18 +15,33 @@ import {
 } from '../v1/operations.js';
 
 interface ToolResult { content: string; metadata?: Record<string, unknown> }
+interface ToolContext { sessionID?: string }
 interface ToolDefinition {
   name: string;
   description: string;
   options?: { codemode: boolean };
   input: Record<string, unknown>;
-  execute: (input: Record<string, unknown>) => Promise<ToolResult>;
+  execute: (input: Record<string, unknown>, context?: ToolContext) => Promise<ToolResult>;
 }
 interface ToolList { add: (tool: ToolDefinition) => void }
-interface PluginContext { tool: { transform: (edit: (tools: ToolList) => void | Promise<void>) => Promise<void> } }
+interface PluginContext {
+  tool: { transform: (edit: (tools: ToolList) => void | Promise<void>) => Promise<void> };
+  session?: { get: (input: { sessionID: string }) => Promise<{ location?: { directory?: string } }> };
+}
 
-function configFromCwd(): WorkspaceConfig {
-  return loadConfig(process.cwd());
+async function workspaceOf(ctx: PluginContext, context?: ToolContext): Promise<WorkspaceConfig> {
+  let directory = process.cwd();
+  const sessionID = context?.sessionID;
+  if (sessionID && ctx.session) {
+    try {
+      const info = await ctx.session.get({ sessionID });
+      const value = info?.location?.directory;
+      if (typeof value === 'string' && value.startsWith('/')) directory = value;
+    } catch {
+      // Fall back to the server cwd; the error below names the directory either way.
+    }
+  }
+  return loadConfig(directory);
 }
 
 function hostOf(config: WorkspaceConfig, input: Record<string, unknown>): HostConfig {
@@ -62,9 +77,9 @@ export default {
           required: ['host'],
           additionalProperties: false,
         },
-        async execute(input) {
+        async execute(input, context) {
           try {
-            const config = configFromCwd();
+            const config = await workspaceOf(ctx, context);
             const host = hostOf(config, input);
             const client = await connectSsh(host, { agentPath: agentPath(input) });
             try {
@@ -98,9 +113,9 @@ export default {
           required: ['host', 'mode'],
           additionalProperties: false,
         },
-        async execute(input) {
+        async execute(input, context) {
           try {
-            const config = configFromCwd();
+            const config = await workspaceOf(ctx, context);
             const host = hostOf(config, input);
             const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
             const excludes = [...new Set([...config.excludes, ...extra])];
@@ -143,9 +158,9 @@ export default {
           required: ['host', 'argv'],
           additionalProperties: false,
         },
-        async execute(input) {
+        async execute(input, context) {
           try {
-            const config = configFromCwd();
+            const config = await workspaceOf(ctx, context);
             const host = hostOf(config, input);
             const argv = Array.isArray(input.argv) ? input.argv.map(String) : [];
             const timeout = typeof input.timeoutSeconds === 'number' ? input.timeoutSeconds : undefined;
@@ -193,9 +208,9 @@ export default {
           required: ['host', 'artifact', 'dest'],
           additionalProperties: false,
         },
-        async execute(input) {
+        async execute(input, context) {
           try {
-            const config = configFromCwd();
+            const config = await workspaceOf(ctx, context);
             const host = hostOf(config, input);
             const client = await connectSsh(host, { agentPath: agentPath(input) });
             try {

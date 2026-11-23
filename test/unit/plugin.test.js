@@ -13,9 +13,14 @@ fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
 }));
 after(() => fs.rmSync(workspace, { recursive: true, force: true }));
 
-async function register() {
+async function register(sessionDirectory) {
   const tools = [];
-  const ctx = { tool: { transform: async (edit) => edit({ add: (tool) => tools.push(tool) }) } };
+  const ctx = {
+    tool: { transform: async (edit) => edit({ add: (tool) => tools.push(tool) }) },
+    session: {
+      get: async () => ({ location: { directory: sessionDirectory ?? '/nonexistent' } }),
+    },
+  };
   await plugin.setup(ctx);
   return tools;
 }
@@ -33,6 +38,19 @@ describe('OpenCode plugin surface', () => {
       assert.equal(tool.input.type, 'object');
       assert.equal(tool.input.additionalProperties, false);
       assert.equal(typeof tool.execute, 'function');
+    }
+  });
+
+  test('the session directory wins over the server cwd', async () => {
+    const previous = process.cwd();
+    process.chdir(os.tmpdir());
+    try {
+      const tools = await register(workspace);
+      const status = tools.find((tool) => tool.name === 'fleet_status');
+      const result = await status.execute({ host: 'node' }, { sessionID: 'ses_test' });
+      assert.doesNotMatch(result.content, /no fleet\.json/);
+    } finally {
+      process.chdir(previous);
     }
   });
 
