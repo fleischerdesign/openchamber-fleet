@@ -35,6 +35,14 @@
     "test": "npm run build && node --test \"test/**/*.test.js\"",
     "prepare": "npm run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fleischerdesign/openchamber-fleet.git"
+  },
+  "homepage": "https://github.com/fleischerdesign/openchamber-fleet#readme",
+  "bugs": {
+    "url": "https://github.com/fleischerdesign/openchamber-fleet/issues"
+  },
   "keywords": [
     "opencode",
     "openchamber",
