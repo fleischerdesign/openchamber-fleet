@@ -86,6 +86,7 @@ remaining gate before calling it production-ready.
 | [`docs/config.md`](docs/config.md) | `fleet.json` |
 | [`docs/cli.md`](docs/cli.md) | commands and exit codes |
 | [`docs/test-coverage.md`](docs/test-coverage.md) | which claim is proven where |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | measured large-workspace numbers |
 | [`docs/adr/`](docs/adr/) | decisions with rejected alternatives |
 
 ## Development

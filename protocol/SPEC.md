@@ -70,7 +70,8 @@ Identifiers are strings.
 | `workspace.release` | C→A | release the lease |
 | `sync.begin` | C→A | open a transaction |
 | `sync.entries` | C→A | stream the desired manifest |
-| `sync.plan` | C→A | compute the diff and needed blobs |
+| `sync.plan` | C→A | compute the diff; returns the digest and counts |
+| `sync.planPage` | C→A | page through changes or needed digests |
 | `blob.put` | C→A | upload one blob, then DATA frames |
 | `sync.commit` | C→A | apply the plan atomically per §7.6 |
 | `sync.abort` | C→A | abandon a transaction before apply |
@@ -207,8 +208,10 @@ Policy per transaction:
 1. `sync.begin {workspaceId, leaseId, baseGeneration, policy}` → `{txnId}`.
    `baseGeneration` must equal the current generation, else `GENERATION_MISMATCH`.
 2. `sync.entries {txnId, entries, more}` — zero or more pages of at most 5000 entries.
-3. `sync.plan {txnId}` → `{planDigest, changes:{add,update,delete,unchanged}, neededBlobs:[digest…]}`.
-   The agent computes the diff against the last committed manifest.
+3. `sync.plan {txnId}` → `{planDigest, changes:<count>, needed:<count>}`. The agent computes
+   the diff against the last committed manifest. Lists are paged (a 200k-file plan would not fit
+   in a bounded control frame): `sync.planPage {txnId, kind:"changes"|"needed", offset, limit}`
+   → `{items, more}` with `limit` capped at 5000.
 4. For every needed blob: `blob.put {txnId, digest, size}` → `{streamId}`; DATA frames; the agent
    verifies the digest and size and stores it in the content-addressed store. A mismatch is
    `BLOB_CORRUPT`; the transaction is aborted.

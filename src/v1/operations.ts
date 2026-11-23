@@ -73,6 +73,25 @@ export interface SyncSummary {
   readonly manifestDigest?: string;
 }
 
+async function fetchPlanPages(
+  client: AgentClient,
+  txnId: string,
+  kind: 'changes' | 'needed',
+): Promise<unknown[]> {
+  const items: unknown[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = (await client.request('sync.planPage', { txnId, kind, offset, limit: 5000 })) as {
+      items: unknown[];
+      more: boolean;
+    };
+    items.push(...page.items);
+    if (!page.more) break;
+    offset += page.items.length;
+  }
+  return items;
+}
+
 export async function syncWorkspace(
   client: AgentClient,
   matcher: { matches(relPath: string, isDir: boolean): boolean },
@@ -111,16 +130,18 @@ export async function syncWorkspace(
     }
     const plan = (await client.request('sync.plan', { txnId })) as {
       planDigest: string;
-      changes: { action: string; path: string }[];
-      needed: string[];
+      changes: number;
+      needed: number;
     };
+    const changes = (await fetchPlanPages(client, txnId, 'changes')) as { action: string; path: string }[];
+    const needed = (await fetchPlanPages(client, txnId, 'needed')) as string[];
 
     if (options.mode === 'plan') {
       await client.request('sync.abort', { txnId });
-      return plan;
+      return { planDigest: plan.planDigest, changes, needed };
     }
 
-    for (const digest of plan.needed) {
+    for (const digest of needed) {
       const blob = blobs.get(digest);
       if (!blob) throw new AgentError('BLOB_MISSING', `no local file for ${digest}`);
       const put = (await client.request('blob.put', { txnId, digest, size: blob.size })) as { streamId: number };
@@ -135,7 +156,7 @@ export async function syncWorkspace(
       generation: number;
       manifestDigest: string;
     };
-    return { ...plan, generation: committed.generation, manifestDigest: committed.manifestDigest };
+    return { planDigest: plan.planDigest, changes, needed, generation: committed.generation, manifestDigest: committed.manifestDigest };
   } finally {
     if (txnId) {
       try { await client.request('sync.abort', { txnId }); } catch { /* committed or already aborted */ }

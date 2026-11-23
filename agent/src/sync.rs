@@ -100,7 +100,10 @@ pub fn add_entries(
             return Err("RESOURCE_EXHAUSTED manifest exceeds 500000 entries".into());
         }
     }
-    persist(ws, record)
+    // Entries are journaled once at plan time. Persisting the accumulated manifest after every
+    // page would rewrite megabytes per request and turn a 200k-file sync into gigabytes of IO.
+    let _ = ws;
+    Ok(())
 }
 
 pub struct PlanResult {
@@ -669,7 +672,10 @@ mod symlink_tests {
         add_entries(&mut txn, vec![entry], &ws).unwrap();
         let planned = plan(&mut txn, &ws).unwrap();
         commit(&mut txn, &mut ws, &planned.plan_digest).unwrap();
-        assert_eq!(fs::read_link(root.join("link")).unwrap().to_string_lossy(), "target");
+        assert_eq!(
+            fs::read_link(root.join("link")).unwrap().to_string_lossy(),
+            "target"
+        );
 
         // A file below a symlinked directory must be refused, never followed.
         let mut txn2 = begin(&ws, Policy::default(), 1, "t2").unwrap();

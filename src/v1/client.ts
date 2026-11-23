@@ -47,7 +47,7 @@ export class AgentClient {
     this.info = info;
     this.transport.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
     this.transport.stdout.on('end', () => this.failAll(new AgentError('INVALID_FRAME', 'agent closed the connection')));
-    this.transport.stderr.on('data', () => { /* diagnostics only; surfaced on failure by the caller */ });
+    this.transport.stderr.on('data', (chunk: Buffer) => { if (process.env.FLEET_DEBUG) process.stderr.write(chunk); });
   }
 
   static async connect(transport: AgentTransport, options: { capabilities?: string[]; timeoutMs?: number } = {}): Promise<AgentClient> {

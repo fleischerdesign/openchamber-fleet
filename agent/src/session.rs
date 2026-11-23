@@ -153,6 +153,7 @@ impl Session {
             "sync.begin" => self.sync_begin(&request),
             "sync.entries" => self.sync_entries(&request),
             "sync.plan" => self.sync_plan(&request),
+            "sync.planPage" => self.sync_plan_page(&request),
             "sync.commit" => self.sync_commit(&request),
             "sync.abort" => self.sync_abort(&request),
             "sync.recover" => self.sync_recover(&request),
@@ -443,20 +444,66 @@ impl Session {
         };
         match sync::plan(record, workspace) {
             Ok(result) => {
-                let changes: Vec<Value> = result
-                    .changes
-                    .iter()
-                    .map(|change| json!({"action": change.action, "path": change.path}))
-                    .collect();
+                // Plan lists can exceed a control frame; they are paged via sync.planPage.
                 let response = json!({
                     "planDigest": result.plan_digest,
-                    "changes": changes,
-                    "needed": result.needed,
+                    "changes": result.changes.len(),
+                    "needed": result.needed.len(),
                 });
                 Action::Reply(rpc::response(&request.id, response))
             }
             Err(error) => Action::Reply(error_response(&request.id, &error)),
         }
+    }
+
+    fn sync_plan_page(&mut self, request: &Request) -> Action {
+        let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
+            return usage_error(request, "txnId is required");
+        };
+        let Some(kind) = request.params.get("kind").and_then(Value::as_str) else {
+            return usage_error(request, "kind is required");
+        };
+        let offset = request
+            .params
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let limit = request
+            .params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(5000)
+            .min(5000) as usize;
+        let Some(record) = self.transactions.get(txn_id) else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
+        };
+        let (items, total) = match kind {
+            "changes" => (
+                record
+                    .changes
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|change| json!({"action": change.action, "path": change.path}))
+                    .collect::<Vec<_>>(),
+                record.changes.len(),
+            ),
+            "needed" => (
+                record
+                    .needed
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|digest| json!(digest))
+                    .collect::<Vec<_>>(),
+                record.needed.len(),
+            ),
+            _ => return usage_error(request, "kind must be changes or needed"),
+        };
+        Action::Reply(rpc::response(
+            &request.id,
+            json!({"items": items, "more": offset + items.len() < total}),
+        ))
     }
 
     fn blob_put(&mut self, request: &Request) -> Action {
@@ -1291,7 +1338,7 @@ mod tests {
                 .to_string(),
         );
         let plan_digest = plan["result"]["planDigest"].as_str().unwrap().to_string();
-        assert_eq!(plan["result"]["needed"].as_array().unwrap().len(), 1);
+        assert_eq!(plan["result"]["needed"], 1);
 
         let put = reply(
             &mut session,

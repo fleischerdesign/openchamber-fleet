@@ -29,6 +29,9 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Config validation | — | `test/unit/config.test.js` |
 | Path validation | — | `test/unit/paths.test.js` |
 | Plugin surface | — | `test/unit/plugin.test.js` |
+| 200k benchmark | FAIL-04 | `bench/workspace.mjs`, see `docs/benchmarks.md` |
+| Large artifact (5 MiB, multi-frame) | — | `test/v1/protocol.test.js` |
+| Symlink apply, symlinked parent refused | SYNC-10 | `agent/src/sync.rs` symlink tests |
 
 ## Planned (the failure suite)
 
@@ -38,7 +41,7 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | SYNC-09, SYNC-10 | Two controllers mutating, symlink apply |
 | EXEC-05, EXEC-07, EXEC-08 | Environment isolation test, disconnect cancel, crash-unknown |
 | ART-03, CTL-01, CTL-03 | Artifact refusals, digest parity fixture, SSH argv unit test |
-| FAIL-04, FAIL-05 | 200k benchmark, traversal attacks |
+| FAIL-05 | traversal attacks (partial: path validation) |
 
 ## Rule
 
