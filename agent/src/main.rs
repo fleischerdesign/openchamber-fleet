@@ -5,8 +5,11 @@
 
 mod frame;
 mod identity;
+mod model;
 mod rpc;
 mod session;
+mod sync;
+mod workspace;
 
 use std::process::ExitCode;
 
