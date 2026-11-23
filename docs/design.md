@@ -139,7 +139,10 @@ deliberate debugging; it is never the default.
 5. Record `{revision, planDigest, appliedAt}` only after the empty verify.
 
 Deletion is scoped to the replica root by rsync itself. `--delete-excluded` is never passed: a cache
-directory must survive a sync even when the canonical tree has no such directory.
+directory must survive a sync even when the canonical tree has no such directory. Before any
+transfer, the resolved root is checked: `/`, a system directory, the node home or any path with
+fewer than two segments is refused with `config-invalid`, because `--delete` against a mistyped root
+must fail before it removes anything.
 
 ## 8. Exec semantics
 

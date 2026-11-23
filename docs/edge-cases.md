@@ -52,6 +52,7 @@ Test prefixes: `U` unit, `P` property, `I` integration (real rsync against a fak
 | SYNC-39 | Excessive excludes (1000) | argv stays under ARG_MAX; chunked if needed | U-09 |
 | SYNC-40 | `.git` present | included by default; excluded only if configured | U-10 |
 | SYNC-41 | Same-size edit within five seconds of apply | racy guard uses `--checksum` for transfer and verify | I-28 |
+| SYNC-42 | Replica root is `/`, a system directory or the home directory | refused before any transfer, `config-invalid` | U-80, I-50 |
 
 ## Exec
 

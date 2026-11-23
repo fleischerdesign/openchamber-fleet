@@ -126,3 +126,13 @@ describe('state permissions (SEC-07)', () => {
     assert.equal(fs.statSync(path.join(stateDir, 'state.json')).mode & 0o777, 0o600);
   });
 });
+
+describe('unsafe replica roots (SYNC-42)', () => {
+  test('apply refuses a root that would delete the node home', async () => {
+    const host = { ...config.hosts.node, root: '/' };
+    await assert.rejects(
+      applyWorkspace(config, host),
+      (error) => error.code === 'config-invalid',
+    );
+  });
+});

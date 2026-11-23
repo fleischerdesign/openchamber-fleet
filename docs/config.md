@@ -43,7 +43,7 @@ protection.
 |---|---|---|---|
 | `ssh` | string `user@host` | yes | target; validated against `^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$` |
 | `port` | integer 1–65535 | no, default 22 | SSH port |
-| `root` | string, absolute or `~/…` | no | replica root; default `~/.cache/openchamber-fleet/<name>` |
+| `root` | string, absolute or `~/…` | no | replica root; default `~/.cache/openchamber-fleet/<name>`; `/`, system directories and the home directory are refused |
 
 A host alias is a local label. Renaming it changes state keys; nothing else.
 

@@ -6,7 +6,7 @@ import { computeRevision, walkTree } from './manifest.js';
 import { parseItemized, planDigest, rsyncArgs, runRsync } from './plan.js';
 import type { PlanEntry, PlanResult } from './plan.js';
 import { quoteShell } from './paths.js';
-import { assertControlSuccess, classifyFailure, isTransportFailure, resolveRemotePath, runRemote } from './ssh.js';
+import { assertControlSuccess, classifyFailure, isTransportFailure, remoteHome, resolveRemotePath, runRemote } from './ssh.js';
 import { recordWorkspace } from './state.js';
 
 export interface SyncOptions {
@@ -17,6 +17,22 @@ export interface ApplyResult {
   readonly plan: PlanResult;
   readonly applied: number;
   readonly verifiedAt: string;
+}
+
+const UNSAFE_ROOTS = new Set(['/', '/home', '/root', '/usr', '/etc', '/var', '/srv', '/opt', '/bin', '/lib', '/lib64', '/nix', '/boot', '/tmp']);
+
+/**
+ * Refuse a replica root whose deletion would be destructive. rsync runs with --delete, so a typo
+ * in fleet.json must fail before anything is touched.
+ */
+export function assertSafeRemoteRoot(resolved: string, home: string): void {
+  const root = resolved.replace(/\/+$/, '') || '/';
+  const segments = root.split('/').filter(Boolean);
+  if (UNSAFE_ROOTS.has(root) || segments.length < 2 || root === home.replace(/\/+$/, '')) {
+    throw new FleetError('config-invalid', `replica root ${JSON.stringify(resolved)} is too broad for --delete`, {
+      hint: 'use a dedicated directory such as ~/.cache/openchamber-fleet/<workspace>',
+    });
+  }
 }
 
 export function workspaceKey(config: WorkspaceConfig, host: HostConfig): string {
@@ -39,6 +55,7 @@ export async function planWorkspace(
 ): Promise<PlanResult> {
   const revision = computeRevision(config.dir, config.excludeMatcher);
   const destination = await resolveRemotePath(host, host.root);
+  assertSafeRemoteRoot(destination, await remoteHome(host));
   const result = await runRsync(rsyncArgs({
     host,
     source: config.dir,
@@ -73,6 +90,7 @@ export async function applyWorkspace(
   const racy = entries.some((entry) => entry.type === 'file' && Date.now() - entry.mtimeMs < 5000);
   const checksum = options.checksum === true || racy;
   const destination = await resolveRemotePath(host, host.root);
+  assertSafeRemoteRoot(destination, await remoteHome(host));
 
   const prepared = await runRemote(host, `mkdir -p ${quoteShell(destination)}`, { timeoutMs: 15_000 });
   assertControlSuccess(prepared);
