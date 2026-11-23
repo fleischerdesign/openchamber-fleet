@@ -2,21 +2,42 @@
 
 import { FleetError } from './errors.js';
 import type { HostConfig, WorkspaceConfig } from './config.js';
+import { compileExcludes } from './config.js';
 import { computeRevision, walkTree } from './manifest.js';
 import { parseItemized, planDigest, rsyncArgs, runRsync } from './plan.js';
 import type { PlanEntry, PlanResult } from './plan.js';
 import { quoteShell } from './paths.js';
 import { assertControlSuccess, classifyFailure, isTransportFailure, remoteHome, resolveRemotePath, runRemote } from './ssh.js';
-import { recordWorkspace } from './state.js';
+import { readState, recordWorkspace } from './state.js';
 
 export interface SyncOptions {
   readonly checksum?: boolean;
+  /**
+   * Additional excludes for this call, unioned with `fleet.json`. The tool never guesses a project
+   * type; the agent knows the tree and names what is generated.
+   */
+  readonly excludes?: readonly string[];
 }
 
 export interface ApplyResult {
   readonly plan: PlanResult;
   readonly applied: number;
   readonly verifiedAt: string;
+  readonly excludes: string[];
+}
+
+export function workspaceKey(config: WorkspaceConfig, host: HostConfig): string {
+  return `${host.alias}--${config.name}`;
+}
+
+export function effectiveExcludes(config: WorkspaceConfig, extra: readonly string[] = []): string[] {
+  return [...new Set([...config.excludes, ...extra])];
+}
+
+/** The excludes the replica was last synced with. `exec` verifies against those, not the config. */
+export function recordedExcludes(config: WorkspaceConfig, host: HostConfig): string[] | null {
+  const entry = readState().workspaces[workspaceKey(config, host)];
+  return Array.isArray(entry?.excludes) ? entry.excludes : null;
 }
 
 const UNSAFE_ROOTS = new Set(['/', '/home', '/root', '/usr', '/etc', '/var', '/srv', '/opt', '/bin', '/lib', '/lib64', '/nix', '/boot', '/tmp']);
@@ -35,10 +56,6 @@ export function assertSafeRemoteRoot(resolved: string, home: string): void {
   }
 }
 
-export function workspaceKey(config: WorkspaceConfig, host: HostConfig): string {
-  return `${host.alias}--${config.name}`;
-}
-
 function assertRsync(result: { code: number | null; stderr: string }): void {
   if (result.code === 0) return;
   if (result.code === 255 || isTransportFailure(result.stderr)) throw classifyFailure(result.stderr, result.code);
@@ -53,14 +70,17 @@ export async function planWorkspace(
   host: HostConfig,
   options: SyncOptions = {},
 ): Promise<PlanResult> {
-  const revision = computeRevision(config.dir, config.excludeMatcher);
+  // A plan without explicit excludes describes the replica as it was last synced; otherwise it
+  // previews exactly the call it was given.
+  const excludes = options.excludes ?? recordedExcludes(config, host) ?? config.excludes;
+  const revision = computeRevision(config.dir, compileExcludes(excludes));
   const destination = await resolveRemotePath(host, host.root);
   assertSafeRemoteRoot(destination, await remoteHome(host));
   const result = await runRsync(rsyncArgs({
     host,
     source: config.dir,
     destination,
-    excludes: config.excludes,
+    excludes,
     dryRun: true,
     checksum: options.checksum,
   }));
@@ -74,7 +94,8 @@ export async function verifyWorkspace(
   host: HostConfig,
   options: SyncOptions = {},
 ): Promise<{ revision: string; entries: PlanEntry[] }> {
-  const plan = await planWorkspace(config, host, options);
+  const excludes = options.excludes ?? recordedExcludes(config, host) ?? config.excludes;
+  const plan = await planWorkspace(config, host, { ...options, excludes });
   return { revision: plan.revision, entries: plan.entries };
 }
 
@@ -83,8 +104,9 @@ export async function applyWorkspace(
   host: HostConfig,
   options: SyncOptions = {},
 ): Promise<ApplyResult> {
-  const entries = walkTree(config.dir, config.excludeMatcher);
-  const revision = computeRevision(config.dir, config.excludeMatcher);
+  const excludes = effectiveExcludes(config, options.excludes);
+  const entries = walkTree(config.dir, compileExcludes(excludes));
+  const revision = computeRevision(config.dir, compileExcludes(excludes));
   // rsync compares whole seconds; a same-size edit inside that window would be skipped. While a
   // tree is being edited, pay for content hashes instead of trusting the clock.
   const racy = entries.some((entry) => entry.type === 'file' && Date.now() - entry.mtimeMs < 5000);
@@ -99,7 +121,7 @@ export async function applyWorkspace(
     host,
     source: config.dir,
     destination,
-    excludes: config.excludes,
+    excludes,
     dryRun: false,
     checksum,
   }));
@@ -110,7 +132,7 @@ export async function applyWorkspace(
     host,
     source: config.dir,
     destination,
-    excludes: config.excludes,
+    excludes,
     dryRun: true,
     checksum,
   }));
@@ -130,10 +152,12 @@ export async function applyWorkspace(
     planDigest: digest,
     appliedAt: verifiedAt,
     verifiedAt,
+    excludes,
   });
   return {
     plan: { revision, entries: appliedEntries, digest },
     applied: appliedEntries.length,
     verifiedAt,
+    excludes,
   };
 }

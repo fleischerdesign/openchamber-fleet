@@ -9,7 +9,7 @@ import type { HostConfig, WorkspaceConfig } from '../config.js';
 import { FleetError, formatError } from '../errors.js';
 import { cancelRun, execRemote } from '../exec.js';
 import { fetchArtifacts } from '../fetch.js';
-import { buildOutputHints } from '../presets.js';
+import { buildOutputHints } from '../hints.js';
 import { statusReport } from '../status.js';
 import { applyWorkspace, planWorkspace, verifyWorkspace } from '../sync.js';
 
@@ -87,6 +87,11 @@ export default {
             host: { type: 'string' },
             mode: { type: 'string', enum: ['plan', 'apply', 'verify'] },
             content: { type: 'boolean', description: 'Compare file contents, not just size and mtime' },
+            excludes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Additional excludes for this call, e.g. ["dist/", "target/"]',
+            },
           },
           required: ['host', 'mode'],
           additionalProperties: false,
@@ -97,12 +102,13 @@ export default {
             const host = hostOf(config, input);
             const mode = input.mode;
             const checksum = input.content === true;
+            const excludes = Array.isArray(input.excludes) ? input.excludes.map(String) : undefined;
             if (mode === 'apply') {
-              const result = await applyWorkspace(config, host, { checksum });
+              const result = await applyWorkspace(config, host, { checksum, excludes });
               return { content: `applied ${result.applied} change(s) to ${host.alias}\n${result.plan.revision}` };
             }
             if (mode === 'verify') {
-              const result = await verifyWorkspace(config, host, { checksum });
+              const result = await verifyWorkspace(config, host, { checksum, excludes });
               return {
                 content: result.entries.length === 0
                   ? `${host.alias}: replica matches ${result.revision}`
@@ -110,7 +116,7 @@ export default {
               };
             }
             if (mode !== 'plan') throw new FleetError('usage', 'mode must be plan, apply or verify');
-            const plan = await planWorkspace(config, host, { checksum });
+            const plan = await planWorkspace(config, host, { checksum, excludes });
             const hints = buildOutputHints(plan.entries);
             const note = hints.length > 0
               ? `\nnote: generated output would be replicated: ${hints.join(', ')} — add it to excludes if a build produces it`

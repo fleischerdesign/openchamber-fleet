@@ -52,8 +52,9 @@ fleet fetch --host workstation --dest ./artifacts -- target/debug/my-binary
 
 The same three steps are exposed to an agent as `fleet_sync`, `fleet_exec` and `fleet_fetch`.
 
-`fleet init` detects a project kind (node, rust, python, nix) from marker files and writes the
-matching excludes; `--preset` overrides the detection.
+Excludes are never guessed from the project type. A plan names generated output it is about to
+replicate; the caller passes `--exclude dist/,build/` (or `excludes` on the tool call), and that set
+is recorded with the replica so later verifies use it.
 
 ## Guarantees
 

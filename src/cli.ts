@@ -9,7 +9,7 @@ import { doctor, formatDoctor } from './doctor.js';
 import { cancelRun, execRemote } from './exec.js';
 import { fetchArtifacts } from './fetch.js';
 import { quoteArgv } from './paths.js';
-import { PRESET_NAMES, buildOutputHints, detectPresets, excludesFor } from './presets.js';
+import { buildOutputHints } from './hints.js';
 import { readRun, runLogPath } from './state.js';
 import { statusReport } from './status.js';
 import { applyWorkspace, planWorkspace, verifyWorkspace } from './sync.js';
@@ -106,17 +106,9 @@ function cmdInit(parsed: Parsed): void {
   const entry: Record<string, unknown> = { ssh };
   if (typeof parsed.flags.get('port') === 'string') entry.port = Number(parsed.flags.get('port'));
   if (typeof parsed.flags.get('root') === 'string') entry.root = String(parsed.flags.get('root'));
-  const requested = typeof parsed.flags.get('preset') === 'string'
-    ? String(parsed.flags.get('preset')).split(',').map((value) => value.trim()).filter(Boolean)
-    : null;
-  const presets = requested ?? detectPresets(process.cwd());
-  const unknown = presets.filter((preset) => !PRESET_NAMES.includes(preset));
-  if (unknown.length > 0) {
-    throw new FleetError('usage', `unknown preset(s): ${unknown.join(', ')}`, { known: PRESET_NAMES.join(', ') });
-  }
-  const config = { name, hosts: { [host]: entry }, excludes: excludesFor(presets), env: {} };
+  const config = { name, hosts: { [host]: entry }, excludes: [], env: {} };
   fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o644 });
-  process.stdout.write(`wrote ${file} (presets: ${presets.join(', ') || 'none'})\n`);
+  process.stdout.write(`wrote ${file}\n`);
 }
 
 async function cmdStatus(parsed: Parsed): Promise<void> {
@@ -147,14 +139,18 @@ async function cmdSync(parsed: Parsed): Promise<void> {
   const config = configOf(parsed.flags);
   const host = hostOf(config, parsed.flags);
   const checksum = parsed.flags.has('content');
+  const excludeFlag = parsed.flags.get('exclude');
+  const excludes = typeof excludeFlag === 'string'
+    ? excludeFlag.split(',').map((value) => value.trim()).filter(Boolean)
+    : undefined;
   if (parsed.flags.has('apply')) {
-    const result = await applyWorkspace(config, host, { checksum });
+    const result = await applyWorkspace(config, host, { checksum, excludes });
     process.stdout.write(`applied ${result.applied} changes\n`);
     process.stdout.write(`revision ${result.plan.revision}\n`);
     return;
   }
   if (parsed.flags.has('verify')) {
-    const result = await verifyWorkspace(config, host, { checksum });
+    const result = await verifyWorkspace(config, host, { checksum, excludes });
     if (result.entries.length === 0) {
       process.stdout.write(`verified: replica matches ${result.revision}\n`);
       return;
@@ -164,7 +160,7 @@ async function cmdSync(parsed: Parsed): Promise<void> {
     process.exitCode = 6;
     return;
   }
-  const plan = await planWorkspace(config, host, { checksum });
+  const plan = await planWorkspace(config, host, { checksum, excludes });
   process.stdout.write(`plan ${plan.entries.length} change(s) ${plan.digest}\n`);
   for (const entry of plan.entries.slice(0, 50)) process.stdout.write(`  ${entry.action.padEnd(11)} ${entry.path}\n`);
   const hints = buildOutputHints(plan.entries);
@@ -237,9 +233,9 @@ function printHelp(): void {
     'fleet — replicate a workspace to a node and run one command there',
     '',
     'usage:',
-    '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--preset node,rust] [--force]',
+    '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]',
     '  fleet status [--check] [--json]',
-    '  fleet sync --host <alias> (--plan | --apply | --verify) [--content]',
+    '  fleet sync --host <alias> (--plan | --apply | --verify) [--content] [--exclude pat,pat]',
     '  fleet exec --host <alias> [--timeout SEC] [--allow-stale] [--json] -- <command…>',
     '  fleet exec --host <alias> --shell "<command string>"',
     '  fleet fetch --host <alias> --dest <dir> [--overwrite] [--verify] -- <path…>',

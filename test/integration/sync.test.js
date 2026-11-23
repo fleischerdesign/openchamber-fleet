@@ -107,3 +107,18 @@ describe('sync against a real rsync (SYNC-01…SYNC-05, SYNC-12…SYNC-21)', () 
     assert.equal(readFile(spaces.replica, 'src/app.txt'), 'two\n');
   });
 });
+
+describe('per-call excludes (SYNC-43)', () => {
+  test('are unioned with the config, recorded, and used by the next verify', async () => {
+    writeFile(spaces.source, 'dist/app.js', 'built\n');
+    writeFile(spaces.source, 'build/report.txt', 'report\n');
+    const result = await applyWorkspace(config, host, { excludes: ['dist/'] });
+    assert.equal(result.excludes.includes('dist/'), true);
+    assert.equal(exists(spaces.replica, 'dist/app.js'), false);
+    assert.equal(exists(spaces.replica, 'build/report.txt'), true);
+    const verified = await verifyWorkspace(config, host);
+    assert.deepEqual(verified.entries, []);
+    const plan = await planWorkspace(config, host);
+    assert.equal(plan.entries.some((entry) => entry.path.startsWith('dist/')), false);
+  });
+});

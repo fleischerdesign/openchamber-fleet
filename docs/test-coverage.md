@@ -12,7 +12,7 @@ either covered by a named test, explicitly planned, or moved to the non-goals in
 | Exclude semantics | SYNC-35…SYNC-38 | `test/unit/config.test.js` |
 | Plan parsing, digest stability | SYNC-01…SYNC-05 (classification) | `test/unit/plan.test.js` |
 | State, atomic writes, leases | STATE-01…STATE-06 | `test/unit/state.test.js` |
-| Sync against real rsync | SYNC-01…SYNC-06, 08, 12, 15…18, 21, 26, 27, 30, 34 | `test/integration/sync.test.js` |
+| Sync against real rsync | SYNC-01…SYNC-06, 08, 12, 15…18, 21, 26, 27, 30, 34, 43 | `test/integration/sync.test.js` |
 | Exec, environment, timeout, lease | EXEC-01, 02, 03, 06, 07, 08, 11, 12, 13, 18, 20, 23 | `test/integration/exec.test.js` |
 | Transport and sync failures | SEC-01…SEC-03, SYNC-26, SYNC-27, STATE-07 | `test/integration/failures.test.js` |
 | Fetch safety | FETCH-03…FETCH-06, 07, 09, SEC-04 | `test/integration/failures.test.js` |

@@ -8,7 +8,7 @@ names a defect rather than an HTTP status.
 ```
 fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--preset node,rust] [--force]
 fleet status [--json] [--check]
-fleet sync --host <alias> (--plan | --apply | --verify) [--content] [--allow-delete]
+fleet sync --host <alias> (--plan | --apply | --verify) [--content] [--exclude pat,pat] [--allow-delete]
 fleet exec --host <alias> [--timeout SECONDS] [--allow-stale] [--json] -- <command…>
 fleet exec --host <alias> --shell '<command string>' [--timeout SECONDS]
 fleet fetch --host <alias> --dest <dir> [--overwrite] [--verify] -- <path…>
@@ -52,6 +52,9 @@ verified: replica matches revision sha256:41ab…
 
 `--plan` never writes. `--apply` writes and then verifies. A verify that finds changes fails with
 `sync-not-converged` and does **not** mark the replica current.
+
+`--exclude` adds patterns to the configured excludes for this call; the effective set is recorded with
+the replica. A plan without `--exclude` describes the replica as it was last synced.
 
 `--content` makes both plan and verify compare file contents (`rsync --checksum`), which is slower
 and the only way to catch a same-size, same-mtime change.

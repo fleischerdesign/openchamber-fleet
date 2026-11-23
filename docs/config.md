@@ -49,11 +49,10 @@ A host alias is a local label. Renaming it changes state keys; nothing else.
 
 ## Excludes
 
-`fleet init` writes a starting set from the detected project kind: `node` excludes
-`node_modules/`, `dist/` and the framework caches; `rust` excludes `target/`; `python` excludes
-`.venv/`, `__pycache__/` and friends; `nix` excludes `result*`. The list is a starting point, not a
-policy: edit it per project, and `fleet sync --plan` names generated output that is about to be
-replicated.
+`excludes` is the project baseline. A sync call may add patterns with `--exclude` (CLI) or
+`excludes` (tool); the union is used for that transfer and recorded with the replica, so a later
+`verify` and `exec` judge the replica against the set it was synced with. Nothing is guessed from
+the project type: a plan names generated output that would be replicated, and the caller decides.
 
 Patterns use rsync's interpretation for the subset we support, and the same patterns are passed to
 rsync verbatim:

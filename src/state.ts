@@ -10,6 +10,7 @@ export const LEASE_TTL_MS = 30 * 60 * 1000;
 
 export interface WorkspaceState {
   revision?: string;
+  excludes?: string[];
   planDigest?: string;
   appliedAt?: string;
   verifiedAt?: string;
