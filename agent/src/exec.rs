@@ -162,7 +162,7 @@ pub fn spawn(request: SpawnRequest) -> Result<Job, String> {
     }
     command.env_clear();
     command.env("HOME", std::env::var("HOME").unwrap_or_default());
-    command.env("PATH", DEFAULT_PATH);
+    command.env("PATH", std::env::var("PATH").unwrap_or_else(|_| DEFAULT_PATH.to_string()));
     command.env("LANG", "C.UTF-8");
     command.env("TZ", "UTC");
     for (key, value) in &request.env {
