@@ -331,14 +331,10 @@ Codes: `INVALID_FRAME`, `INVALID_REQUEST`, `NOT_INITIALIZED`, `UNSUPPORTED_PROTO
 
 ## 13. Conformance
 
-An implementation is conformant when it passes every fixture in `protocol/fixtures/`:
+Conformance is executable. The agent suite is `cargo test --manifest-path agent/Cargo.toml`; the
+controller suite is `npm test` with `FLEET_AGENT_BIN` pointing at the built agent binary. Together
+they cover framing, handshake, workspaces, leases, sync, recovery, execution and artifacts against
+the real agent (see `docs/test-coverage.md`).
 
-- `handshake.json` — happy path, version mismatch, capability mismatch;
-- `workspace.json` — open, lease, busy, expiry;
-- `sync.json` — plan, commit, abort, generation mismatch, recovery;
-- `exec.json` — stdout/stderr, exit code, timeout, cancel, disconnect;
-- `artifact.json` — open, digest, unsafe path;
-- `errors.json` — every code, `retryable` flag.
-
-Fixtures are data, not prose: request/response sequences with expected frames. The Rust agent and
-the TypeScript controller both consume them.
+`protocol/fixtures/handshake.json` is a readable example of the frame sequence; it is not yet
+consumed by a data-driven runner. A language-agnostic fixture runner is future work, not a claim.

@@ -65,6 +65,7 @@ The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `flee
 
 - Controller: Node.js ≥ 22.
 - Node: `ssh` and the `fleet-agent` binary. Nothing else — no rsync, no bash wrapper, no service.
+- Linux is tested; macOS is expected to work (Unix APIs only) but has no CI job yet; Windows is unsupported.
 - SSH key authentication, host keys verified (`StrictHostKeyChecking=yes`).
 
 ## Status
