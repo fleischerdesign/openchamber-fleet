@@ -1,0 +1,206 @@
+/** Protocol client: requests, notifications, credit-controlled streams. */
+
+import { FrameDecoder, MAX_DATA, decodeData, encodeControl, encodeData } from './frame.js';
+import { AgentError } from './errors.js';
+import type { AgentTransport } from './transport.js';
+
+export interface AgentInfo {
+  protocol: { major: number; minor: number };
+  agent: { version: string; installationId: string; os: string; arch: string; pid?: number };
+  capabilities: Record<string, number>;
+  limits: { maxControl: number; maxData: number; maxStreams: number; maxManifestEntries?: number };
+}
+
+interface Pending {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+interface IncomingStream {
+  chunks: Buffer[];
+  bytes: number;
+  nextSeq: bigint;
+  resolve: (value: Buffer) => void;
+  reject: (error: Error) => void;
+}
+
+export interface CollectOptions {
+  readonly initialCredit?: number;
+  readonly timeoutMs?: number;
+}
+
+const DEFAULT_TIMEOUT = 30_000;
+const DEFAULT_CREDIT = 4 * 1024 * 1024;
+
+export class AgentClient {
+  private readonly transport: AgentTransport;
+  private readonly decoder = new FrameDecoder();
+  private readonly pending = new Map<string, Pending>();
+  private readonly streams = new Map<number, IncomingStream>();
+  private nextId = 1;
+  private closed = false;
+  readonly info: AgentInfo;
+
+  private constructor(transport: AgentTransport, info: AgentInfo) {
+    this.transport = transport;
+    this.info = info;
+    this.transport.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
+    this.transport.stdout.on('end', () => this.failAll(new AgentError('INVALID_FRAME', 'agent closed the connection')));
+    this.transport.stderr.on('data', () => { /* diagnostics only; surfaced on failure by the caller */ });
+  }
+
+  static async connect(transport: AgentTransport, options: { capabilities?: string[]; timeoutMs?: number } = {}): Promise<AgentClient> {
+    const provisional = new AgentClient(transport, {
+      protocol: { major: 0, minor: 0 },
+      agent: { version: 'unknown', installationId: '', os: '', arch: '' },
+      capabilities: {},
+      limits: { maxControl: 0, maxData: 0, maxStreams: 0 },
+    });
+    const result = (await provisional.request('session.initialize', {
+      protocol: { major: 1, minor: 0 },
+      client: { name: 'fleet', version: '0.2.0', instance: `${process.pid}-${Date.now()}` },
+      capabilities: options.capabilities ?? [],
+    }, options.timeoutMs ?? 15_000)) as AgentInfo;
+    if (!result?.protocol || result.protocol.major !== 1) {
+      throw new AgentError('UNSUPPORTED_PROTOCOL', 'agent did not accept protocol major 1');
+    }
+    return new AgentClient(transport, result);
+  }
+
+  async request(method: string, params: unknown, timeoutMs = DEFAULT_TIMEOUT): Promise<unknown> {
+    if (this.closed) throw new AgentError('INVALID_FRAME', 'agent connection is closed');
+    const id = String(this.nextId++);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new AgentError('OPERATION_UNKNOWN', `${method} timed out after ${timeoutMs}ms`, true));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      this.transport.stdin.write(encodeControl({ jsonrpc: '2.0', id, method, params }));
+    });
+  }
+
+  /** Register interest in an output stream and grant initial credit. */
+  collect(streamId: number, options: CollectOptions = {}): Promise<Buffer> {
+    if (this.streams.has(streamId)) throw new Error(`stream ${streamId} is already collected`);
+    return new Promise<Buffer>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.streams.delete(streamId);
+        reject(new AgentError('OPERATION_UNKNOWN', `stream ${streamId} did not end`, true));
+      }, options.timeoutMs ?? 120_000);
+      this.streams.set(streamId, { chunks: [], bytes: 0, nextSeq: 0n, resolve: (value) => { clearTimeout(timer); resolve(value); }, reject });
+      void this.credit(streamId, options.initialCredit ?? DEFAULT_CREDIT);
+    });
+  }
+
+  async credit(streamId: number, bytes: number): Promise<void> {
+    await this.request('stream.credit', { streamId, bytes });
+  }
+
+  /** Upload bytes as DATA frames, then end the stream. */
+  async upload(streamId: number, data: Buffer): Promise<unknown> {
+    let seq = 0n;
+    for (let offset = 0; offset < data.length; offset += MAX_DATA) {
+      const chunk = data.subarray(offset, offset + MAX_DATA);
+      this.transport.stdin.write(encodeData(streamId, seq, chunk));
+      seq += 1n;
+    }
+    return this.request('stream.end', { streamId });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new AgentError('OPERATION_UNKNOWN', 'connection closed'));
+    }
+    this.pending.clear();
+    for (const stream of this.streams.values()) {
+      stream.reject(new AgentError('OPERATION_UNKNOWN', 'connection closed'));
+    }
+    this.streams.clear();
+    this.transport.kill();
+  }
+
+  private onData(chunk: Buffer): void {
+    let frames;
+    try {
+      frames = this.decoder.feed(chunk);
+    } catch (error) {
+      this.failAll(error instanceof Error ? error : new Error(String(error)));
+      this.transport.kill();
+      return;
+    }
+    for (const frame of frames) {
+      if (frame.kind === 2) {
+        this.onStreamData(frame.payload);
+        continue;
+      }
+      let message;
+      try {
+        message = JSON.parse(frame.payload.toString('utf8'));
+      } catch {
+        this.failAll(new AgentError('INVALID_FRAME', 'agent sent invalid JSON'));
+        return;
+      }
+      this.onControl(message);
+    }
+  }
+
+  private onControl(message: Record<string, unknown>): void {
+    if (typeof message.id === 'string' || typeof message.id === 'number') {
+      const pending = this.pending.get(String(message.id));
+      if (!pending) return;
+      this.pending.delete(String(message.id));
+      clearTimeout(pending.timer);
+      if (message.error) {
+        const error = message.error as { code?: string; message?: string; retryable?: boolean };
+        pending.reject(new AgentError(error.code ?? 'INTERNAL', error.message ?? 'agent error', error.retryable === true));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+    if (message.method === 'stream.end') {
+      const params = message.params as { streamId?: number };
+      const stream = params?.streamId === undefined ? undefined : this.streams.get(params.streamId);
+      if (!stream) return;
+      this.streams.delete(params.streamId as number);
+      stream.resolve(Buffer.concat(stream.chunks));
+    }
+  }
+
+  private onStreamData(payload: Buffer): void {
+    let header;
+    try {
+      header = decodeData(payload);
+    } catch (error) {
+      this.failAll(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    const stream = this.streams.get(header.streamId);
+    if (!stream) return;
+    if (header.seq !== stream.nextSeq) {
+      this.streams.delete(header.streamId);
+      stream.reject(new AgentError('INVALID_FRAME', 'stream sequence gap'));
+      return;
+    }
+    stream.nextSeq += 1n;
+    stream.chunks.push(header.bytes);
+    stream.bytes += header.bytes.length;
+    // Keep the pipe flowing: grant credit as data is consumed.
+    void this.credit(header.streamId, header.bytes.length * 2 + 1024).catch(() => {});
+  }
+
+  private failAll(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+    for (const stream of this.streams.values()) stream.reject(error);
+    this.streams.clear();
+  }
+}

@@ -1,0 +1,93 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, test } from 'node:test';
+import { compileExcludes } from '../../dist/config.js';
+import { connectProcess, execCommand, fetchArtifact, syncWorkspace } from '../../dist/v1/operations.js';
+
+const binary = process.env.FLEET_AGENT_BIN ?? path.resolve('agent/target/debug/fleet-agent');
+const available = fs.existsSync(binary);
+const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-v1-'));
+const source = path.join(base, 'source');
+const replica = path.join(base, 'replica');
+const state = path.join(base, 'state');
+
+process.env.FLEET_AGENT_STATE_DIR = state;
+fs.mkdirSync(source, { recursive: true });
+fs.mkdirSync(state, { recursive: true });
+fs.writeFileSync(path.join(source, 'fleet.json'), JSON.stringify({ name: 'v1-test' }));
+fs.mkdirSync(path.join(source, 'src'), { recursive: true });
+fs.writeFileSync(path.join(source, 'src/app.txt'), 'hello v1\n');
+fs.mkdirSync(path.join(source, 'target'), { recursive: true });
+fs.writeFileSync(path.join(source, 'target/build.bin'), 'excluded\n');
+
+const matcher = compileExcludes(['target/']);
+let client;
+
+before(async () => {
+  if (!available) return;
+  client = await connectProcess(binary);
+});
+after(async () => {
+  client?.close();
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+describe('fleet.agent.v1 controller', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('syncs a workspace over the protocol', async () => {
+    const result = await syncWorkspace(client, matcher, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      excludes: ['target/'],
+      mode: 'apply',
+    });
+    assert.ok(result.changes.some((change) => change.path === 'src/app.txt'));
+    assert.equal(fs.readFileSync(path.join(replica, 'src/app.txt'), 'utf8'), 'hello v1\n');
+    assert.equal(fs.existsSync(path.join(replica, 'target/build.bin')), false);
+
+    const second = await syncWorkspace(client, matcher, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      excludes: ['target/'],
+      mode: 'plan',
+    });
+    assert.deepEqual(second.changes, []);
+  });
+
+  test('executes in the replica and streams output', async () => {
+    const result = await execCommand(client, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      argv: ['sh', '-c', 'cat src/app.txt; printf err >&2; exit 3'],
+      timeoutMs: 30_000,
+    });
+    assert.equal(result.state, 'failed');
+    assert.equal(result.exitCode, 3);
+    assert.equal(result.stdout.toString(), 'hello v1\n');
+    assert.equal(result.stderr.toString(), 'err');
+  });
+
+  test('fetches an artifact with digest verification', async () => {
+    await execCommand(client, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      argv: ['sh', '-c', 'printf artifact > out.txt'],
+      timeoutMs: 30_000,
+    });
+    const dest = path.join(base, 'download');
+    const fetched = await fetchArtifact(client, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      artifact: 'out.txt',
+      dest,
+    });
+    assert.equal(fs.readFileSync(fetched.file, 'utf8'), 'artifact');
+    assert.match(fetched.digest, /^sha256:[0-9a-f]{64}$/);
+  });
+});
