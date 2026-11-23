@@ -155,6 +155,7 @@ impl Session {
             "sync.plan" => self.sync_plan(&request),
             "sync.commit" => self.sync_commit(&request),
             "sync.abort" => self.sync_abort(&request),
+            "sync.recover" => self.sync_recover(&request),
             "sync.inspect" => self.sync_inspect(&request),
             "blob.put" => self.blob_put(&request),
             "stream.end" => self.stream_end(&request),
@@ -598,9 +599,70 @@ impl Session {
                 Action::Reply(rpc::response(&request.id, result))
             }
             Err(error) => {
+                if let Some(entry) = self.registry.get_mut(&record.workspace) {
+                    entry.recovery = Some("applying".into());
+                }
                 self.transactions.insert(txn_id.to_string(), record);
                 Action::Reply(error_response(&request.id, &error))
             }
+        }
+    }
+
+    fn sync_recover(&mut self, request: &Request) -> Action {
+        let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
+            return usage_error(request, "txnId is required");
+        };
+        let workspace_id = match self.transactions.remove(txn_id) {
+            Some(record) => Some(record.workspace),
+            None => {
+                let mut found = None;
+                for id in self.registry.ids() {
+                    if let Some(workspace) = self.registry.get(&id) {
+                        if let Ok(Some(record)) = workspace::read_journal(&workspace.state) {
+                            if record.get("txnId").and_then(Value::as_str) == Some(txn_id) {
+                                found = Some(id);
+                                break;
+                            }
+                        }
+                    }
+                }
+                found
+            }
+        };
+        let Some(workspace_id) = workspace_id else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
+        };
+        let Some(mut workspace) = self.registry.get(&workspace_id).cloned() else {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_UNKNOWN",
+                &workspace_id,
+                false,
+            ));
+        };
+        let mut record = match workspace::read_journal(&workspace.state) {
+            Ok(Some(value)) => match serde_json::from_value::<TxnRecord>(value) {
+                Ok(record) => record,
+                Err(error) => {
+                    return Action::Reply(rpc::error(
+                        &request.id,
+                        "INTERNAL",
+                        &error.to_string(),
+                        false,
+                    ))
+                }
+            },
+            _ => return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false)),
+        };
+        match sync::resume(&mut record, &mut workspace) {
+            Ok((generation, manifest_digest)) => {
+                self.registry.insert(workspace);
+                Action::Reply(rpc::response(
+                    &request.id,
+                    json!({"generation": generation, "manifestDigest": manifest_digest}),
+                ))
+            }
+            Err(error) => Action::Reply(error_response(&request.id, &error)),
         }
     }
 

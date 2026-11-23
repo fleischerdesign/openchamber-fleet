@@ -36,7 +36,7 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | SYNC-05 | Paths with `..`, absolute paths and empty segments are refused | `model::tests::unsafe_paths_are_rejected` |
 | SYNC-06 | A blob is verified against its digest before commit | `sync::tests` (planned corrupt case) |
 | SYNC-07 | A commit with a wrong plan digest is `PLAN_MISMATCH` | planned |
-| SYNC-08 | A crash during apply leaves `RECOVERY`, never a marked generation | planned (failure suite) |
+| SYNC-08 | A crash during apply leaves `RECOVERY`, never a marked generation | `test/v1/failure.test.js` |
 | SYNC-09 | Two controllers cannot mutate one workspace | planned (two-process test) |
 | SYNC-10 | Symlinks are recreated, never followed | planned (agent test) |
 
@@ -75,7 +75,7 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | ID | Statement | Test |
 |---|---|---|
 | FAIL-01 | Disconnect at begin, entries, plan, blob and commit is recoverable | planned |
-| FAIL-02 | Disk full fails before a generation is committed | planned |
+| FAIL-02 | Disk full fails before a generation is committed | `test/v1/failure.test.js` (simulated) |
 | FAIL-03 | Output flood blocks at the spool limit and never grows memory | planned |
 | FAIL-04 | 200k files plan/commit within a documented time and memory bound | planned |
 | FAIL-05 | Symlink traversal attempts are refused | partially (path validation) |

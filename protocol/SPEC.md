@@ -73,7 +73,8 @@ Identifiers are strings.
 | `sync.plan` | C→A | compute the diff and needed blobs |
 | `blob.put` | C→A | upload one blob, then DATA frames |
 | `sync.commit` | C→A | apply the plan atomically per §7.6 |
-| `sync.abort` | C→A | abandon a transaction |
+| `sync.abort` | C→A | abandon a transaction before apply |
+| `sync.recover` | C→A | complete an interrupted apply |
 | `sync.inspect` | C→A | transaction state after a crash |
 | `exec.start` | C→A | start a command |
 | `exec.status` | C→A | inspect a job |
@@ -250,7 +251,8 @@ generation precondition.
 On startup, a workspace with an unfinished journal is `RECOVERY`:
 
 - `sync.inspect {workspaceId}` → `{state:"RECOVERY"|"READY", txnId?, planDigest?, startedAt?}`
-- `sync.abort {txnId}` rolls back to the last committed generation using the journal's undo log.
+- `sync.abort {txnId}` clears a transaction that has not started applying.
+- `sync.recover {txnId}` completes an apply that was interrupted; the apply is idempotent.
 - Until resolved, `workspace.lease` returns `RECOVERY_REQUIRED`.
 
 ## 8. Execution

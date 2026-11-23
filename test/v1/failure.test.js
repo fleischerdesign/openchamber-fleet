@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -136,6 +137,105 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
       );
     } finally {
       client.close();
+    }
+  });
+});
+
+async function stageTransaction(client, workspaceId, rootDir, content) {
+  const workspace = await openWorkspace(client, workspaceId, rootDir, true);
+  const lease = `op-${workspaceId}`;
+  await client.request('workspace.lease', { workspaceId, operationId: lease, ttlMs: 60_000 });
+  const begin = await client.request('sync.begin', {
+    workspaceId,
+    leaseId: lease,
+    baseGeneration: workspace.generation,
+    policy: {},
+  });
+  const digest = `sha256:${crypto.createHash('sha256').update(content).digest('hex')}`;
+  await client.request('sync.entries', {
+    txnId: begin.txnId,
+    entries: [{ path: 'file.txt', type: 'file', mode: '0644', size: content.length, mtimeMs: 0, digest }],
+  });
+  await client.request('sync.plan', { txnId: begin.txnId });
+  const put = await client.request('blob.put', { txnId: begin.txnId, digest, size: content.length });
+  await client.upload(put.streamId, content);
+  return { txnId: begin.txnId };
+}
+
+describe('crash during apply (SYNC-08)', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('a killed agent leaves RECOVERY and a forward recovery commits', async () => {
+    const crashRoot = path.join(base, 'crash-replica');
+    const content = Buffer.from('crash payload');
+    process.env.FLEET_AGENT_FAULT = 'crash:applying';
+    let first;
+    let txnId;
+    try {
+      first = await connectProcess(binary);
+      ({ txnId } = await stageTransaction(first, 'fail-crash', crashRoot, content));
+      const plan = await first.request('sync.inspect', { workspaceId: 'fail-crash' });
+      await assert.rejects(first.request('sync.commit', { txnId, planDigest: plan.planDigest }));
+    } finally {
+      first?.close();
+      delete process.env.FLEET_AGENT_FAULT;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const second = await connectProcess(binary);
+    try {
+      const reopened = await openWorkspace(second, 'fail-crash', crashRoot, true);
+      assert.equal(reopened.recovery, true);
+      const inspected = await second.request('sync.inspect', { workspaceId: 'fail-crash' });
+      assert.equal(inspected.state, 'RECOVERY');
+      assert.equal(inspected.phase, 'applying');
+      await assert.rejects(
+        second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-after', ttlMs: 60_000 }),
+        (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',
+      );
+      await assert.rejects(
+        second.request('sync.abort', { txnId }),
+        (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',
+      );
+      const resumed = await second.request('sync.recover', { txnId });
+      assert.equal(resumed.generation, 1);
+      assert.equal(fs.readFileSync(path.join(crashRoot, 'file.txt'), 'utf8'), 'crash payload');
+      const lease = await second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-after', ttlMs: 60_000 });
+      assert.ok(lease.leaseId);
+    } finally {
+      second.close();
+    }
+  });
+});
+
+describe('disk full during apply', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('a simulated ENOSPC leaves RECOVERY and recovers forward', async () => {
+    const fullRoot = path.join(base, 'full-replica');
+    const content = Buffer.from('full payload');
+    process.env.FLEET_AGENT_FAULT = 'disk-full:applying';
+    let first;
+    let txnId;
+    try {
+      first = await connectProcess(binary);
+      ({ txnId } = await stageTransaction(first, 'fail-full', fullRoot, content));
+      const plan = await first.request('sync.inspect', { workspaceId: 'fail-full' });
+      await assert.rejects(
+        first.request('sync.commit', { txnId, planDigest: plan.planDigest }),
+        (error) => error instanceof AgentError && error.code === 'DISK_FULL',
+      );
+    } finally {
+      first?.close();
+      delete process.env.FLEET_AGENT_FAULT;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const second = await connectProcess(binary);
+    try {
+      const reopened = await openWorkspace(second, 'fail-full', fullRoot, true);
+      assert.equal(reopened.recovery, true);
+      const resumed = await second.request('sync.recover', { txnId });
+      assert.equal(resumed.generation, 1);
+      assert.equal(fs.readFileSync(path.join(fullRoot, 'file.txt'), 'utf8'), 'full payload');
+    } finally {
+      second.close();
     }
   });
 });

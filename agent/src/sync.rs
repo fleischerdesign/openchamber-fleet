@@ -256,19 +256,54 @@ pub fn commit(
     if record.plan_digest.as_deref() != Some(plan_digest) {
         return Err("PLAN_MISMATCH planDigest does not match".into());
     }
-    for digest in &record.needed {
-        if !blob_path(ws, digest).exists() {
-            return Err(format!("BLOB_MISSING {digest}"));
-        }
-    }
+    ensure_blobs(record, ws)?;
     let desired = Manifest::from_entries(record.entries.clone())?;
     let policy = record.policy.compile()?;
 
     // The apply phase is recorded first: a crash from here on is recovered by completion.
     record.phase = "applying".into();
     persist(ws, record)?;
-    apply(ws, &desired, &record.changes, &policy)?;
+    fault_point()?;
+    finish(record, ws, desired, policy)
+}
 
+/// Complete a transaction whose journal says applying. The apply is idempotent.
+pub fn resume(record: &mut TxnRecord, ws: &mut Workspace) -> Result<(u64, String), String> {
+    if record.phase != "applying" {
+        return Err("INVALID_REQUEST transaction is not in apply".into());
+    }
+    ensure_blobs(record, ws)?;
+    let desired = Manifest::from_entries(record.entries.clone())?;
+    let policy = record.policy.compile()?;
+    fault_point()?;
+    finish(record, ws, desired, policy)
+}
+
+fn ensure_blobs(record: &TxnRecord, ws: &Workspace) -> Result<(), String> {
+    for digest in &record.needed {
+        if !blob_path(ws, digest).exists() {
+            return Err(format!("BLOB_MISSING {digest}"));
+        }
+    }
+    Ok(())
+}
+
+/// Test-only fault injection, selected by FLEET_AGENT_FAULT. Never set in production.
+fn fault_point() -> Result<(), String> {
+    match std::env::var("FLEET_AGENT_FAULT").as_deref() {
+        Ok("crash:applying") => std::process::abort(),
+        Ok("disk-full:applying") => Err("DISK_FULL simulated for fault injection".into()),
+        _ => Ok(()),
+    }
+}
+
+fn finish(
+    record: &TxnRecord,
+    ws: &mut Workspace,
+    desired: Manifest,
+    policy: crate::model::CompiledPolicy,
+) -> Result<(u64, String), String> {
+    apply(ws, &desired, &record.changes, &policy)?;
     let generation = ws.generation + 1;
     let state = workspace::WorkspaceState {
         root: ws.root.to_string_lossy().to_string(),
