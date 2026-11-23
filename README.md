@@ -55,7 +55,7 @@ The same three steps are exposed to an agent as `fleet_sync`, `fleet_exec` and `
 
 ## Requirements
 
-- Controller: Node.js ≥ 20.
+- Controller: Node.js ≥ 22 (Node 20 is end-of-life and lacks the test runner glob).
 - Node: `ssh`, `rsync` ≥ 3.1, `bash`, `base64`.
 - SSH key authentication. Host keys are verified (`StrictHostKeyChecking=yes`); there is no
   password fallback and no `known_hosts` bypass.
