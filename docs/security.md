@@ -41,8 +41,8 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 ## Execution
 
 - `argv` only; no shell mode, so no word splitting or metacharacter expansion from the controller.
-- `env_clear` plus `HOME`, a fixed `PATH`, `LANG`, `TZ` and declared variables; the controller's
-  environment (tokens, proxies, `OPENCODE_*`) is not inherited.
+- `env_clear` plus `HOME`, the node PATH (the agent process PATH, never the controller PATH), `LANG`,
+  `TZ` and declared variables; the controller environment (tokens, proxies, `OPENCODE_*`) is not inherited.
 - A new session and process-group termination; timeouts escalate `SIGTERM` → `SIGKILL`.
 - Output is bounded by credits and an 8 MiB spool per stream.
 

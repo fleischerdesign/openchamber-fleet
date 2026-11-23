@@ -259,8 +259,8 @@ On startup, a workspace with an unfinished journal is `RECOVERY`:
 
 - `argv` is an array of strings; v1 has no shell mode. `cwd` is relative to the workspace root.
 - `expectedGeneration` must match, else `GENERATION_MISMATCH`.
-- `env` replaces the base environment except `HOME`, `PATH`, `LANG=C.UTF-8`, `TZ=UTC`; declared
-  entries may override them.
+- `env` replaces the base environment except `HOME`, `PATH`, `LANG=C.UTF-8`, `TZ=UTC`. `PATH` is the
+  agent process PATH (node-local); declared entries may override any of them.
 - The agent starts the process in a new session (`setsid`) and, on Linux, inside a cgroup when the
   cgroup v2 delegation is available; otherwise process-group cleanup is the documented fallback.
 - stdout and stderr become streams. Each stream obeys credits:
