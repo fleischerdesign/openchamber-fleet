@@ -1,0 +1,14 @@
+{
+  "name": "my-project",
+  "hosts": {
+    "workstation": {
+      "ssh": "philipp@10.10.100.20",
+      "port": 22,
+      "root": "~/.cache/openchamber-fleet/my-project"
+    }
+  },
+  "excludes": ["target/", "node_modules/", ".direnv/", "dist/"],
+  "env": {
+    "CARGO_TERM_COLOR": "never"
+  }
+}
