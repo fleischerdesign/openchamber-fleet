@@ -36,6 +36,9 @@ cd openchamber-fleet && npm ci && npm run build && npm link
 # in the project you want to offload work from
 fleet init --host workstation --ssh philipp@10.10.100.20
 
+# check ssh, rsync and the remote wrappers on both ends
+fleet doctor
+
 # see what would change on the node, then make it match
 fleet sync --host workstation --plan
 fleet sync --host workstation --apply
@@ -68,6 +71,14 @@ The same three steps are exposed to an agent as `fleet_sync`, `fleet_exec` and `
 - Node: `ssh`, `rsync` ≥ 3.1, `bash`, `base64`.
 - SSH key authentication. Host keys are verified (`StrictHostKeyChecking=yes`); there is no
   password fallback and no `known_hosts` bypass.
+
+## Platform notes
+
+- Linux (glibc or musl) and NixOS need `openssh`, `rsync` >= 3.1 and coreutils; `fleet doctor`
+  names what is missing and how to install it.
+- macOS ships `openrsync` as `/usr/bin/rsync`, which does not implement the flags this tool uses.
+  Install GNU rsync: `brew install rsync`.
+- Windows is not supported natively; WSL is untested.
 
 ## What it is not
 

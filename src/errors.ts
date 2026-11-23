@@ -10,6 +10,7 @@ export const EXIT = {
   replica: 6,
   artifact: 7,
   timeout: 124,
+  doctor: 8,
 } as const;
 
 export type ErrorCode =

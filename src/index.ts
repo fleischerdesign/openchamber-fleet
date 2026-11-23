@@ -17,3 +17,5 @@ export { statusReport } from './status.js';
 export type { HostStatus, ReplicaState, StatusReport } from './status.js';
 export { applyWorkspace, planWorkspace, verifyWorkspace, workspaceKey } from './sync.js';
 export type { ApplyResult, SyncOptions } from './sync.js';
+export { doctor, formatDoctor, parseRsyncVersion, rsyncSatisfies } from './doctor.js';
+export type { Check, DoctorReport } from './doctor.js';

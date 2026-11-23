@@ -18,6 +18,7 @@ either covered by a named test, explicitly planned, or moved to the non-goals in
 | Fetch safety | FETCH-03…FETCH-06, 07, 09, SEC-04 | `test/integration/failures.test.js` |
 | State permissions, audit record | SEC-07, SEC-08 | `test/integration/failures.test.js`, `exec.test.js` |
 | Convergence, idempotence | property over random trees | `test/property/convergence.test.js` |
+| Doctor, version gate | PORT-01, environment probes | `test/unit/doctor.test.js`, `test/integration/doctor.test.js` |
 
 Every row above runs in CI on Node 20, 22 and 24.
 

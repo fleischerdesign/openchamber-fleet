@@ -14,6 +14,7 @@ fleet exec --host <alias> --shell '<command string>' [--timeout SECONDS]
 fleet fetch --host <alias> --dest <dir> [--overwrite] [--verify] -- <path…>
 fleet cancel --host <alias> [--run <runId>]
 fleet logs <runId>
+fleet doctor [--host <alias>]
 ```
 
 `--host` names a key under `hosts` in `fleet.json`.
@@ -30,6 +31,7 @@ fleet logs <runId>
 | 5 | lease busy |
 | 6 | replica stale or diverged |
 | 7 | artifact missing |
+| 8 | doctor found a missing or too-old dependency |
 | 97 | replica root missing (exec wrapper) |
 | 124 | timeout |
 

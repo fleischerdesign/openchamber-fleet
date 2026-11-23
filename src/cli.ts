@@ -5,6 +5,7 @@ import path from 'node:path';
 import { loadConfig } from './config.js';
 import type { HostConfig, WorkspaceConfig } from './config.js';
 import { FleetError, formatError, toFleetError } from './errors.js';
+import { doctor, formatDoctor } from './doctor.js';
 import { cancelRun, execRemote } from './exec.js';
 import { fetchArtifacts } from './fetch.js';
 import { quoteArgv } from './paths.js';
@@ -34,6 +35,7 @@ export async function main(argv: readonly string[]): Promise<void> {
       case 'fetch': return await cmdFetch(parsed);
       case 'cancel': return await cmdCancel(parsed);
       case 'logs': return cmdLogs(parsed);
+      case 'doctor': return await cmdDoctor(parsed);
       default: throw new FleetError('usage', `unknown command ${parsed.command}`);
     }
   } catch (error) {
@@ -122,6 +124,14 @@ async function cmdStatus(parsed: Parsed): Promise<void> {
     const changes = host.changes === undefined ? '' : ` (${host.changes} changes)`;
     process.stdout.write(`${host.alias.padEnd(14)} ${host.state.padEnd(9)} ${lease}${changes}\n`);
   }
+}
+
+async function cmdDoctor(parsed: Parsed): Promise<void> {
+  const config = configOf(parsed.flags);
+  const alias = typeof parsed.flags.get('host') === 'string' ? String(parsed.flags.get('host')) : undefined;
+  const report = await doctor(config, alias);
+  process.stdout.write(formatDoctor(report) + '\n');
+  if (!report.ok) process.exitCode = 8;
 }
 
 async function cmdSync(parsed: Parsed): Promise<void> {
@@ -222,6 +232,7 @@ function printHelp(): void {
     '  fleet fetch --host <alias> --dest <dir> [--overwrite] [--verify] -- <path…>',
     '  fleet cancel --host <alias> --run <runId>',
     '  fleet logs <runId>',
+    '  fleet doctor [--host <alias>]',
     '',
     'environment:',
     '  FLEET_STATE_DIR  state directory (default ~/.local/state/openchamber-fleet)',

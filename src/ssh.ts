@@ -1,6 +1,9 @@
-/** SSH argv construction, host-key policy, and one spawn helper. */
+/** SSH argv construction, host-key policy, connection reuse, and one spawn helper. */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { FleetError } from './errors.js';
 import { quoteShell } from './paths.js';
 
@@ -30,6 +33,29 @@ export function sshBinary(): string {
   return process.env.FLEET_SSH ?? 'ssh';
 }
 
+/**
+ * A per-user control socket directory. Multiplexing removes the handshake from every command;
+ * it is skipped when the directory cannot be created or when a test transport is in use.
+ */
+function controlPath(): string | null {
+  if (process.env.FLEET_SSH_NO_MULTIPLEX === '1') return null;
+  if (process.env.FLEET_SSH) return null;
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  const base = runtime ?? path.join(os.tmpdir(), `fleet-ssh-${String(process.getuid?.() ?? 'user')}`);
+  try {
+    fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+    return path.join(base, '%C');
+  } catch {
+    return null;
+  }
+}
+
+function muxOptions(): string[] {
+  const socket = controlPath();
+  if (socket === null) return [];
+  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${socket}`, '-o', 'ControlPersist=60s'];
+}
+
 export function sshOptions(host: SshTarget): string[] {
   return [
     '-o', 'BatchMode=yes',
@@ -37,18 +63,20 @@ export function sshOptions(host: SshTarget): string[] {
     '-o', `ConnectTimeout=${CONNECT_TIMEOUT}`,
     '-o', 'ServerAliveInterval=15',
     '-o', 'ServerAliveCountMax=4',
+    ...muxOptions(),
     '-p', String(host.port),
     '-T',
   ];
 }
 
-/** The `-e` value for rsync; rsync parses it as a shell word list. */
+/** The `-e` value for rsync; rsync parses it as a shell word list. Must match `sshOptions`. */
 export function rsyncRsh(host: SshTarget): string {
   return [
     quoteShell(sshBinary()),
     '-o', 'BatchMode=yes',
     '-o', 'StrictHostKeyChecking=yes',
     '-o', `ConnectTimeout=${CONNECT_TIMEOUT}`,
+    ...muxOptions(),
     '-p', String(host.port),
   ].join(' ');
 }
@@ -68,6 +96,11 @@ export function classifyFailure(stderr: string, code: number | null): FleetError
     return new FleetError('node-unreachable', 'ssh to the node failed', { stderr: text || 'exit 255' });
   }
   return new FleetError('node-unreachable', 'remote command failed', { stderr: text || `exit ${String(code)}` });
+}
+
+/** True when stderr names a transport problem rather than a file-level rsync error. */
+export function isTransportFailure(stderr: string): boolean {
+  return /Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Permission denied|Authentication failed|Connection refused|Connection timed out|No route to host|Could not resolve hostname/i.test(stderr);
 }
 
 /**
@@ -143,13 +176,9 @@ export function assertControlSuccess(result: RemoteResult, fallbackCode: 'node-u
   throw error;
 }
 
-export async function probeHost(host: SshTarget): Promise<boolean> {
-  try {
-    const result = await runRemote(host, 'true', { timeoutMs: 15_000 });
-    return result.code === 0;
-  } catch {
-    return false;
-  }
+/** Transport a script as base64 so the node's login shell cannot reinterpret it. */
+export function scriptCommand(script: string): string {
+  return `echo ${Buffer.from(script, 'utf8').toString('base64')} | base64 -d | bash -s`;
 }
 
 const homeCache = new Map<string, string>();
@@ -175,12 +204,11 @@ export async function resolveRemotePath(host: SshTarget, remotePath: string): Pr
   return `${await remoteHome(host)}/${remotePath.slice(2)}`;
 }
 
-/** Transport a script as base64 so the node's login shell cannot reinterpret it. */
-export function scriptCommand(script: string): string {
-  return `echo ${Buffer.from(script, 'utf8').toString('base64')} | base64 -d | bash -s`;
-}
-
-/** True when stderr names a transport problem rather than a file-level rsync error. */
-export function isTransportFailure(stderr: string): boolean {
-  return /Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Permission denied|Authentication failed|Connection refused|Connection timed out|No route to host|Could not resolve hostname/i.test(stderr);
+export async function probeHost(host: SshTarget): Promise<boolean> {
+  try {
+    const result = await runRemote(host, 'true', { timeoutMs: 15_000 });
+    return result.code === 0;
+  } catch {
+    return false;
+  }
 }

@@ -168,6 +168,8 @@ exec env -i HOME="$HOME" PATH="$PATH_FIXED" LANG=C.UTF-8 TZ=UTC \
   cleared, so a NixOS node and a generic Linux node behave the same.
 - Output is streamed. The plugin caps what it returns to the model (default 256 KiB) and points at
   the spill file; the CLI never caps.
+- SSH connections are multiplexed (`ControlPersist=60s`), so repeated commands pay one handshake
+  per minute, not one per command.
 
 ## 9. Fetch semantics
 
