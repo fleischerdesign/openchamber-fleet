@@ -1,5 +1,5 @@
 {
-  description = "openchamber-fleet — replicate a workspace to a node and run one command there";
+  description = "openchamber-fleet — run work on a machine that has the cores";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -13,14 +13,30 @@
         "aarch64-darwin"
       ];
       each = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      mkAgent =
+        pkgs:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "fleet-agent";
+          version = "0.1.0";
+          src = ./agent;
+          cargoLock.lockFile = ./agent/Cargo.lock;
+        };
     in
     {
+      packages = each (pkgs: {
+        fleet-agent = mkAgent pkgs;
+        default = mkAgent pkgs;
+      });
+
       devShells = each (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
             nodejs_22
             typescript
-            rsync
+            cargo
+            rustc
+            rustfmt
+            gcc
             openssh
             git
             coreutils
@@ -28,36 +44,20 @@
         };
       });
 
-      packages = each (pkgs: {
-        default = pkgs.buildNpmPackage {
-          pname = "openchamber-fleet";
-          version = "0.1.0";
-          src = self;
-          npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
-          buildPhase = ''
-            npm run build
-          '';
-          installPhase = ''
-            mkdir -p $out/lib/node_modules/openchamber-fleet
-            cp -r package.json dist bin $out/lib/node_modules/openchamber-fleet/
-          '';
-        };
-      });
-
       checks = each (pkgs: {
+        agent = mkAgent pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
           version = "0.1.0";
           src = self;
           npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
           nativeBuildInputs = with pkgs; [
-            rsync
             openssh
             bash
             coreutils
           ];
           checkPhase = ''
-            node --test 'test/**/*.test.js'
+            FLEET_AGENT_BIN=${mkAgent pkgs}/bin/fleet-agent node --test 'test/**/*.test.js'
           '';
           installPhase = ''
             mkdir -p $out
