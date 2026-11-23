@@ -3,85 +3,67 @@
 ## Trust boundary
 
 ```
- controller (session host)                node (remote machine)
- ┌───────────────────────────┐  SSH      ┌──────────────────────────┐
- │ fleet.json, canonical tree│ ────────▶ │ replica, executed commands│
- │ secrets, session context  │ ◀──────── │ artifacts                 │
- └───────────────────────────┘           └──────────────────────────┘
+controller (session host)                     node
+┌──────────────────────────┐   SSH stdio    ┌──────────────────────────┐
+│ canonical tree, secrets  │ ─────────────▶ │ replica, executed commands│
+└──────────────────────────┘ ◀───────────── └──────────────────────────┘
 ```
 
-The node is **semi-trusted**. It receives a copy of the workspace and every command you choose to
-run there. Anything in the workspace — source code, test fixtures, `.env` files that are part of the
-tree — is visible to anyone with read access on the node. Treat the node's filesystem as you would
-the node's console.
+The node is **semi-trusted**: it receives a copy of the workspace and every command you run there.
+Anything in the tree — including `.env` files and fixtures — is readable by the SSH user on the
+node. There is no inbound listener and no agent credential store; SSH is the only door.
 
-The node cannot initiate a connection back. There is no inbound port, no daemon, no callback.
+**Arbitrary execution is the real capability.** The agent runs commands as the SSH user, so it can
+already read that user's browser profiles, display session and devices. Capability grants added
+later (screen, input, browser) are **audit and accident prevention**, not a sandbox. A real sandbox
+would need a separate identity and a broker; v1 does not pretend to have one.
 
-## Authentication
+## Transport and handshake
 
-- SSH public-key authentication only. `BatchMode=yes` disables password and keyboard-interactive
-  prompts, so an unattended run can never block on one.
-- Host keys are verified (`StrictHostKeyChecking=yes`). An unknown or changed key is a hard failure
-  (`host-key-mismatch`); there is no option to bypass it, and `FLEET_SSH` is documented as a test
-  seam, not a production setting.
-- `ConnectTimeout` is bounded so an unreachable node fails quickly instead of hanging a session.
+- Public-key SSH only; `BatchMode=yes`; host keys verified with `StrictHostKeyChecking=yes`.
+- No PTY; protocol bytes on stdout, logs on stderr.
+- The remote command is a fixed argv: `ssh … host <agent-path> stdio`. The agent path is validated
+  against a safe character set before it becomes part of the SSH command.
+- The handshake reports protocol, agent version, installation id and capabilities; a required
+  capability the agent lacks aborts the session. A capability is advertised only after its handler
+  exists.
 
-## Command construction
+## Files and paths
 
-- Host aliases are validated against `^[A-Za-z0-9._-]+$` and are passed as arguments, never
-  interpolated into a shell string.
-- The remote script is base64-encoded and piped into `bash -s`, so the node's login shell is not
-  involved and cannot reinterpret content.
-- Paths are validated as relative, `..`-free and NUL-free before they cross the boundary.
-- `rsync` is invoked with an explicit argv array (`spawn`, not `shell: true`) and with
-  `--protect-args`, so filenames cannot become options or shell words.
-- `--safe-links` is used for artifact fetches, so a symlink cannot pull data from outside the
-  replica.
+- Every path is relative, `..`-free and NUL-free before it crosses the boundary.
+- The agent resolves paths segment by segment with no-follow checks; a symlink parent is
+  `PATH_UNSAFE`.
+- Files are written to a temporary name in the destination directory, `fsync`ed and renamed; no
+  partial file is visible under a final name.
+- The root guard refuses `/`, system directories, the home directory and paths with fewer than two
+  segments, because commit deletes managed paths.
 
-## Environment
+## Execution
 
-The child environment is constructed from scratch (`env -i`) with a fixed base:
+- `argv` only; no shell mode, so no word splitting or metacharacter expansion from the controller.
+- `env_clear` plus `HOME`, a fixed `PATH`, `LANG`, `TZ` and declared variables; the controller's
+  environment (tokens, proxies, `OPENCODE_*`) is not inherited.
+- A new session and process-group termination; timeouts escalate `SIGTERM` → `SIGKILL`.
+- Output is bounded by credits and an 8 MiB spool per stream.
 
-```
-HOME=<remote user home>  PATH=<fixed>  LANG=C.UTF-8  TZ=UTC  UMASK=0022
-```
+## State and audit
 
-plus the `env` map declared in `fleet.json`. Nothing else. In particular, `OPENCODE_*`,
-`AWS_*`, `GITHUB_*` and any variable of the controller process are invisible to the command. A
-secret that a command needs must be declared explicitly, and that declaration is then part of the
-repository's configuration and reviewable.
+- Workspace state is `0700`; files `0600`.
+- The lease is a kernel `flock`: it disappears with the process, so a crash cannot leave a lock.
+- Job records and the transaction journal are written before the effect and updated after it.
+  `unknown` is recorded, never rewritten to a guess.
 
-## Files and permissions
+## What is not protected
 
-- The state directory is created `0700`; lease, run and log files are `0600`.
-- The replica root defaults to `~/.cache/openchamber-fleet/<workspace>` on the node, created `0700`
-  by the first sync.
-- Artifacts land with their original mode (subject to the node's umask at creation; archive mode
-  restores it).
-- Logs may contain command output. They live in the state directory and are never uploaded.
-
-## Audit
-
-Every mutating run appends one record to `runs/<runId>.json`:
-
-```json
-{"runId":"…","kind":"sync|exec|fetch","host":"workstation","workspace":"my-project",
- "revision":"sha256:…","planDigest":"sha256:…","command":"…","startedAt":"…","endedAt":"…",
- "exitCode":0,"outputBytes":1234,"user":"philipp","controller":"hostname"}
-```
-
-`fleet status --json` exposes the same records. `fleet logs <runId>` prints the captured output.
-
-## What is explicitly not protected
-
-- A malicious node can lie about what it executed and what it produced. Verification (`--verify`,
-  content checksums) detects accidental corruption, not an adversary.
-- The canonical tree is not encrypted in transit beyond SSH's transport encryption.
-- Commands run with the remote user's full privileges. Use a dedicated user if that matters.
+- A malicious node can lie about what it ran and what it produced. SHA-256 proves byte identity,
+  not honest computation.
+- The canonical tree crosses the wire under SSH's transport encryption only; it is not encrypted at
+  rest on the node.
+- Commands run with the SSH user's full privileges. Use a dedicated user if that matters.
+- Secrets inside the workspace are replicated. Exclude them or keep them out of the tree.
 
 ## Reporting
 
-This repository has no runtime service, no network listener and no credential store of its own. A
-vulnerability is a way to make it execute something the caller did not ask for, read a file outside
-the replica, or leak the controller's environment. Report privately to the maintainer; do not open a
-public issue with a working exploit.
+No runtime service, no listener, no credential store. A vulnerability is a way to execute something
+the caller did not ask for, read outside the workspace, escape the root guard or exhaust the agent.
+Report privately to the maintainer.

@@ -1,6 +1,6 @@
 # ADR-0005: TypeScript, compiled to ESM
 
-**Status:** accepted
+**Status:** amended by ADR-0006 — controller stays TypeScript; the node agent is Rust
 
 ## Context
 

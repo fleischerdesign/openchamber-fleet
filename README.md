@@ -1,134 +1,102 @@
 # openchamber-fleet
 
-Run an OpenCode/OpenChamber agent's work on a machine that has the cores, while the session
-stays where it is.
+Run an OpenCode/OpenChamber agent's work on a machine that has the cores, while the session stays
+where it is.
 
-`openchamber-fleet` gives an agent three primitives over plain SSH:
+`openchamber-fleet` replicates a workspace to another machine and executes a command there — over
+one versioned protocol, spoken to a small Rust agent through SSH stdio. No listener, no daemon, no
+rsync, no shell-script transport.
 
-- **replicate** a workspace to a remote machine, digest-based and cache-preserving;
-- **execute** a command inside that replica, with a deterministic environment and a real timeout;
-- **fetch** the declared results back.
+## How it works
 
-It is an [OpenCode plugin](https://opencode.ai/docs/plugins/) and a CLI. The plugin has no runtime
-dependencies; the only things it needs on either end are `ssh` and `rsync`.
+```
+controller (OpenCode plugin / CLI)          node (any machine with sshd)
+        │  fleet.agent.v1 · length-prefixed frames
+        ▼
+ssh -T host fleet-agent stdio  ────────────▶  agent process
+        ├─ workspace.open / lease / generation
+        ├─ sync.begin → entries → plan → blobs → commit
+        ├─ exec.start → stdout/stderr streams → status/cancel
+        └─ artifact.open → stream + digest
+```
 
-## Why
-
-A session's tools run where the session runs. When that machine is an always-on box with four
-cores, a Rust build or a browser test suite is the wrong thing to run there — but moving the
-session to the workstation breaks session continuity, and a second runtime fragments it.
-
-Replication keeps one session, one workspace of record, and still lets the expensive command run
-on the machine that should run it.
-
-## Status
-
-Version 0.1.0. The repository is public and CI is green on Node 22 and 24; the npm package is
-not published yet, so install from the repository for now.
+- **One protocol**, specified in [`protocol/SPEC.md`](protocol/SPEC.md) with state machines in
+  [`protocol/STATE.md`](protocol/STATE.md).
+- **Node-owned truth**: leases (`flock`), generations, the manifest, the journal and the blob store
+  live on the node. The controller cannot fence with local state.
+- **Transactional sync**: plan → upload missing blobs → commit; an interrupted transaction is
+  `RECOVERY` and blocks new work until it is resolved.
+- **Bounded streaming**: stdout, stderr and artifacts are credit-controlled, with an 8 MiB spool and
+  explicit end-of-stream frames.
+- **Honest outcomes**: a crash yields `unknown`, never a guess; commits record the generation only
+  after a clean apply.
 
 ## Quickstart
 
 ```bash
-# install from the repository (npm publish is the next step)
-git clone https://github.com/fleischerdesign/openchamber-fleet
-cd openchamber-fleet && npm ci && npm run build && npm link
+# once per node: install the agent (Nix, cargo, or a release binary)
+nix profile install github:fleischerdesign/openchamber-fleet#fleet-agent
 
-# in the project you want to offload work from
+# in the project
 fleet init --host workstation --ssh philipp@10.10.100.20
 
-# check ssh, rsync and the remote wrappers on both ends
-fleet doctor
-
-# see what would change on the node, then make it match
 fleet sync --host workstation --plan
-fleet sync --host workstation --apply
+fleet sync --host workstation --apply --exclude target/,dist/
 
-# run the expensive command there
 fleet exec --host workstation -- cargo test --all-features
-
-# bring the results back
-fleet fetch --host workstation --dest ./artifacts -- target/debug/my-binary
+fleet fetch --host workstation --dest ./out -- target/release/app
 ```
 
-The same three steps are exposed to an agent as `fleet_sync`, `fleet_exec` and `fleet_fetch`.
-
-Excludes are never guessed from the project type. A plan names generated output it is about to
-replicate; the caller passes `--exclude dist/,build/` (or `excludes` on the tool call), and that set
-is recorded with the replica so later verifies use it.
+The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `fleet_fetch` and
+`fleet_status`.
 
 ## Guarantees
 
-- **One writer.** Replication is one-way, canonical → replica. There is no merge and no bidirection
-  sync, so conflicts cannot exist.
-- **No stale execution.** `fleet exec` refuses to run when the replica is not at the canonical
-  revision, unless `--allow-stale` is passed explicitly.
-- **Caches survive.** Excluded paths (`target/`, `node_modules/`, `.direnv`) are never transferred
-  and never deleted.
-- **No silent fallback.** An unreachable node fails; the command never quietly runs locally.
-- **Resumable.** An interrupted sync never leaves a replica marked current.
-- **Deterministic environment.** Commands never inherit the caller's environment; only the
-  declared variables and a fixed base are visible.
+- One writer: canonical → replica; conflicts cannot occur.
+- A command runs only at the generation the caller expected (`GENERATION_MISMATCH` otherwise).
+- Excluded and preserved paths are never deleted; unmanaged files are never touched.
+- An unreachable node fails; there is no local fallback.
+- A crashed sync leaves the previous generation or `RECOVERY`, never a half-applied tree marked
+  current.
+- Commands do not inherit the controller's environment; the base is `HOME`, a fixed `PATH`,
+  `LANG=C.UTF-8`, `TZ=UTC` plus declared variables.
 
 ## Requirements
 
-- Controller: Node.js ≥ 22 (Node 20 is end-of-life and lacks the test runner glob).
-- Node: `ssh`, `rsync` ≥ 3.1, `bash`, `base64`.
-- SSH key authentication. Host keys are verified (`StrictHostKeyChecking=yes`); there is no
-  password fallback and no `known_hosts` bypass.
+- Controller: Node.js ≥ 22.
+- Node: `ssh` and the `fleet-agent` binary. Nothing else — no rsync, no bash wrapper, no service.
+- SSH key authentication, host keys verified (`StrictHostKeyChecking=yes`).
 
-## Platform notes
+## Status
 
-- Linux (glibc or musl) and NixOS need `openssh`, `rsync` >= 3.1 and coreutils; `fleet doctor`
-  names what is missing and how to install it.
-- macOS ships `openrsync` as `/usr/bin/rsync`, which does not implement the flags this tool uses.
-  Install GNU rsync: `brew install rsync`.
-- Windows is not supported natively; WSL is untested.
-
-## What it is not
-
-No daemon on the node, no distributed filesystem, no scheduler, no bidirectional sync, no
-Windows-native support. Those are deliberate omissions; see `docs/design.md` and the ADRs.
+v1 is implemented end to end in this repository: protocol, Rust agent, TypeScript controller, CLI
+and plugin. The failure-injection suite (disconnect at every phase, two controllers, agent kill at
+transaction boundaries, disk full, output flood) and the live fleet/OpenChamber proof are the
+remaining gate before calling it production-ready.
 
 ## Documentation
 
 | Document | Purpose |
 |---|---|
-| [`docs/design.md`](docs/design.md) | invariants, components, state machine |
-| [`docs/edge-cases.md`](docs/edge-cases.md) | the numbered catalogue every test refers to |
-| [`docs/security.md`](docs/security.md) | trust boundary, credentials, audit |
-| [`docs/config.md`](docs/config.md) | `fleet.json` reference |
-| [`docs/cli.md`](docs/cli.md) | command and exit-code reference |
-| [`docs/adr/`](docs/adr/) | the decisions, with the alternatives that lost |
-| [`docs/test-coverage.md`](docs/test-coverage.md) | which edge case is proven by which test |
+| [`protocol/SPEC.md`](protocol/SPEC.md) | normative wire contract |
+| [`protocol/STATE.md`](protocol/STATE.md) | state machines and crash windows |
+| [`docs/design.md`](docs/design.md) | invariants and component boundaries |
+| [`docs/edge-cases.md`](docs/edge-cases.md) | the catalogue the tests refer to |
+| [`docs/security.md`](docs/security.md) | trust boundary, grants, audit |
+| [`docs/config.md`](docs/config.md) | `fleet.json` |
+| [`docs/cli.md`](docs/cli.md) | commands and exit codes |
+| [`docs/test-coverage.md`](docs/test-coverage.md) | which claim is proven where |
+| [`docs/adr/`](docs/adr/) | decisions with rejected alternatives |
 
 ## Development
 
 ```bash
-nix develop        # Node, TypeScript, rsync, OpenSSH
-npm ci
-npm run build      # tsc -> dist/
-npm test           # unit, property and integration tests
-npm run typecheck  # tsc --noEmit
+nix develop          # Node, Rust, OpenSSH
+npm ci && npm run build
+cargo test --manifest-path agent/Cargo.toml
+npm test             # TypeScript tests; set FLEET_AGENT_BIN to the built agent
 ```
-
-The integration tests use a fake SSH transport that runs the remote command locally, so the real
-`rsync` semantics are exercised without a second machine.
 
 ## License
 
 MIT.
-
-## Protocol
-
-v1 is a protocol-first rewrite: one versioned wire contract, a Rust agent spoken to over SSH stdio,
-and no bash or rsync backend.
-
-- [`protocol/SPEC.md`](protocol/SPEC.md) — normative framing, handshake, workspaces, transactions,
-  execution, errors, limits.
-- [`protocol/STATE.md`](protocol/STATE.md) — state machines including crash windows.
-- [`protocol/errors.json`](protocol/errors.json) — stable error codes.
-- [`protocol/fixtures/`](protocol/fixtures/) — conformance fixtures.
-
-Status: the protocol is specified and the Rust agent implements framing, identity and the session
-handshake. Workspaces, synchronization and execution follow. The current TypeScript tool remains the
-0.x implementation until the cutover passes the failure suite; it is a migration, not a fallback.

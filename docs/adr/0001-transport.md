@@ -1,6 +1,6 @@
 # ADR-0001: SSH and rsync as the only transport
 
-**Status:** accepted
+**Status:** superseded by ADR-0006 (kept as history)
 
 ## Context
 

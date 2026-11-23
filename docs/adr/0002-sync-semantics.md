@@ -1,6 +1,6 @@
 # ADR-0002: One-way replication with a metadata revision
 
-**Status:** accepted
+**Status:** superseded by ADR-0006 (kept as history)
 
 ## Context
 

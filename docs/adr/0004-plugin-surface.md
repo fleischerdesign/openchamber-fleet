@@ -1,6 +1,6 @@
 # ADR-0004: Five tools, one core, no daemon in the plugin
 
-**Status:** accepted
+**Status:** amended by ADR-0006 — v1 exposes four tools (sync, exec, fetch, status)
 
 ## Context
 

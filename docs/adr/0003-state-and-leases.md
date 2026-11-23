@@ -1,6 +1,6 @@
 # ADR-0003: Local state, file leases, verify-before-execute
 
-**Status:** accepted
+**Status:** superseded by ADR-0006 (kept as history)
 
 ## Context
 
