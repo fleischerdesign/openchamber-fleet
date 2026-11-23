@@ -8,10 +8,15 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::exec::{self, Buffer, Job};
 use crate::frame;
 use crate::identity;
 use crate::model::Policy;
@@ -34,8 +39,8 @@ impl Default for Capabilities {
     fn default() -> Self {
         Self {
             workspace_sync: true,
-            exec: false,
-            artifact: false,
+            exec: true,
+            artifact: true,
         }
     }
 }
@@ -85,7 +90,15 @@ pub struct Session {
     leases: HashMap<String, LeaseHandle>,
     transactions: HashMap<String, TxnRecord>,
     uploads: HashMap<u32, Upload>,
+    jobs: HashMap<String, Arc<Job>>,
+    out_streams: HashMap<u32, OutStream>,
     next_stream: u32,
+}
+
+struct OutStream {
+    buffer: Arc<Buffer>,
+    credit: u64,
+    seq: u64,
 }
 
 pub enum Action {
@@ -103,6 +116,8 @@ impl Session {
             leases: HashMap::new(),
             transactions: HashMap::new(),
             uploads: HashMap::new(),
+            jobs: HashMap::new(),
+            out_streams: HashMap::new(),
             next_stream: 1,
         })
     }
@@ -143,6 +158,12 @@ impl Session {
             "sync.inspect" => self.sync_inspect(&request),
             "blob.put" => self.blob_put(&request),
             "stream.end" => self.stream_end(&request),
+            "stream.credit" => self.stream_credit(&request),
+            "exec.start" => self.exec_start(&request),
+            "exec.status" => self.exec_status(&request),
+            "exec.cancel" => self.exec_cancel(&request),
+            "exec.list" => self.exec_list(&request),
+            "artifact.open" => self.artifact_open(&request),
             other => Action::Reply(rpc::error(
                 &request.id,
                 "INVALID_REQUEST",
@@ -686,6 +707,270 @@ impl Session {
     }
 }
 
+impl Session {
+    fn stream_credit(&mut self, request: &Request) -> Action {
+        let Some(stream) = request.params.get("streamId").and_then(Value::as_u64) else {
+            return usage_error(request, "streamId is required");
+        };
+        let Some(bytes) = request.params.get("bytes").and_then(Value::as_u64) else {
+            return usage_error(request, "bytes is required");
+        };
+        match self.out_streams.get_mut(&(stream as u32)) {
+            Some(entry) => {
+                entry.credit = entry.credit.saturating_add(bytes);
+                Action::Reply(rpc::response(&request.id, json!({"ok": true})))
+            }
+            None => Action::Reply(rpc::error(
+                &request.id,
+                "OPERATION_UNKNOWN",
+                "stream",
+                false,
+            )),
+        }
+    }
+
+    fn exec_start(&mut self, request: &Request) -> Action {
+        let Some(workspace_id) = request.params.get("workspaceId").and_then(Value::as_str) else {
+            return usage_error(request, "workspaceId is required");
+        };
+        let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
+            return usage_error(request, "leaseId is required");
+        };
+        if !self.leases.contains_key(lease) {
+            return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        }
+        let Some(argv) = request.params.get("argv").and_then(Value::as_array) else {
+            return usage_error(request, "argv is required");
+        };
+        let argv: Vec<String> = argv
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect();
+        if argv.is_empty() {
+            return usage_error(request, "argv must not be empty");
+        }
+        let expected = request
+            .params
+            .get("expectedGeneration")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX);
+        let cwd = request
+            .params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let timeout_ms = request.params.get("timeoutMs").and_then(Value::as_u64);
+        let mut env = Vec::new();
+        if let Some(value) = request.params.get("env") {
+            if let Some(object) = value.as_object() {
+                for (key, value) in object {
+                    if let Some(value) = value.as_str() {
+                        env.push((key.clone(), value.to_string()));
+                    }
+                }
+            }
+        }
+        let Some(workspace) = self.registry.get(workspace_id) else {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_UNKNOWN",
+                workspace_id,
+                false,
+            ));
+        };
+        if expected != u64::MAX && workspace.generation != expected {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "GENERATION_MISMATCH",
+                &format!("expected {expected} actual {}", workspace.generation),
+                false,
+            ));
+        }
+        let job_id = format!("job-{}", identity_fragment());
+        let stdout_stream = self.next_stream;
+        let stderr_stream = stdout_stream + 1;
+        self.next_stream += 2;
+        let spawn_request = exec::SpawnRequest {
+            job_id: job_id.clone(),
+            workspace: workspace.id.clone(),
+            workspace_root: workspace.root.clone(),
+            argv,
+            cwd,
+            env,
+            timeout_ms,
+            state_dir: Some(workspace.state.clone()),
+        };
+        match exec::spawn(spawn_request) {
+            Ok(job) => {
+                self.out_streams.insert(
+                    stdout_stream,
+                    OutStream {
+                        buffer: job.stdout.clone(),
+                        credit: 0,
+                        seq: 0,
+                    },
+                );
+                self.out_streams.insert(
+                    stderr_stream,
+                    OutStream {
+                        buffer: job.stderr.clone(),
+                        credit: 0,
+                        seq: 0,
+                    },
+                );
+                let record = job.status();
+                let _ = exec::persist(&workspace.state, &record);
+                self.jobs.insert(job_id.clone(), Arc::new(job));
+                Action::Reply(rpc::response(
+                    &request.id,
+                    json!({
+                        "jobId": job_id,
+                        "state": record.state,
+                        "stdoutStream": stdout_stream,
+                        "stderrStream": stderr_stream,
+                    }),
+                ))
+            }
+            Err(error) => Action::Reply(error_response(&request.id, &error)),
+        }
+    }
+
+    fn exec_status(&mut self, request: &Request) -> Action {
+        let Some(job_id) = request.params.get("jobId").and_then(Value::as_str) else {
+            return usage_error(request, "jobId is required");
+        };
+        let Some(job) = self.jobs.get(job_id) else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", job_id, false));
+        };
+        let record = job.status();
+        Action::Reply(rpc::response(
+            &request.id,
+            serde_json::to_value(record).unwrap_or(Value::Null),
+        ))
+    }
+
+    fn exec_cancel(&mut self, request: &Request) -> Action {
+        let Some(job_id) = request.params.get("jobId").and_then(Value::as_str) else {
+            return usage_error(request, "jobId is required");
+        };
+        let grace = request
+            .params
+            .get("graceMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(2000);
+        let Some(job) = self.jobs.get(job_id) else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", job_id, false));
+        };
+        job.cancel(grace);
+        Action::Reply(rpc::response(&request.id, json!({"accepted": true})))
+    }
+
+    fn exec_list(&mut self, request: &Request) -> Action {
+        let records: Vec<Value> = self
+            .jobs
+            .values()
+            .map(|job| serde_json::to_value(job.status()).unwrap_or(Value::Null))
+            .collect();
+        Action::Reply(rpc::response(&request.id, json!({"jobs": records})))
+    }
+
+    fn artifact_open(&mut self, request: &Request) -> Action {
+        let Some(workspace_id) = request.params.get("workspaceId").and_then(Value::as_str) else {
+            return usage_error(request, "workspaceId is required");
+        };
+        let Some(path) = request.params.get("path").and_then(Value::as_str) else {
+            return usage_error(request, "path is required");
+        };
+        let Some(workspace) = self.registry.get(workspace_id) else {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_UNKNOWN",
+                workspace_id,
+                false,
+            ));
+        };
+        if let Err(error) = crate::model::validate_path(path) {
+            return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", &error, false));
+        }
+        let target = workspace.root.join(path);
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", path, false))
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "PATH_UNSAFE",
+                "not a regular file",
+                false,
+            ));
+        }
+        let bytes = match fs::read(&target) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "INTERNAL",
+                    &error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let digest = format!("sha256:{}", crate::model::sha256_hex(&bytes));
+        let buffer = Buffer::new();
+        buffer.push(&bytes);
+        buffer.end();
+        let stream = self.next_stream;
+        self.next_stream += 1;
+        self.out_streams.insert(
+            stream,
+            OutStream {
+                buffer,
+                credit: 0,
+                seq: 0,
+            },
+        );
+        Action::Reply(rpc::response(
+            &request.id,
+            json!({"streamId": stream, "size": bytes.len(), "digest": digest}),
+        ))
+    }
+
+    fn pump<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        let mut finished: Vec<(u32, u64)> = Vec::new();
+        for (id, stream) in self.out_streams.iter_mut() {
+            if stream.credit == 0 {
+                continue;
+            }
+            let limit = stream.credit.min(exec::CHUNK as u64) as usize;
+            match stream.buffer.take(limit) {
+                None => finished.push((*id, stream.seq)),
+                Some(bytes) if bytes.is_empty() => {}
+                Some(bytes) => {
+                    let mut payload = Vec::with_capacity(12 + bytes.len());
+                    payload.extend_from_slice(&id.to_be_bytes());
+                    payload.extend_from_slice(&stream.seq.to_be_bytes());
+                    payload.extend_from_slice(&bytes);
+                    frame::write_frame(writer, frame::DATA, &payload)?;
+                    stream.seq += 1;
+                    stream.credit -= bytes.len() as u64;
+                }
+            }
+        }
+        for (id, seq) in finished {
+            frame::write_control(
+                writer,
+                &rpc::notification("stream.end", json!({"streamId": id, "seq": seq})),
+            )?;
+            self.out_streams.remove(&id);
+        }
+        Ok(())
+    }
+}
+
 fn identity_fragment() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -735,49 +1020,73 @@ fn error_response(id: &Value, message: &str) -> String {
 }
 
 pub fn run_stdio() -> io::Result<()> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
     let mut session = Session::new()?;
-    session.run(BufReader::new(stdin.lock()), stdout.lock())
+    session.run(BufReader::new(io::stdin()), io::stdout())
 }
 
 impl Session {
-    pub fn run<R: Read, W: Write>(&mut self, mut reader: R, mut writer: W) -> io::Result<()> {
+    pub fn run<R: Read + Send + 'static, W: Write>(
+        &mut self,
+        mut reader: R,
+        mut writer: W,
+    ) -> io::Result<()> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || loop {
+            match frame::read_frame(&mut reader) {
+                Ok(Some(frame)) => {
+                    if sender.send(Ok(frame)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    let _ = sender.send(Err(()));
+                    break;
+                }
+                Err(_) => {
+                    let _ = sender.send(Err(()));
+                    break;
+                }
+            }
+        });
+
         loop {
-            let frame = match frame::read_frame(&mut reader) {
-                Ok(Some(frame)) => frame,
-                Ok(None) => return Ok(()),
-                Err(error) => return Err(error),
-            };
-            match frame.kind {
-                frame::CONTROL => {
-                    let Ok(text) = std::str::from_utf8(&frame.payload) else {
-                        let response = rpc::error(
-                            &Value::Null,
-                            "INVALID_FRAME",
-                            "control frame is not UTF-8",
-                            false,
-                        );
-                        frame::write_control(&mut writer, &response)?;
-                        return Ok(());
-                    };
-                    match self.handle(text) {
-                        Action::Reply(response) => frame::write_control(&mut writer, &response)?,
-                        Action::Close(response) => {
-                            if let Some(response) = response {
-                                frame::write_control(&mut writer, &response)?;
+            self.pump(&mut writer)?;
+            match receiver.recv_timeout(Duration::from_millis(20)) {
+                Ok(Ok(frame)) => match frame.kind {
+                    frame::CONTROL => {
+                        let Ok(text) = std::str::from_utf8(&frame.payload) else {
+                            let response = rpc::error(
+                                &Value::Null,
+                                "INVALID_FRAME",
+                                "control frame is not UTF-8",
+                                false,
+                            );
+                            frame::write_control(&mut writer, &response)?;
+                            return Ok(());
+                        };
+                        match self.handle(text) {
+                            Action::Reply(response) => {
+                                frame::write_control(&mut writer, &response)?
                             }
+                            Action::Close(response) => {
+                                if let Some(response) = response {
+                                    frame::write_control(&mut writer, &response)?;
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                    frame::DATA => {
+                        if let Some(response) = self.handle_data(&frame.payload) {
+                            frame::write_control(&mut writer, &response)?;
                             return Ok(());
                         }
                     }
-                }
-                frame::DATA => {
-                    if let Some(response) = self.handle_data(&frame.payload) {
-                        frame::write_control(&mut writer, &response)?;
-                        return Ok(());
-                    }
-                }
-                _ => unreachable!("frame kind validated by read_frame"),
+                    _ => unreachable!("frame kind validated by read_frame"),
+                },
+                Ok(Err(())) => return Ok(()),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         }
     }
@@ -925,6 +1234,111 @@ mod tests {
         );
         assert_eq!(commit["result"]["generation"], 1, "{commit}");
         assert_eq!(fs::read(root.join("src/app.txt")).unwrap(), content);
+    }
+
+    fn read_data_frames(output: &[u8]) -> HashMap<u32, Vec<u8>> {
+        let mut streams: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut cursor = std::io::Cursor::new(output.to_vec());
+        while let Ok(Some(frame)) = frame::read_frame(&mut cursor) {
+            if frame.kind != frame::DATA || frame.payload.len() < 12 {
+                continue;
+            }
+            let id = u32::from_be_bytes([
+                frame.payload[0],
+                frame.payload[1],
+                frame.payload[2],
+                frame.payload[3],
+            ]);
+            streams
+                .entry(id)
+                .or_default()
+                .extend_from_slice(&frame.payload[12..]);
+        }
+        streams
+    }
+
+    #[test]
+    fn exec_streams_output_and_reports_exit() {
+        let base = std::env::temp_dir().join(format!("fleet-agent-exec-{}", std::process::id()));
+        let root = base.join("replica");
+        let state = base.join("state");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        std::env::set_var("FLEET_AGENT_STATE_DIR", &state);
+        let mut session = Session::new().unwrap();
+        init(&mut session);
+        reply(&mut session, &json!({"jsonrpc":"2.0","id":"1","method":"workspace.open","params":{"workspaceId":"exec-demo","root":root.to_string_lossy(),"adopt":true}}).to_string());
+        reply(&mut session, &json!({"jsonrpc":"2.0","id":"2","method":"workspace.lease","params":{"workspaceId":"exec-demo","operationId":"op","ttlMs":60000}}).to_string());
+        let start = reply(
+            &mut session,
+            &json!({"jsonrpc":"2.0","id":"3","method":"exec.start","params":{
+            "workspaceId":"exec-demo","leaseId":"op","expectedGeneration":0,
+            "argv":["sh","-c","printf hello; printf err >&2; exit 3"]}})
+            .to_string(),
+        );
+        let job = start["result"]["jobId"].as_str().unwrap().to_string();
+        let stdout = start["result"]["stdoutStream"].as_u64().unwrap() as u32;
+        let stderr = start["result"]["stderrStream"].as_u64().unwrap() as u32;
+        reply(&mut session, &json!({"jsonrpc":"2.0","id":"4","method":"stream.credit","params":{"streamId":stdout,"bytes":1048576}}).to_string());
+        reply(&mut session, &json!({"jsonrpc":"2.0","id":"5","method":"stream.credit","params":{"streamId":stderr,"bytes":1048576}}).to_string());
+        let mut output = Vec::new();
+        for _ in 0..200 {
+            session.pump(&mut output).unwrap();
+            if session.out_streams.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let streams = read_data_frames(&output);
+        assert_eq!(
+            String::from_utf8_lossy(streams.get(&stdout).unwrap()),
+            "hello"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(streams.get(&stderr).unwrap()),
+            "err"
+        );
+        let status = reply(
+            &mut session,
+            &json!({"jsonrpc":"2.0","id":"6","method":"exec.status","params":{"jobId":job}})
+                .to_string(),
+        );
+        assert_eq!(status["result"]["state"], "failed");
+        assert_eq!(status["result"]["exitCode"], 3);
+    }
+
+    #[test]
+    fn artifact_streams_a_file_with_digest() {
+        let base =
+            std::env::temp_dir().join(format!("fleet-agent-artifact-{}", std::process::id()));
+        let root = base.join("replica");
+        let state = base.join("state");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        std::env::set_var("FLEET_AGENT_STATE_DIR", &state);
+        fs::write(root.join("out.bin"), b"artifact").unwrap();
+        let mut session = Session::new().unwrap();
+        init(&mut session);
+        reply(&mut session, &json!({"jsonrpc":"2.0","id":"1","method":"workspace.open","params":{"workspaceId":"artifact-demo","root":root.to_string_lossy(),"adopt":true}}).to_string());
+        let open = reply(&mut session, &json!({"jsonrpc":"2.0","id":"2","method":"artifact.open","params":{"workspaceId":"artifact-demo","path":"out.bin"}}).to_string());
+        let stream = open["result"]["streamId"].as_u64().unwrap() as u32;
+        assert_eq!(open["result"]["size"], 8);
+        reply(&mut session, &json!({"jsonrpc":"2.0","id":"3","method":"stream.credit","params":{"streamId":stream,"bytes":4096}}).to_string());
+        let mut output = Vec::new();
+        for _ in 0..50 {
+            session.pump(&mut output).unwrap();
+            if session.out_streams.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let streams = read_data_frames(&output);
+        assert_eq!(
+            String::from_utf8_lossy(streams.get(&stream).unwrap()),
+            "artifact"
+        );
     }
 
     #[test]

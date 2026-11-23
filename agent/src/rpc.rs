@@ -22,6 +22,10 @@ pub fn response(id: &Value, result: Value) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
 }
 
+pub fn notification(method: &str, params: Value) -> String {
+    json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string()
+}
+
 pub fn error(id: &Value, code: &str, message: &str, retryable: bool) -> String {
     json!({
         "jsonrpc": "2.0",

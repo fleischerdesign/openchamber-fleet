@@ -3,6 +3,7 @@
 //! It is a process, not a service: the controller spawns it over SSH stdio and it exits when the
 //! connection closes. No listener, no credentials of its own.
 
+mod exec;
 mod frame;
 mod identity;
 mod model;
