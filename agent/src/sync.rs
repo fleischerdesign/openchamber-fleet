@@ -85,13 +85,14 @@ pub fn add_entries(
     if record.phase != "entries" {
         return Err("INVALID_REQUEST entries are only accepted before plan".into());
     }
+    let mut seen: HashSet<String> = record
+        .entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
     for entry in entries {
         entry.validate()?;
-        if record
-            .entries
-            .iter()
-            .any(|existing| existing.path == entry.path)
-        {
+        if !seen.insert(entry.path.clone()) {
             return Err(format!("duplicate entry {}", entry.path));
         }
         record.entries.push(entry);
@@ -632,4 +633,61 @@ mod tests {
 
 fn io_message(error: std::io::Error) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod symlink_tests {
+    use super::*;
+    use crate::model::{sha256_hex, Entry};
+
+    #[test]
+    fn symlinks_are_created_not_followed() {
+        let base = std::env::temp_dir().join(format!("fleet-agent-symlink-{}", std::process::id()));
+        let root = base.join("replica");
+        let state = base.join("state");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let mut ws = Workspace {
+            id: "symlink".into(),
+            root: root.clone(),
+            state: state.join("symlink"),
+            generation: 0,
+            manifest: Manifest::empty(),
+            recovery: None,
+        };
+        let mut txn = begin(&ws, Policy::default(), 0, "t1").unwrap();
+        let entry = Entry {
+            path: "link".into(),
+            kind: "symlink".into(),
+            mode: "0777".into(),
+            size: 0,
+            mtime_ms: 0,
+            digest: None,
+            link: Some("target".into()),
+        };
+        add_entries(&mut txn, vec![entry], &ws).unwrap();
+        let planned = plan(&mut txn, &ws).unwrap();
+        commit(&mut txn, &mut ws, &planned.plan_digest).unwrap();
+        assert_eq!(fs::read_link(root.join("link")).unwrap().to_string_lossy(), "target");
+
+        // A file below a symlinked directory must be refused, never followed.
+        let mut txn2 = begin(&ws, Policy::default(), 1, "t2").unwrap();
+        let digest = format!("sha256:{}", sha256_hex(b"x"));
+        let file = Entry {
+            path: "linkdir/file".into(),
+            kind: "file".into(),
+            mode: "0644".into(),
+            size: 1,
+            mtime_ms: 0,
+            digest: Some(digest.clone()),
+            link: None,
+        };
+        add_entries(&mut txn2, vec![file], &ws).unwrap();
+        let planned2 = plan(&mut txn2, &ws).unwrap();
+        put_blob(&ws, &digest, b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("linkdir")).unwrap();
+        let error = commit(&mut txn2, &mut ws, &planned2.plan_digest).unwrap_err();
+        assert!(error.starts_with("PATH_UNSAFE"), "{error}");
+    }
 }

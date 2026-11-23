@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -32,6 +33,29 @@ before(async () => {
 after(async () => {
   client?.close();
   fs.rmSync(base, { recursive: true, force: true });
+});
+
+describe('large artifact', { skip: !available && `agent binary not built at ${binary}` }, () => {
+  test('fetches a multi-frame artifact with digest verification', async () => {
+    await syncWorkspace(client, matcher, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      excludes: ['target/'],
+      mode: 'apply',
+      adopt: true,
+    });
+    const big = crypto.randomBytes(5 * 1024 * 1024);
+    fs.writeFileSync(path.join(replica, 'big.bin'), big);
+    const fetched = await fetchArtifact(client, {
+      workspaceId: 'v1-test',
+      root: replica,
+      artifact: 'big.bin',
+      dest: path.join(base, 'download-big'),
+    });
+    assert.equal(fs.readFileSync(fetched.file).length, big.length);
+    assert.match(fetched.digest, /^sha256:[0-9a-f]{64}$/);
+  });
 });
 
 describe('fleet.agent.v1 controller', { skip: !available && `agent binary not built at ${binary}` }, () => {

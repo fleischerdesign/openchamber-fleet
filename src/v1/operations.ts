@@ -131,7 +131,7 @@ export async function syncWorkspace(
       await client.upload(put.streamId, bytes);
     }
 
-    const committed = (await client.request('sync.commit', { txnId, planDigest: plan.planDigest }, 300_000)) as {
+    const committed = (await client.request('sync.commit', { txnId, planDigest: plan.planDigest }, 1_800_000)) as {
       generation: number;
       manifestDigest: string;
     };
