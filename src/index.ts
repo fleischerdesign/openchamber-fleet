@@ -19,3 +19,5 @@ export { applyWorkspace, planWorkspace, verifyWorkspace, workspaceKey } from './
 export type { ApplyResult, SyncOptions } from './sync.js';
 export { doctor, formatDoctor, parseRsyncVersion, rsyncSatisfies } from './doctor.js';
 export type { Check, DoctorReport } from './doctor.js';
+export { PRESET_NAMES, PRESETS, buildOutputHints, detectPresets, excludesFor } from './presets.js';
+export type { Preset } from './presets.js';

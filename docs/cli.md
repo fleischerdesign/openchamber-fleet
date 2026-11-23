@@ -6,7 +6,7 @@ names a defect rather than an HTTP status.
 ## Commands
 
 ```
-fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--force]
+fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--preset node,rust] [--force]
 fleet status [--json] [--check]
 fleet sync --host <alias> (--plan | --apply | --verify) [--content] [--allow-delete]
 fleet exec --host <alias> [--timeout SECONDS] [--allow-stale] [--json] -- <command…>

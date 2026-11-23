@@ -9,6 +9,7 @@ import type { HostConfig, WorkspaceConfig } from '../config.js';
 import { FleetError, formatError } from '../errors.js';
 import { cancelRun, execRemote } from '../exec.js';
 import { fetchArtifacts } from '../fetch.js';
+import { buildOutputHints } from '../presets.js';
 import { statusReport } from '../status.js';
 import { applyWorkspace, planWorkspace, verifyWorkspace } from '../sync.js';
 
@@ -109,7 +110,12 @@ export default {
               };
             }
             if (mode !== 'plan') throw new FleetError('usage', 'mode must be plan, apply or verify');
-            return { content: formatPlan(host.alias, await planWorkspace(config, host, { checksum })) };
+            const plan = await planWorkspace(config, host, { checksum });
+            const hints = buildOutputHints(plan.entries);
+            const note = hints.length > 0
+              ? `\nnote: generated output would be replicated: ${hints.join(', ')} — add it to excludes if a build produces it`
+              : '';
+            return { content: formatPlan(host.alias, plan) + note };
           } catch (error) {
             return failure(error);
           }

@@ -49,6 +49,12 @@ A host alias is a local label. Renaming it changes state keys; nothing else.
 
 ## Excludes
 
+`fleet init` writes a starting set from the detected project kind: `node` excludes
+`node_modules/`, `dist/` and the framework caches; `rust` excludes `target/`; `python` excludes
+`.venv/`, `__pycache__/` and friends; `nix` excludes `result*`. The list is a starting point, not a
+policy: edit it per project, and `fleet sync --plan` names generated output that is about to be
+replicated.
+
 Patterns use rsync's interpretation for the subset we support, and the same patterns are passed to
 rsync verbatim:
 

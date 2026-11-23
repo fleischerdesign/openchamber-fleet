@@ -52,6 +52,9 @@ fleet fetch --host workstation --dest ./artifacts -- target/debug/my-binary
 
 The same three steps are exposed to an agent as `fleet_sync`, `fleet_exec` and `fleet_fetch`.
 
+`fleet init` detects a project kind (node, rust, python, nix) from marker files and writes the
+matching excludes; `--preset` overrides the detection.
+
 ## Guarantees
 
 - **One writer.** Replication is one-way, canonical → replica. There is no merge and no bidirection
