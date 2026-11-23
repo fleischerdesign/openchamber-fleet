@@ -21,9 +21,18 @@ session to the workstation breaks session continuity, and a second runtime fragm
 Replication keeps one session, one workspace of record, and still lets the expensive command run
 on the machine that should run it.
 
+## Status
+
+Version 0.1.0. The repository is public and CI is green on Node 22 and 24; the npm package is
+not published yet, so install from the repository for now.
+
 ## Quickstart
 
 ```bash
+# install from the repository (npm publish is the next step)
+git clone https://github.com/fleischerdesign/openchamber-fleet
+cd openchamber-fleet && npm ci && npm run build && npm link
+
 # in the project you want to offload work from
 fleet init --host workstation --ssh philipp@10.10.100.20
 
