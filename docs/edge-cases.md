@@ -149,8 +149,8 @@ Test prefixes: `U` unit, `P` property, `I` integration (real rsync against a fak
 
 ## Test mapping rules
 
-- A row without a test is a defect and must be either tested or moved to `docs/design.md` §12
-  (non-goals) with a reason.
+- Every row is either covered (see `test-coverage.md`) or listed there as planned with a reason;
+  a new claim arrives with its test in the same commit.
 - Property tests cover convergence and idempotence over random trees; the numbered cases cover the
   semantics that property tests cannot name.
 - Failure injection uses the fake SSH transport with a real rsync, plus a `PATH` shim that makes
