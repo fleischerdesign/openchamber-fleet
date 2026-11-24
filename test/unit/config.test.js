@@ -156,6 +156,39 @@ describe('split host registry and project configuration', () => {
     assert.deepEqual(Object.keys(migrated.hosts), ['new']);
   });
 
+  test('an editor view keeps the host registry for a new project', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'editor-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'editor-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'editor-config-'));
+    initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
+
+    const documents = loadConfigDocuments(second, { configDir });
+    assert.deepEqual(Object.keys(documents.hosts.hosts), ['mob']);
+    assert.equal(documents.project.hosts.length, 0);
+    assert.equal(documents.legacy, false);
+  });
+
+  test('an editor view still shows a project whose registry is missing', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'editor-missing-registry-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'editor-missing-registry-config-'));
+    const documents = initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    fs.rmSync(documents.hostsFile);
+
+    const editable = loadConfigDocuments(workspace, { configDir });
+    assert.deepEqual(editable.project.hosts, ['mob']);
+    assert.deepEqual(editable.hosts.hosts, {});
+  });
+
+  test('a split project is not reported as legacy while fleet.json remains', () => {
+    const workspace = writeConfig({ name: 'legacy', hosts: { old: { ssh: 'u@h' } } });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'editor-legacy-config-'));
+    initProjectConfig(workspace, { alias: 'new', ssh: 'u@h', configDir });
+
+    const documents = loadConfigDocuments(workspace, { configDir });
+    assert.equal(documents.legacy, false);
+    assert.deepEqual(documents.project.hosts, ['new']);
+  });
+
   test('documents default cleanly and round-trip through save', () => {
     const workspace = fs.mkdtempSync(path.join(tmp, 'docs-'));
     const configDir = fs.mkdtempSync(path.join(tmp, 'docs-config-'));

@@ -11,7 +11,12 @@ fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
   hosts: { node: { ssh: 'test@127.0.0.1', port: 1 } },
   excludes: [],
 }));
-after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-plugin-config-'));
+process.env.FLEET_CONFIG_DIR = configDir;
+after(() => {
+  fs.rmSync(workspace, { recursive: true, force: true });
+  fs.rmSync(configDir, { recursive: true, force: true });
+});
 
 async function register(sessionDirectory) {
   const tools = [];

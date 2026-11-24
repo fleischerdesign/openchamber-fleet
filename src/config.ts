@@ -188,15 +188,27 @@ export function loadConfigDocuments(
   options: LoadConfigOptions = {},
 ): ConfigDocuments {
   const paths = configPaths(cwd, options);
-  try {
-    const config = loadConfig(cwd, options);
-    return documentsFromConfig(config, paths, explicitConfigPath(options) ?? legacyPath(cwd));
-  } catch (error) {
-    if (error instanceof FleetError && error.code === 'config-missing') {
-      return defaultDocuments(paths);
-    }
-    throw error;
+  const name = defaultWorkspaceName(paths.workspaceRoot);
+  const explicit = explicitConfigPath(options);
+  if (explicit) {
+    const file = path.resolve(cwd, explicit);
+    return documentsFromConfig(loadLegacyConfig(file), paths, file);
   }
+
+  const legacy = legacyPath(cwd);
+  if (legacy && !fs.existsSync(paths.projectFile)) {
+    return documentsFromConfig(loadLegacyConfig(legacy), paths, legacy);
+  }
+
+  // An editor view: each file is validated on its own so a new project keeps the
+  // existing host registry and a project can be repaired while a host is missing.
+  const hosts = fs.existsSync(paths.hostsFile)
+    ? readHostRegistry(paths.hostsFile, false)
+    : emptyHostRegistry();
+  const project = fs.existsSync(paths.projectFile)
+    ? readProjectConfig(paths.projectFile, false, name)
+    : defaultProjectConfig(name);
+  return { ...paths, hosts, project, legacy: false };
 }
 
 export function saveConfigDocuments(
@@ -346,7 +358,7 @@ function loadLegacyConfig(file: string): WorkspaceConfig {
 
 function readHostRegistry(file: string, missingEmpty: boolean): HostRegistry {
   if (!fs.existsSync(file)) {
-    if (missingEmpty) return { version: CONFIG_VERSION, hosts: {} };
+    if (missingEmpty) return emptyHostRegistry();
     throw new FleetError('config-missing', `no Fleet host registry at ${file}`, {
       file,
       hint: 'run `fleet init` in the project to create it',
@@ -357,17 +369,7 @@ function readHostRegistry(file: string, missingEmpty: boolean): HostRegistry {
 
 function readProjectConfig(file: string, missingEmpty: boolean, nameFallback: string): ProjectConfigFile {
   if (!fs.existsSync(file)) {
-    if (missingEmpty) {
-      return {
-        version: CONFIG_VERSION,
-        name: nameFallback,
-        hosts: [],
-        roots: {},
-        excludes: [],
-        env: {},
-        shell: 'bash',
-      };
-    }
+    if (missingEmpty) return defaultProjectConfig(nameFallback);
     throw new FleetError('config-missing', `no Fleet project configuration at ${file}`, {
       file,
       hint: 'run `fleet init` in the project to create it',
@@ -469,20 +471,19 @@ function documentsFromConfig(config: WorkspaceConfig, paths: ConfigPaths, source
   };
 }
 
-function defaultDocuments(paths: ConfigPaths): ConfigDocuments {
+function emptyHostRegistry(): HostRegistry {
+  return { version: CONFIG_VERSION, hosts: {} };
+}
+
+function defaultProjectConfig(name: string): ProjectConfigFile {
   return {
-    ...paths,
-    hosts: { version: CONFIG_VERSION, hosts: {} },
-    project: {
-      version: CONFIG_VERSION,
-      name: defaultWorkspaceName(paths.workspaceRoot),
-      hosts: [],
-      roots: {},
-      excludes: [],
-      env: {},
-      shell: 'bash',
-    },
-    legacy: false,
+    version: CONFIG_VERSION,
+    name,
+    hosts: [],
+    roots: {},
+    excludes: [],
+    env: {},
+    shell: 'bash',
   };
 }
 
