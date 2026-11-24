@@ -4,6 +4,7 @@ import { applyHostReady } from '@openchamber/sdk/ui';
 interface HostEntry {
   ssh: string;
   port?: number;
+  tags?: string[];
 }
 
 interface HostsFile {
@@ -130,7 +131,9 @@ function renderHosts(documents: ConfigDocuments): void {
     const name = document.createElement('strong');
     name.textContent = alias;
     const ssh = document.createElement('small');
-    ssh.textContent = entry?.ssh ?? 'missing from host registry';
+    ssh.textContent = entry
+      ? `${entry.ssh}${entry.tags && entry.tags.length > 0 ? ` · ${entry.tags.join(', ')}` : ''}`
+      : 'missing from host registry';
     title.append(name, ssh);
     const actions = document.createElement('div');
     actions.className = 'row';

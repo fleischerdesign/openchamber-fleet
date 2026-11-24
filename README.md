@@ -43,7 +43,8 @@ ssh -T host fleet-agent stdio  ────────────▶  agent pr
 3. On the target machine, install the matching `fleet-agent` release binary, or build it with
    `cargo install --path agent`, and put it on the SSH user's `PATH`. `ssh` and `git` are required
    there.
-4. Open the Fleet panel, add the host and project, and use the seven tools from any OpenCode session.
+4. Open the Fleet panel, add the host and project, and use the ten tools from any OpenCode session.
+   Normal work uses `fleet_run`: it synchronizes the workspace first when it changed, then executes.
 
 The extension bundles the controller and the OpenCode plugin. The `fleet` CLI is optional. A ZIP or
 folder install runs from OpenChamber's writable extension catalog and needs no Nix.
@@ -58,15 +59,16 @@ npm install -g ./openchamber-fleet-<version>.tgz
 # never a file in the repository
 fleet init --host workstation --ssh philipp@10.10.100.20
 
+fleet run --host workstation -- cargo test --all-features
+fleet run --host auto --tag linux -- cargo test --all-features
 fleet sync --host workstation --plan
-fleet sync --host workstation --apply --exclude target/,dist/
-
-fleet exec --host workstation -- cargo test --all-features
 fleet fetch --host workstation --dest ./out -- target/release/app
 ```
 
-The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `fleet_fetch`,
-`fleet_status`, `fleet_job_status`, `fleet_job_cancel` and `fleet_recover`.
+`fleet run` synchronizes first (default `--sync auto`), then executes. `fleet exec` is the low-level
+variant when the replica is intentionally current. The agent-facing tools are `fleet_run`,
+`fleet_sync`, `fleet_exec`, `fleet_fetch`, `fleet_hosts`, `fleet_status`, `fleet_jobs`,
+`fleet_job_status`, `fleet_job_cancel` and `fleet_recover`.
 
 ### Nix (optional)
 
@@ -94,17 +96,23 @@ Nothing is written to the repository. It uses only public OpenChamber SDK and Op
 Nix is an optional packaging path, not a runtime requirement.
 
 Without OpenChamber, install the npm package and add `openchamber-fleet/plugin` to OpenCode's plugin
-list. That path provides the seven tools and the CLI, but not the OpenChamber panel or status section.
+list. That path provides the ten tools and the CLI, but not the OpenChamber panel or status section.
 
-`fleet_exec` accepts `background: true`. The tool returns a `jobId`, the agent can end its turn, and
-the plugin resumes the same session through OpenCode's official `session.synthetic` API when the job
-finishes. `fleet_job_status` and `fleet_job_cancel` manage those jobs. Background jobs are tied to the
-running OpenCode runtime; restart, plugin unload and location eviction are reported as interruptions.
+`fleet_run` and `fleet_exec` accept `background: true`. The tool returns a `jobId`, the agent can end
+its turn, and the plugin resumes the same session through OpenCode's official `session.synthetic` API
+when the job finishes. `fleet_jobs` lists the session's jobs; `fleet_job_status` and
+`fleet_job_cancel` inspect and cancel them. A terminal job whose notification was not delivered is
+re-notified once after a plugin restart; a job that was still running is reported as interrupted,
+never silently resumed. Background jobs are tied to the running OpenCode runtime.
 
-Permissions follow OpenCode rules: remote exec evaluates a descriptor under `fleet.exec` and the
-exact command under `shell`, fetch evaluates `edit` and `external_directory`, and sync
-apply/recovery use dedicated `fleet.sync` / `fleet.recover` actions. Status and sync planning are
-read-only; `adopt` is apply-only.
+Permissions follow OpenCode rules: `fleet_run` evaluates the combined sync-and-run descriptor under
+`fleet.run` and the exact command under `shell`; raw `fleet_exec` uses `fleet.exec` and `shell`.
+Fetch evaluates `edit` and `external_directory`; sync apply/recovery use dedicated `fleet.sync` /
+`fleet.recover` actions. Status and sync planning are read-only; `adopt` is apply-only.
+
+Hosts can carry tags in the local host registry, for example `"tags": ["linux", "gpu"]`. The agent
+uses `fleet_hosts` to inspect them and `fleet_run` with `host: "auto"` plus tags to select a machine;
+there is no per-run switch in the UI.
 
 ## Guarantees
 

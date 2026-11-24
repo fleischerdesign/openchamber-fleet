@@ -33,6 +33,22 @@ describe('fleet init', () => {
     assert.equal(legacy.hosts.mob.ssh, 'u@h');
   });
 
+  test('fleet hosts reports tags and auto-selection', () => {
+    const { root } = repository();
+    const configDir = fs.mkdtempSync(path.join(tmp, 'tags-config-'));
+    execFileSync(process.execPath, [cli, 'init', '--host', 'mob', '--ssh', 'u@h', '--name', 'tagged', '--tag', 'linux,gpu', '--config-dir', configDir], {
+      cwd: root,
+      stdio: 'pipe',
+    });
+    const output = execFileSync(process.execPath, [cli, 'hosts', '--tag', 'gpu', '--json', '--config-dir', configDir], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    const value = JSON.parse(output);
+    assert.deepEqual(value.hosts[0].tags, ['linux', 'gpu']);
+    assert.equal(value.selected, 'mob');
+  });
+
   test('--config-dir writes the split configuration outside the repository', () => {
     const { root } = repository();
     const configDir = fs.mkdtempSync(path.join(tmp, 'config-'));

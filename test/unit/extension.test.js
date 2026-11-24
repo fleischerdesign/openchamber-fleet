@@ -22,9 +22,12 @@ describe('OpenChamber extension package', () => {
     assert.deepEqual(parsed.manifest.contributes.tools.map((tool) => tool.match).sort(), [
       'fleet_exec',
       'fleet_fetch',
+      'fleet_hosts',
       'fleet_job_cancel',
       'fleet_job_status',
+      'fleet_jobs',
       'fleet_recover',
+      'fleet_run',
       'fleet_status',
       'fleet_sync',
     ]);
@@ -43,7 +46,7 @@ describe('OpenChamber extension package', () => {
       session: { get: async () => ({ location: { directory: process.cwd() } }), synthetic: async () => ({}) },
     });
     try {
-      assert.equal(tools.length, 7);
+      assert.equal(tools.length, 10);
       assert.ok(tools.some((tool) => tool.name === 'fleet_exec' && tool.output));
     } finally {
       await cleanup();

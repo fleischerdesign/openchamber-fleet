@@ -5,6 +5,10 @@ import path from 'node:path';
 import { compileExcludes, loadConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
 import { FleetError, friendlyErrorMessage } from '../errors.js';
+import { hostViews, selectHost } from '../hosts.js';
+import { commandLabelOf, exitLabelOf, stateLabelOf } from '../labels.js';
+import { runWorkspace, syncForRun } from '../run.js';
+import type { RunSyncMode } from '../run.js';
 import { replicaState } from '../status.js';
 import { AgentError } from '../v1/errors.js';
 import {
@@ -174,32 +178,112 @@ function syncOutput(
   };
 }
 
-const STATE_LABELS: Record<string, string> = {
-  running: 'Running',
-  'cancel-requested': 'Cancelling',
-  succeeded: 'Succeeded',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-  interrupted: 'Interrupted',
-  unknown: 'Unknown',
-};
-
-function stateLabelOf(state: string): string {
-  return STATE_LABELS[state] ?? state;
+interface ValidatedExec {
+  readonly argv: string[];
+  readonly cwd?: string;
+  readonly env: Record<string, string>;
+  readonly timeoutMs?: number;
+  readonly command: string;
+  readonly descriptor: string;
+  readonly metadata: Record<string, unknown>;
 }
 
-function exitLabelOf(exitCode: number | null, signal: number | null, state: string): string {
-  if (typeof exitCode === 'number') return `Exit code ${exitCode}`;
-  if (typeof signal === 'number') return `Signal ${signal}`;
-  if (state === 'running' || state === 'cancel-requested') return 'Still running';
-  return 'No exit code';
+function validateExec(config: WorkspaceConfig, host: HostConfig, input: Record<string, unknown>): ValidatedExec {
+  if (!Array.isArray(input.argv) || input.argv.length === 0) {
+    throw new AgentError('INVALID_REQUEST', 'argv must contain at least one command');
+  }
+  const argv = input.argv.map(String);
+  const timeoutMs = typeof input.timeoutSeconds === 'number' && Number.isFinite(input.timeoutSeconds)
+    ? input.timeoutSeconds * 1000
+    : undefined;
+  const inputEnv = input.env && typeof input.env === 'object'
+    ? Object.fromEntries(Object.entries(input.env).map(([key, value]) => [key, String(value)]))
+    : {};
+  const unsafeEnv = Object.keys(inputEnv).filter((key) => /^(PATH|LD_.*|DYLD_.*|NODE_OPTIONS|PYTHONPATH|BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_ASKPASS|SSH_ASKPASS|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|PERL5OPT|RUBYOPT|PYTHONSTARTUP)$/.test(key));
+  if (unsafeEnv.length > 0) {
+    throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in the project config: ${unsafeEnv.join(', ')}`);
+  }
+  const env = { ...config.env, ...inputEnv };
+  const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;
+  const command = commandText(argv);
+  const envDigest = createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([left], [right]) => left.localeCompare(right)))).digest('hex');
+  const descriptor = JSON.stringify({ host: host.alias, cwd: cwd ?? '.', envKeys: Object.keys(env).sort(), envDigest, argv });
+  return {
+    argv,
+    ...(cwd === undefined ? {} : { cwd }),
+    env,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    command,
+    descriptor,
+    metadata: {
+      workspace: config.name,
+      host: host.alias,
+      argv,
+      cwd: cwd ?? '.',
+      envKeys: Object.keys(env).sort(),
+    },
+  };
 }
 
-function commandLabelOf(argv: string[]): string {
-  const executable = (argv[0] ?? 'command').split('/').pop() || 'command';
-  const safe = executable.replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 48);
-  const count = argv.length - 1;
-  return count > 0 ? `${safe} · ${count} arg${count === 1 ? '' : 's'}` : safe;
+async function assertShellPermission(
+  ctx: PluginContext,
+  context: ToolContext | undefined,
+  exec: ValidatedExec,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const metadata = { ...exec.metadata, ...extra };
+  await assertPermission(ctx, context, 'shell', [exec.command], metadata, [exec.command]);
+}
+
+function syncLabelOf(sync: { changes: number } | null | undefined): string {
+  if (!sync) return 'Not synced';
+  return sync.changes === 0 ? 'Up to date' : `${sync.changes} change${sync.changes === 1 ? '' : 's'}`;
+}
+
+function runOutput(
+  config: WorkspaceConfig,
+  host: HostConfig,
+  argv: string[],
+  background: boolean,
+  state: string,
+  sync: { changes: number; generation: number | null; planDigest: string; items: Array<{ action: string; path: string }>; changesTruncated: boolean } | null,
+  exec: Awaited<ReturnType<typeof execCommand>> | null,
+  jobId: string,
+): Record<string, unknown> {
+  const exitCode = exec?.exitCode ?? null;
+  const signal = exec?.signal ?? null;
+  const nextStep = state === 'sync-required'
+    ? 'Review the changes, then run fleet_run with sync=apply or fleet_sync apply.'
+    : background
+      ? 'The session resumes when the job finishes.'
+      : state === 'succeeded'
+        ? 'No action needed.'
+        : state === 'cancelled'
+          ? 'The job was cancelled.'
+          : 'Inspect stderr or call fleet_job_status for a background job.';
+  return {
+    workspace: config.name,
+    host: host.alias,
+    argv,
+    commandLabel: commandLabelOf(argv),
+    background,
+    modeLabel: background ? 'Background job' : 'Foreground',
+    state,
+    stateLabel: stateLabelOf(state),
+    exitCode,
+    exitLabel: exitLabelOf(exitCode, signal, state),
+    signal,
+    jobId,
+    syncLabel: syncLabelOf(sync),
+    syncChanges: sync?.changes ?? 0,
+    syncGeneration: sync?.generation ?? null,
+    syncPlanDigest: sync?.planDigest ?? null,
+    syncItems: sync?.items ?? [],
+    syncTruncated: sync?.changesTruncated ?? false,
+    stdout: exec ? truncated(exec.stdout.toString('utf8')) : '',
+    stderr: exec ? truncated(exec.stderr.toString('utf8')) : '',
+    nextStep,
+  };
 }
 
 function execOutput(
@@ -232,6 +316,8 @@ function storedJobOutput(record: StoredJob): Record<string, unknown> {
     workspace: record.workspace,
     host: record.host,
     jobId: record.jobId,
+    argv: record.argv,
+    commandLabel: commandLabelOf(record.argv),
     state: record.state,
     stateLabel: stateLabelOf(record.state),
     exitCode: record.exitCode ?? null,
@@ -341,7 +427,7 @@ export default {
 
       tools.add({
         name: 'fleet_exec',
-        description: 'Run argv in the synced replica. background=true returns a jobId, ends the turn, and resumes this session automatically when the job finishes.',
+        description: 'Low-level remote execution without syncing. Prefer fleet_run for normal work; use this only when the replica is intentionally current. background=true returns a jobId, ends the turn, and resumes this session automatically.',
         options: { codemode: false, permission: 'shell' },
         input: schema({
           host: string,
@@ -370,53 +456,28 @@ export default {
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
-          if (!Array.isArray(input.argv) || input.argv.length === 0) {
-            throw new AgentError('INVALID_REQUEST', 'argv must contain at least one command');
-          }
-          const argv = input.argv.map(String);
-          const timeout = typeof input.timeoutSeconds === 'number' && Number.isFinite(input.timeoutSeconds)
-            ? input.timeoutSeconds * 1000
-            : undefined;
-          const inputEnv = input.env && typeof input.env === 'object'
-            ? Object.fromEntries(Object.entries(input.env).map(([key, value]) => [key, String(value)]))
-            : {};
-          const unsafeEnv = Object.keys(inputEnv).filter((key) => /^(PATH|LD_.*|DYLD_.*|NODE_OPTIONS|PYTHONPATH|BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_ASKPASS|SSH_ASKPASS|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|PERL5OPT|RUBYOPT|PYTHONSTARTUP)$/.test(key));
-          if (unsafeEnv.length > 0) {
-            throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in the project config: ${unsafeEnv.join(', ')}`);
-          }
-          const env = { ...config.env, ...inputEnv };
-          const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;
-          const command = commandText(argv);
-          const envDigest = createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([left], [right]) => left.localeCompare(right)))).digest('hex');
-          const descriptor = JSON.stringify({ host: host.alias, cwd: cwd ?? '.', envKeys: Object.keys(env).sort(), envDigest, argv });
-          const metadata = {
-            workspace: config.name,
-            host: host.alias,
-            argv,
-            cwd: cwd ?? '.',
-            envKeys: Object.keys(env).sort(),
-            background: input.background === true,
-          };
-          await assertPermission(ctx, context, 'fleet.exec', [descriptor], metadata, [descriptor]);
-          await assertPermission(ctx, context, 'shell', [command], metadata, [command]);
+          const exec = validateExec(config, host, input);
+          const metadata = { ...exec.metadata, background: input.background === true };
+          await assertPermission(ctx, context, 'fleet.exec', [exec.descriptor], metadata, [exec.descriptor]);
+          await assertShellPermission(ctx, context, exec, { background: input.background === true });
 
           if (input.background === true) {
             const record = await registry.start({
               config,
               host,
               sessionID: sessionIDOf(context),
-              argv,
-              cwd,
-              env,
-              timeoutMs: timeout,
+              argv: exec.argv,
+              cwd: exec.cwd,
+              env: exec.env,
+              timeoutMs: exec.timeoutMs,
               startupSignal: context?.signal,
               agentPath: agentPath(),
             });
             return jsonResult({
               workspace: config.name,
               host: host.alias,
-              argv,
-              commandLabel: commandLabelOf(argv),
+              argv: exec.argv,
+              commandLabel: commandLabelOf(exec.argv),
               background: true,
               modeLabel: 'Background job',
               jobId: record.jobId,
@@ -434,19 +495,200 @@ export default {
           const result = await withClient(host, context, (client) => execCommand(client, {
             workspaceId: config.name,
             root: host.root,
-            argv,
-            cwd,
-            env,
-            timeoutMs: timeout,
+            argv: exec.argv,
+            cwd: exec.cwd,
+            env: exec.env,
+            timeoutMs: exec.timeoutMs,
             signal: context?.signal,
             onProgress: (update: ExecProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
           }), { closeOnAbort: false });
-          return jsonResult(execOutput(config, host, argv, false, result), {
+          return jsonResult(execOutput(config, host, exec.argv, false, result), {
             host: host.alias,
             jobId: result.jobId,
             exitCode: result.exitCode,
             state: result.state,
           });
+        },
+      });
+
+      tools.add({
+        name: 'fleet_run',
+        description: 'Run argv on a configured host, synchronizing the workspace first when it changed. This is the normal execution tool; the agent does not need a separate sync call. background=true returns a jobId, ends the turn, and resumes this session when the job finishes.',
+        options: { codemode: false, permission: 'shell' },
+        input: schema({
+          host: string,
+          tags: stringArray,
+          argv: { type: 'array', items: string, minItems: 1 },
+          cwd: string,
+          env: { type: 'object', additionalProperties: string },
+          timeoutSeconds: { type: 'number', minimum: 1 },
+          background: boolean,
+          sync: { type: 'string', enum: ['auto', 'never', 'plan', 'apply'] },
+          excludes: stringArray,
+          adopt: boolean,
+        }, ['argv']),
+        output: output({
+          workspace: string,
+          host: string,
+          argv: stringArray,
+          commandLabel: string,
+          background: boolean,
+          modeLabel: string,
+          state: string,
+          stateLabel: string,
+          exitCode: { type: ['number', 'null'] },
+          exitLabel: string,
+          signal: { type: ['number', 'null'] },
+          jobId: string,
+          syncLabel: string,
+          syncChanges: { type: 'number' },
+          syncGeneration: { type: ['number', 'null'] },
+          syncPlanDigest: { type: ['string', 'null'] },
+          syncItems: { type: 'array', items: schema({ action: string, path: string }, ['action', 'path']) },
+          syncTruncated: boolean,
+          stdout: string,
+          stderr: string,
+          nextStep: string,
+        }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'modeLabel', 'state', 'stateLabel', 'exitCode', 'exitLabel', 'jobId', 'syncLabel', 'syncChanges', 'syncGeneration', 'syncPlanDigest', 'syncItems', 'syncTruncated', 'stdout', 'stderr', 'nextStep']),
+        async execute(input, context) {
+          const config = await workspaceOf(ctx, context);
+          const host = selectHost(config, {
+            ...(typeof input.host === 'string' ? { host: input.host } : {}),
+            ...(Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {}),
+          });
+          const exec = validateExec(config, host, input);
+          const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
+          const excludes = [...new Set([...config.excludes, ...extra])];
+          const syncMode: RunSyncMode = input.sync === 'never' || input.sync === 'plan' || input.sync === 'apply'
+            ? input.sync
+            : 'auto';
+          if (input.adopt === true && syncMode !== 'auto' && syncMode !== 'apply') {
+            throw new AgentError('INVALID_REQUEST', 'adopt is only valid with sync=auto or sync=apply');
+          }
+          const background = input.background === true;
+          const metadata = {
+            ...exec.metadata,
+            sync: syncMode,
+            excludes,
+            adopt: input.adopt === true,
+            background,
+          };
+          await assertPermission(ctx, context, 'fleet.run', [exec.descriptor], metadata, [exec.descriptor]);
+
+          const progress = progressReporter(context);
+          const common = {
+            ...(exec.cwd === undefined ? {} : { cwd: exec.cwd }),
+            env: exec.env,
+            ...(exec.timeoutMs === undefined ? {} : { timeoutMs: exec.timeoutMs }),
+            sync: syncMode,
+            excludes: extra,
+            adopt: input.adopt === true,
+            signal: context?.signal,
+            onSyncProgress: (update: SyncProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+          };
+
+          if (background) {
+            const prepared = await withClient(host, context, (client) => syncForRun(client, config, host, {
+              ...common,
+              argv: exec.argv,
+            }), { closeOnAbort: false });
+            if (prepared.required) {
+              return jsonResult(runOutput(config, host, exec.argv, true, 'sync-required', prepared.sync, null, ''));
+            }
+            await assertShellPermission(ctx, context, exec, { background: true, sync: syncMode });
+            const record = await registry.start({
+              config,
+              host,
+              sessionID: sessionIDOf(context),
+              argv: exec.argv,
+              cwd: exec.cwd,
+              env: exec.env,
+              timeoutMs: exec.timeoutMs,
+              startupSignal: context?.signal,
+              agentPath: agentPath(),
+            });
+            return jsonResult(runOutput(config, host, exec.argv, true, record.state, prepared.sync, null, record.jobId), {
+              host: host.alias,
+              jobId: record.jobId,
+              background: true,
+              state: record.state,
+            });
+          }
+
+          const result = await withClient(host, context, (client) => runWorkspace(client, config, host, {
+            ...common,
+            argv: exec.argv,
+            onExecProgress: (update: ExecProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            beforeExec: () => assertShellPermission(ctx, context, exec, { background: false, sync: syncMode }),
+          }), { closeOnAbort: false });
+          return jsonResult(runOutput(config, host, exec.argv, false, result.state, result.sync, result.exec, result.exec?.jobId ?? ''), {
+            host: host.alias,
+            state: result.state,
+            changes: result.sync?.changes ?? 0,
+          });
+        },
+      });
+
+      tools.add({
+        name: 'fleet_hosts',
+        description: 'List configured hosts and their tags. Use it to choose a host or pass tags to fleet_run/host=auto.',
+        options: { codemode: false },
+        input: schema({ tags: stringArray }),
+        output: output({
+          workspace: string,
+          hosts: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string }, ['alias', 'tags', 'tagsLabel']) },
+          items: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string }, ['alias', 'tags', 'tagsLabel']) },
+          selected: { type: ['string', 'null'] },
+        }, ['workspace', 'hosts', 'items', 'selected']),
+        async execute(input, context) {
+          const config = await workspaceOf(ctx, context);
+          const views = hostViews(config);
+          let selected: string | null = null;
+          if (Array.isArray(input.tags) && input.tags.length > 0) {
+            try {
+              selected = selectHost(config, { tags: input.tags.map(String) }).alias;
+            } catch {
+              selected = null;
+            }
+          }
+          return jsonResult({ workspace: config.name, hosts: views, items: views, selected });
+        },
+      });
+
+      tools.add({
+        name: 'fleet_jobs',
+        description: 'List the background jobs owned by this session, newest first.',
+        options: { codemode: false },
+        input: schema({}),
+        output: output({
+          jobs: { type: 'array', items: schema({
+            jobId: string,
+            host: string,
+            commandLabel: string,
+            state: string,
+            stateLabel: string,
+            exitLabel: string,
+          }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'exitLabel']) },
+          items: { type: 'array', items: schema({
+            jobId: string,
+            host: string,
+            commandLabel: string,
+            state: string,
+            stateLabel: string,
+            exitLabel: string,
+          }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'exitLabel']) },
+        }, ['jobs', 'items']),
+        async execute(_input, context) {
+          const jobs = await registry.list(sessionIDOf(context), ctx.location?.directory);
+          const rows = jobs.map((record) => ({
+            jobId: record.jobId,
+            host: record.host,
+            commandLabel: commandLabelOf(record.argv),
+            state: record.state,
+            stateLabel: stateLabelOf(record.state),
+            exitLabel: exitLabelOf(record.exitCode ?? null, record.signal ?? null, record.state),
+          }));
+          return jsonResult({ jobs: rows, items: rows });
         },
       });
 

@@ -26,6 +26,10 @@ export type {
   WorkspaceConfig,
 } from './config.js';
 export { FleetError, friendlyErrorMessage } from './errors.js';
+export { hostViews, selectHost } from './hosts.js';
+export type { HostQuery, HostView } from './hosts.js';
+export { runWorkspace, syncForRun } from './run.js';
+export type { RunOperations, RunOptions, RunResult, RunSyncMode, RunSyncSummary, SyncRunResult } from './run.js';
 export { replicaState } from './status.js';
 export type { ReplicaState, ReplicaStateInput, ReplicaTone } from './status.js';
 export { AgentClient } from './v1/client.js';

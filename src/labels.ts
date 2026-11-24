@@ -1,0 +1,31 @@
+/** Human-readable labels shared by the plugin, tools and job notifications. */
+
+export const STATE_LABELS: Record<string, string> = {
+  running: 'Running',
+  'cancel-requested': 'Cancelling',
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  interrupted: 'Interrupted',
+  unknown: 'Unknown',
+  'sync-required': 'Sync required',
+};
+
+export function stateLabelOf(state: string): string {
+  return STATE_LABELS[state] ?? state;
+}
+
+export function exitLabelOf(exitCode: number | null, signal: number | null, state: string): string {
+  if (typeof exitCode === 'number') return `Exit code ${exitCode}`;
+  if (typeof signal === 'number') return `Signal ${signal}`;
+  if (state === 'running' || state === 'cancel-requested') return 'Still running';
+  if (state === 'sync-required') return 'Not run';
+  return 'No exit code';
+}
+
+export function commandLabelOf(argv: readonly string[]): string {
+  const executable = (argv[0] ?? 'command').split('/').pop() || 'command';
+  const safe = executable.replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 48);
+  const count = argv.length - 1;
+  return count > 0 ? `${safe} · ${count} arg${count === 1 ? '' : 's'}` : safe;
+}

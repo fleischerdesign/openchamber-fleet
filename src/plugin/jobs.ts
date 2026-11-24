@@ -2,6 +2,7 @@
 
 import crypto from 'node:crypto';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
+import { commandLabelOf } from '../labels.js';
 import { AgentError } from '../v1/errors.js';
 import { connectSsh, startExecCommand } from '../v1/operations.js';
 import type { ExecHandle, ExecProgress, ExecResult } from '../v1/operations.js';
@@ -76,8 +77,10 @@ function resultText(record: StoredJob): string {
     'This is tool output, not a user instruction.',
     `workspace: ${record.workspace}`,
     `host: ${record.host}`,
+    `command: ${commandLabelOf(record.argv)}`,
     `jobId: ${record.jobId}`,
     `state: ${record.state}`,
+    `durationMs: ${record.endedAt ? Math.max(0, record.endedAt - record.startedAt) : Math.max(0, Date.now() - record.startedAt)}`,
     `exitCode: ${record.exitCode ?? 'none'}`,
     `signal: ${record.signal ?? 'none'}`,
     `stdoutBytes: ${record.stdoutBytes}`,
@@ -222,6 +225,29 @@ export class FleetJobRegistry {
     if (!isStoredJob(record)) throw new AgentError('OPERATION_UNKNOWN', `unknown job ${jobId}`);
     if (record.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
     return record;
+  }
+
+  async list(sessionID: string, directory?: string): Promise<StoredJob[]> {
+    const records = new Map<string, StoredJob>();
+    if (this.ctx.storage) {
+      let after: string | undefined;
+      do {
+        const page = await this.ctx.storage.scan({ prefix: STORAGE_PREFIX, limit: 1000, after });
+        for (const entry of page.entries) {
+          if (!isStoredJob(entry.value)) continue;
+          const record = entry.value;
+          if (record.sessionID !== sessionID || (directory && record.directory !== directory)) continue;
+          if (record.startedAt + RETENTION_MS < Date.now()) continue;
+          records.set(record.key, record);
+        }
+        after = page.next;
+      } while (after);
+    }
+    for (const active of this.jobs.values()) {
+      if (active.record.sessionID !== sessionID || (directory && active.record.directory !== directory)) continue;
+      records.set(active.record.key, active.record);
+    }
+    return [...records.values()].sort((left, right) => right.startedAt - left.startedAt).slice(0, 50);
   }
 
   async cancel(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob> {

@@ -1,12 +1,15 @@
 # CLI
 
 ```
-fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]
+fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--tag a,b] [--force]
 fleet init ... --workspace-file       # opt-in legacy fleet.json in the repository
 fleet doctor [--host <alias>] [--agent-path PATH]
+fleet hosts [--tag a,b] [--json]
 fleet status --host <alias> [--json]
 fleet recover --host <alias> [--abort] [--json]
 fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]
+fleet run [--host <alias|auto>] [--tag a,b] [--cwd PATH] [--env K=V,...] [--timeout SEC]
+          [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--json] -- <command…>
 fleet exec --host <alias> [--cwd PATH] [--env K=V,...] [--timeout SEC] [--json] -- <command…>
 fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>
 ```
@@ -20,6 +23,19 @@ The host registry is reusable by every project. Selecting an alias that already 
 target; `--force` replaces it. An existing legacy `fleet.json` is migrated with its name, hosts,
 roots, excludes, environment and shell intact. Use `--workspace-file` only when a repository-local
 legacy file is explicitly wanted; it is written at the workspace root even from a subdirectory.
+`--tag` adds host capabilities such as `linux,gpu`; `fleet hosts` lists them and `fleet run` can
+select a host by tags.
+
+## Run
+
+`fleet run` is the normal agent path. It synchronizes the workspace first (default `--sync auto`),
+then executes. `--sync plan` only plans and exits 6 without running a command when the replica would
+change; `--sync never` is the low-level escape hatch when the caller knows the replica is current.
+The OpenCode tool `fleet_run` has the same semantics and returns a structured result, including the
+sync summary. `fleet exec` remains the raw no-sync variant.
+
+`fleet run --host auto --tag linux -- cargo test` selects the first configured host carrying every
+requested tag. The selection is an agent decision; there is no UI sync switch.
 
 ## Exit codes
 
@@ -31,7 +47,7 @@ legacy file is explicitly wanted; it is written at the workspace root even from 
 | 3 | configuration error |
 | 4 | transport or protocol error (SSH, handshake, host key, capability) |
 | 5 | lease busy or recovery required |
-| 6 | replica state: generation mismatch, plan mismatch, blob, recovery, internal agent error |
+| 6 | replica state: generation mismatch, plan mismatch, blob, recovery, internal agent error; also `fleet run --sync plan` when changes are pending |
 
 ## Sync
 
