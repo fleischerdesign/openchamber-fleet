@@ -20,9 +20,10 @@ $XDG_CONFIG_HOME/openchamber-fleet/
 ```
 
 Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit both documents in the
-extension panel. Nothing is written to the repository. The panel can check status, show a sync plan,
-and inspect recovery state. Apply, exec, fetch, cancel, and recover remain explicit agent tools with
-OpenCode permission checks.
+extension panel. Nothing is written to the repository. The panel refuses a stale save and a host
+removal that another project still selects. The panel can check status, show a sync plan, and inspect
+recovery state. Apply, exec, fetch, cancel, and recover remain explicit agent tools with OpenCode
+permission checks.
 
 ## Background jobs
 

@@ -143,17 +143,132 @@ describe('split host registry and project configuration', () => {
     );
   });
 
-  test('legacy fleet.json works until a local project config exists', () => {
-    const workspace = writeConfig({ name: 'legacy', hosts: { old: { ssh: 'u@h' } } });
+  test('init migrates a legacy fleet.json without losing project settings', () => {
+    const workspace = writeConfig({
+      name: 'legacy',
+      hosts: { old: { ssh: 'u@old', port: 2222, root: '/srv/old' } },
+      excludes: ['secret/'],
+      env: { TOKEN: 'token' },
+      shell: 'zsh',
+    });
     const configDir = fs.mkdtempSync(path.join(tmp, 'legacy-config-'));
     const legacy = loadConfig(workspace, { configDir });
     assert.equal(legacy.source, 'legacy');
     assert.equal(legacy.name, 'legacy');
 
-    initProjectConfig(workspace, { alias: 'new', ssh: 'u@h', configDir });
+    initProjectConfig(workspace, { alias: 'new', ssh: 'u@new', configDir });
     const migrated = loadConfig(workspace, { configDir });
     assert.equal(migrated.source, 'project');
-    assert.deepEqual(Object.keys(migrated.hosts), ['new']);
+    assert.equal(migrated.name, 'legacy');
+    assert.deepEqual(Object.keys(migrated.hosts).sort(), ['new', 'old']);
+    assert.equal(migrated.hosts.old.ssh, 'u@old');
+    assert.equal(migrated.hosts.old.port, 2222);
+    assert.equal(migrated.hosts.old.root, '/srv/old');
+    assert.equal(migrated.hosts.new.root, '~/.cache/openchamber-fleet/legacy');
+    assert.deepEqual(migrated.excludes, ['secret/']);
+    assert.deepEqual(migrated.env, { TOKEN: 'token' });
+    assert.equal(migrated.shell, 'zsh');
+  });
+
+  test('init selects an existing host without rebinding it', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'select-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'select-second-'));
+    const third = fs.mkdtempSync(path.join(tmp, 'select-third-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'select-config-'));
+    initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
+
+    const documents = initProjectConfig(second, { alias: 'mob', ssh: 'u@h', name: 'second', configDir });
+    assert.deepEqual(documents.project.hosts, ['mob']);
+    assert.throws(
+      () => initProjectConfig(third, { alias: 'mob', ssh: 'u@other', configDir }),
+      /different SSH target/,
+    );
+    const forced = initProjectConfig(third, { alias: 'mob', ssh: 'u@other', configDir, force: true });
+    assert.equal(forced.hosts.hosts.mob.ssh, 'u@other');
+  });
+
+  test('save rejects an invalid exclude instead of writing a broken project', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'invalid-exclude-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'invalid-exclude-config-'));
+    initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    const documents = loadConfigDocuments(workspace, { configDir });
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, {
+        ...documents.project,
+        excludes: ['../secret'],
+      }, { configDir }),
+      /must not contain/,
+    );
+  });
+
+  test('save rejects a stale revision and accepts a fresh one', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'revision-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'revision-config-'));
+    initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    const documents = loadConfigDocuments(workspace, { configDir });
+
+    const hostsFile = path.join(configDir, 'hosts.json');
+    const changed = JSON.parse(fs.readFileSync(hostsFile, 'utf8'));
+    changed.hosts.other = { ssh: 'u@other' };
+    fs.writeFileSync(hostsFile, JSON.stringify(changed, null, 2));
+
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, documents.project, {
+        configDir,
+        expectedRevision: documents.revision,
+      }),
+      /changed since it was loaded/,
+    );
+
+    const fresh = loadConfigDocuments(workspace, { configDir });
+    const saved = saveConfigDocuments(workspace, fresh.hosts, {
+      ...fresh.project,
+      excludes: ['target/'],
+    }, { configDir, expectedRevision: fresh.revision });
+    assert.equal(saved.project.excludes[0], 'target/');
+  });
+
+  test('a legacy revision covers the legacy file itself', () => {
+    const workspace = writeConfig({ name: 'legacy', hosts: { old: { ssh: 'u@h' } } });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'legacy-revision-config-'));
+    const documents = loadConfigDocuments(workspace, { configDir });
+    assert.equal(documents.legacy, true);
+
+    fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
+      name: 'changed',
+      hosts: { old: { ssh: 'u@other' } },
+    }));
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, documents.project, {
+        configDir,
+        expectedRevision: documents.revision,
+      }),
+      /changed since it was loaded/,
+    );
+  });
+
+  test('save refuses to delete a host another project still selects', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'shared-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'shared-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'shared-config-'));
+    const firstDocuments = initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
+    saveConfigDocuments(second, firstDocuments.hosts, {
+      ...firstDocuments.project,
+      name: 'second',
+      hosts: ['mob'],
+    }, { configDir });
+
+    assert.throws(
+      () => saveConfigDocuments(second, {
+        version: 1,
+        hosts: { other: { ssh: 'u@h' } },
+      }, {
+        ...firstDocuments.project,
+        name: 'second',
+        hosts: ['other'],
+      }, { configDir }),
+      /still selected by another project/,
+    );
   });
 
   test('an editor view keeps the host registry for a new project', () => {
@@ -186,7 +301,7 @@ describe('split host registry and project configuration', () => {
 
     const documents = loadConfigDocuments(workspace, { configDir });
     assert.equal(documents.legacy, false);
-    assert.deepEqual(documents.project.hosts, ['new']);
+    assert.deepEqual(documents.project.hosts.sort(), ['new', 'old']);
   });
 
   test('documents default cleanly and round-trip through save', () => {

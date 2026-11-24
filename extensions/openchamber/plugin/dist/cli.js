@@ -1,7 +1,7 @@
 /** Command line interface on top of fleet.agent.v1. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { compileExcludes, initProjectConfig, loadConfig } from './config.js';
+import { compileExcludes, configPaths, defaultWorkspaceName, initProjectConfig, loadConfig } from './config.js';
 import { FleetError, friendlyErrorMessage } from './errors.js';
 import { AgentError, exitCodeFor } from './v1/errors.js';
 import { connectSsh, execCommand, fetchArtifact, recoverWorkspace, status, syncWorkspace, } from './v1/operations.js';
@@ -108,13 +108,11 @@ function cmdInit(parsed) {
     const root = parsed.flags.get('root');
     const name = parsed.flags.get('name');
     if (parsed.flags.has('workspace-file')) {
-        const file = path.join(process.cwd(), 'fleet.json');
+        const file = path.join(configPaths(process.cwd()).workspaceRoot, 'fleet.json');
         if (fs.existsSync(file) && !parsed.flags.has('force')) {
             throw new FleetError('config-invalid', 'fleet.json already exists', { hint: 'pass --force to replace it' });
         }
-        const workspaceName = typeof name === 'string'
-            ? name
-            : path.basename(process.cwd()).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+        const workspaceName = typeof name === 'string' ? name : defaultWorkspaceName(process.cwd());
         const entry = { ssh };
         if (typeof portValue === 'string')
             entry.port = Number(portValue);
