@@ -25,15 +25,21 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.1.0";
+          version = "0.2.0";
           src = self;
-          npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
+          npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           buildPhase = ''
             npm run build
           '';
           installPhase = ''
-            mkdir -p $out/lib/node_modules/openchamber-fleet
-            cp -r package.json dist bin $out/lib/node_modules/openchamber-fleet/
+            mkdir -p $out/lib/node_modules/openchamber-fleet $out/bin
+            cp -r package.json dist bin extensions docs README.md LICENSE $out/lib/node_modules/openchamber-fleet/
+            cat > $out/bin/fleet <<EOF
+            #!${pkgs.runtimeShell}
+            export PATH=${pkgs.openssh}/bin:\$PATH
+            exec ${pkgs.nodejs}/bin/node $out/lib/node_modules/openchamber-fleet/bin/fleet.js "\$@"
+            EOF
+            chmod +x $out/bin/fleet
           '';
         };
     in
@@ -64,9 +70,10 @@
         agent = mkAgent pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.1.0";
+          version = "0.2.0";
           src = self;
-          npmDepsHash = "sha256-2thyxRbFnCXNapQQoVslurjy3bF2o3mTd5LYk8NsxCA=";
+          doCheck = true;
+          npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           nativeBuildInputs = with pkgs; [
             openssh
             bash

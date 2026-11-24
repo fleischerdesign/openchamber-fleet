@@ -3,3 +3,9 @@ dist/
 *.tsbuildinfo
 .DS_Store
 agent/target/
+!extensions/openchamber/plugin/
+!extensions/openchamber/plugin/dist/
+!extensions/openchamber/plugin/dist/**
+
+result
+result-*

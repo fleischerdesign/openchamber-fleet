@@ -1,6 +1,6 @@
 {
   "name": "openchamber-fleet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Replicate a workspace to a remote machine and run one command there — for OpenCode and OpenChamber agents.",
   "license": "MIT",
   "type": "module",
@@ -26,11 +26,13 @@
     "dist",
     "bin",
     "docs",
+    "extensions/openchamber",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-extension.mjs",
+    "build:extension": "node scripts/build-extension.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test \"test/**/*.test.js\"",
     "prepare": "npm run build"
@@ -52,7 +54,9 @@
     "agents"
   ],
   "devDependencies": {
+    "@openchamber/sdk": "^2.8.0",
     "@types/node": "^24.0.0",
+    "esbuild": "^0.27.0",
     "typescript": "^7.0.0"
   }
 }

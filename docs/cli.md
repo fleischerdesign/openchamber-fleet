@@ -4,6 +4,7 @@
 fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]
 fleet doctor [--host <alias>] [--agent-path PATH]
 fleet status --host <alias> [--json]
+fleet recover --host <alias> [--abort] [--json]
 fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]
 fleet exec --host <alias> [--cwd PATH] [--env K=V,...] [--timeout SEC] [--json] -- <command…>
 fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>
@@ -69,5 +70,6 @@ $ fleet status --host workstation
 my-project: generation 7 sha256:41ab…
 ```
 
-`RECOVERY` appears when an interrupted transaction needs `sync.inspect`/`abort` at the protocol
-level (the CLI exposes the state; recovery tooling is the next increment).
+`RECOVERY` appears when an interrupted transaction needs resolution. `fleet recover --host <alias>`
+inspects the journal and completes an interrupted apply. `--abort` is only valid before apply has
+started; the agent refuses it once an apply needs forward recovery.

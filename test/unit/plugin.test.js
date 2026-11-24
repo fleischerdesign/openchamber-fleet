@@ -8,62 +8,143 @@ import os from 'node:os';
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-plugin-'));
 fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
   name: 'plugin-tests',
-  hosts: { node: { ssh: 'test@node' } },
+  hosts: { node: { ssh: 'test@127.0.0.1', port: 1 } },
   excludes: [],
 }));
 after(() => fs.rmSync(workspace, { recursive: true, force: true }));
 
 async function register(sessionDirectory) {
   const tools = [];
+  const permissions = [];
+  const storage = new Map();
   const ctx = {
+    location: { directory: '/different-server-directory' },
     tool: { transform: async (edit) => edit({ add: (tool) => tools.push(tool) }) },
     session: {
       get: async () => ({ location: { directory: sessionDirectory ?? '/nonexistent' } }),
+      synthetic: async () => ({}),
+    },
+    permission: { assert: async (input) => permissions.push(input) },
+    storage: {
+      get: async (key) => storage.get(key),
+      set: async (key, value) => storage.set(key, value),
+      remove: async (key) => storage.delete(key),
+      scan: async ({ prefix }) => ({ entries: [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })) }),
     },
   };
-  await plugin.setup(ctx);
-  return tools;
+  const cleanup = await plugin.setup(ctx);
+  return { tools, cleanup, ctx, permissions };
 }
 
+function tool(tools, name) {
+  const found = tools.find((entry) => entry.name === name);
+  assert.ok(found, `missing tool ${name}`);
+  return found;
+}
+
+const context = { sessionID: 'ses_test', agent: 'build', messageID: 'msg_test', id: 'call_test' };
+
 describe('OpenCode plugin surface', () => {
-  test('registers the four v1 tools', async () => {
-    const tools = await register();
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'fleet_exec',
-      'fleet_fetch',
-      'fleet_status',
-      'fleet_sync',
-    ]);
-    for (const tool of tools) {
-      assert.equal(tool.input.type, 'object');
-      assert.equal(tool.input.additionalProperties, false);
-      assert.equal(typeof tool.execute, 'function');
+  test('registers the seven V2 tools with input and output schemas', async () => {
+    const { tools, cleanup } = await register(workspace);
+    try {
+      assert.deepEqual(tools.map((entry) => entry.name).sort(), [
+        'fleet_exec',
+        'fleet_fetch',
+        'fleet_job_cancel',
+        'fleet_job_status',
+        'fleet_recover',
+        'fleet_status',
+        'fleet_sync',
+      ]);
+      for (const entry of tools) {
+        assert.equal(entry.input.type, 'object');
+        assert.equal(entry.input.additionalProperties, false);
+        assert.equal(entry.output.type, 'object');
+        assert.equal(typeof entry.execute, 'function');
+      }
+    } finally {
+      await cleanup();
     }
   });
 
   test('the session directory wins over the server cwd', async () => {
-    const previous = process.cwd();
-    process.chdir(os.tmpdir());
+    const { tools, cleanup } = await register(workspace);
     try {
-      const tools = await register(workspace);
-      const status = tools.find((tool) => tool.name === 'fleet_status');
-      const result = await status.execute({ host: 'node' }, { sessionID: 'ses_test' });
-      assert.doesNotMatch(result.content, /no fleet\.json/);
+      const result = tool(tools, 'fleet_job_status');
+      await assert.rejects(
+        result.execute({ host: 'node', jobId: 'missing' }, context),
+        /unknown job missing/,
+      );
     } finally {
-      process.chdir(previous);
+      await cleanup();
     }
   });
 
-  test('a missing config becomes a readable result, not a throw', async () => {
-    const previous = process.cwd();
-    process.chdir(os.tmpdir());
+  test('a missing config is a real tool failure', async () => {
+    const { tools, cleanup } = await register('/nonexistent');
     try {
-      const tools = await register();
-      const status = tools.find((tool) => tool.name === 'fleet_status');
-      const result = await status.execute({ host: 'node' });
-      assert.match(result.content, /no fleet\.json/);
+      const result = tool(tools, 'fleet_job_status');
+      await assert.rejects(
+        result.execute({ host: 'node', jobId: 'missing' }, context),
+        /no fleet\.json/,
+      );
     } finally {
-      process.chdir(previous);
+      await cleanup();
+    }
+  });
+
+  test('exec evaluates shell permissions for host and exact argv before connecting', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      const result = tool(tools, 'fleet_exec');
+      await assert.rejects(result.execute({ host: 'node', argv: ['echo', 'hello world'] }, context));
+      assert.deepEqual(permissions.map((entry) => entry.action), ['fleet.exec', 'shell']);
+      assert.deepEqual(permissions[1].resources, ["echo 'hello world'"]);
+      assert.deepEqual(permissions[1].save, ["echo 'hello world'"]);
+      assert.match(permissions[0].resources[0], /"host":"node"/);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('exec approval changes when an environment value changes', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      const result = tool(tools, 'fleet_exec');
+      await assert.rejects(result.execute({ host: 'node', argv: ['true'], env: { MODE: 'one' } }, context));
+      await assert.rejects(result.execute({ host: 'node', argv: ['true'], env: { MODE: 'two' } }, context));
+      const descriptors = permissions.filter((entry) => entry.action === 'fleet.exec').map((entry) => entry.resources[0]);
+      assert.equal(descriptors.length, 2);
+      assert.notEqual(descriptors[0], descriptors[1]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('sync apply uses its dedicated permission', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      const result = tool(tools, 'fleet_sync');
+      await assert.rejects(result.execute({ host: 'node', mode: 'apply' }, context));
+      assert.equal(permissions.length, 1);
+      assert.equal(permissions[0].action, 'fleet.sync');
+      assert.deepEqual(permissions[0].resources, ['plugin-tests@node']);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('fetch checks the final local edit target before connecting', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      const result = tool(tools, 'fleet_fetch');
+      await assert.rejects(result.execute({ host: 'node', artifact: 'out.txt', dest: path.join(workspace, 'out') }, context));
+      assert.equal(permissions.length, 1);
+      assert.equal(permissions[0].action, 'edit');
+      assert.deepEqual(permissions[0].resources, [path.join(workspace, 'out', 'out.txt')]);
+    } finally {
+      await cleanup();
     }
   });
 });

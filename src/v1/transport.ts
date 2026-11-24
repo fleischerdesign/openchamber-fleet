@@ -58,5 +58,5 @@ export function spawnTransport(command: string, args: readonly string[], env?: N
 }
 
 export function sshTransport(host: SshTarget, agentPath: string): AgentTransport {
-  return spawnTransport('ssh', sshArgs(host, agentPath));
+  return spawnTransport(process.env.FLEET_SSH_PATH ?? 'ssh', sshArgs(host, agentPath));
 }

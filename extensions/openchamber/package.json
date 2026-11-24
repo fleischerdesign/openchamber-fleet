@@ -1,0 +1,196 @@
+{
+  "name": "@fleischerdesign/openchamber-fleet-extension",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.8.0"
+    },
+    "id": "openchamber-fleet",
+    "name": "Fleet",
+    "icon": "server",
+    "contributes": {
+      "panel": {
+        "entry": "panel/index.html",
+        "mobile": true
+      },
+      "capabilities": [
+        "files"
+      ],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "keepRunning": true,
+        "permissions": {
+          "exec": [
+            "ssh"
+          ]
+        }
+      },
+      "statusSection": {
+        "source": {
+          "path": "/status-view",
+          "interval": 10000
+        },
+        "title": "Fleet",
+        "height": 140
+      },
+      "opencodePlugin": "plugin",
+      "tools": [
+        {
+          "match": "fleet_status",
+          "name": "Fleet status",
+          "icon": "server",
+          "title": "Fleet status · {input.host}",
+          "output": "card",
+          "card": {
+            "label": "{output.workspace}@{output.host}",
+            "title": "Generation {output.generation}",
+            "status": {
+              "value": "{output.recovery}",
+              "tones": {
+                "false": "success",
+                "true": "error"
+              }
+            },
+            "fields": [
+              { "label": "Manifest", "value": "{output.manifestDigest}" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_sync",
+          "name": "Fleet sync",
+          "icon": "git-commit",
+          "title": "Fleet sync · {input.host}",
+          "subtitle": "{output.changes} change(s) · {output.planDigest}",
+          "output": "table",
+          "columns": ["action", "path"]
+        },
+        {
+          "match": "fleet_exec",
+          "name": "Fleet exec",
+          "icon": "terminal",
+          "title": "Fleet exec · {input.host}",
+          "subtitle": "{output.state} · job {output.jobId}",
+          "output": "card",
+          "card": {
+            "label": "{output.workspace}@{output.host}",
+            "title": "{output.jobId}",
+            "status": {
+              "value": "{output.state}",
+              "tones": {
+                "running": "info",
+                "succeeded": "success",
+                "failed": "error",
+                "cancelled": "warning",
+                "unknown": "error",
+                "interrupted": "error"
+              }
+            },
+            "fields": [
+              { "label": "Exit code", "value": "{output.exitCode}" },
+              { "label": "Background", "value": "{output.background}" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_fetch",
+          "name": "Fleet fetch",
+          "icon": "download",
+          "title": "Fleet fetch · {input.host}",
+          "output": "card",
+          "card": {
+            "label": "{output.artifact}",
+            "title": "{output.file}",
+            "status": {
+              "value": "{output.bytes} bytes",
+              "tones": {}
+            },
+            "fields": [
+              { "label": "SHA-256", "value": "{output.digest}" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_job_status",
+          "name": "Fleet job",
+          "icon": "time",
+          "title": "Fleet job · {input.host}",
+          "subtitle": "{output.state} · {output.jobId}",
+          "output": "card",
+          "card": {
+            "label": "{output.workspace}@{output.host}",
+            "title": "{output.jobId}",
+            "status": {
+              "value": "{output.state}",
+              "tones": {
+                "running": "info",
+                "cancel-requested": "warning",
+                "succeeded": "success",
+                "failed": "error",
+                "cancelled": "warning",
+                "unknown": "error",
+                "interrupted": "error"
+              }
+            },
+            "fields": [
+              { "label": "Exit code", "value": "{output.exitCode}" },
+              { "label": "stdout", "value": "{output.stdoutBytes} bytes" },
+              { "label": "stderr", "value": "{output.stderrBytes} bytes" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_job_cancel",
+          "name": "Fleet job cancel",
+          "icon": "close-circle",
+          "title": "Fleet cancel · {input.host}",
+          "subtitle": "{output.state} · {output.jobId}",
+          "output": "card",
+          "card": {
+            "label": "{output.workspace}@{output.host}",
+            "title": "{output.jobId}",
+            "status": {
+              "value": "{output.state}",
+              "tones": {
+                "cancel-requested": "warning",
+                "cancelled": "warning",
+                "succeeded": "success",
+                "failed": "error"
+              }
+            },
+            "fields": [
+              { "label": "Exit code", "value": "{output.exitCode}" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_recover",
+          "name": "Fleet recovery",
+          "icon": "refresh",
+          "title": "Fleet recovery · {input.host}",
+          "output": "card",
+          "card": {
+            "label": "{output.workspace}@{output.host}",
+            "title": "{output.state}",
+            "status": {
+              "value": "{output.recovered}",
+              "tones": {
+                "false": "warning",
+                "true": "success"
+              }
+            },
+            "fields": [
+              { "label": "Transaction", "value": "{output.txnId}" },
+              { "label": "Generation", "value": "{output.generation}" },
+              { "label": "Manifest", "value": "{output.manifestDigest}" }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
