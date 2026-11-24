@@ -31,9 +31,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-extension.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.extension.json && node scripts/build-extension.mjs",
     "build:extension": "node scripts/build-extension.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.extension.json",
     "test": "npm run build && node --test \"test/**/*.test.js\"",
     "prepare": "npm run build"
   },

@@ -28,6 +28,7 @@ interface ConfigDocuments {
   hosts: HostsFile;
   project: ProjectFile;
   legacy: boolean;
+  revision: string;
 }
 
 const host = connectHost();
@@ -45,8 +46,8 @@ let loadVersion = 0;
 let revision: string | null = null;
 const drafts = new Map<string, { hosts: string; project: string }>();
 
-function showNotice(message: string, tone: 'info' | 'error' | 'success' = 'info'): void {
-  notice.className = tone === 'error' ? 'error' : tone === 'success' ? 'ok' : '';
+function showNotice(message: string, tone: 'info' | 'warning' | 'error' | 'success' = 'info'): void {
+  notice.className = tone === 'error' ? 'error' : tone === 'success' ? 'ok' : tone === 'warning' ? 'warning' : '';
   notice.textContent = message;
 }
 
