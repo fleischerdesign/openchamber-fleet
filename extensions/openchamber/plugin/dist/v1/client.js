@@ -1,5 +1,5 @@
 /** Protocol client: requests, notifications, credit-controlled streams. */
-import { FrameDecoder, MAX_DATA, decodeData, encodeControl, encodeData } from './frame.js';
+import { FrameDecoder, MAX_DATA_BYTES, decodeData, encodeControl, encodeData } from './frame.js';
 import { AgentError } from './errors.js';
 const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_CREDIT = 4 * 1024 * 1024;
@@ -68,8 +68,8 @@ export class AgentClient {
     /** Upload bytes as DATA frames, then end the stream. */
     async upload(streamId, data) {
         let seq = 0n;
-        for (let offset = 0; offset < data.length; offset += MAX_DATA) {
-            const chunk = data.subarray(offset, offset + MAX_DATA);
+        for (let offset = 0; offset < data.length; offset += MAX_DATA_BYTES) {
+            const chunk = data.subarray(offset, offset + MAX_DATA_BYTES);
             this.transport.stdin.write(encodeData(streamId, seq, chunk));
             seq += 1n;
         }

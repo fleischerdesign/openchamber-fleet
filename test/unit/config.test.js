@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
-import { compileExcludes, loadConfig } from '../../dist/config.js';
+import {
+  compileExcludes,
+  initProjectConfig,
+  loadConfig,
+  loadConfigDocuments,
+  saveConfigDocuments,
+} from '../../dist/config.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-config-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -66,6 +72,140 @@ describe('fleet.json validation (CFG-01…CFG-08)', () => {
     const excludes = Array.from({ length: 1000 }, (_, index) => `dir-${index}/`);
     const dir = writeConfig({ name: 'x', hosts: { a: { ssh: 'u@h' } }, excludes });
     assert.equal(loadConfig(dir).excludes.length, 1000);
+  });
+});
+
+describe('split host registry and project configuration', () => {
+  test('init writes outside the workspace and resolves the selected host', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'project-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'config-'));
+    const documents = initProjectConfig(workspace, {
+      alias: 'mob',
+      ssh: 'philipp@10.10.100.30',
+      port: 2222,
+      root: '/srv/nixfiles',
+      name: 'nixfiles',
+      configDir,
+    });
+
+    assert.equal(fs.existsSync(path.join(workspace, 'fleet.json')), false);
+    assert.equal(path.dirname(documents.hostsFile), configDir);
+    assert.equal(path.dirname(documents.projectFile), path.join(configDir, 'workspaces'));
+
+    const config = loadConfig(workspace, { configDir });
+    assert.equal(config.name, 'nixfiles');
+    assert.equal(config.hosts.mob.ssh, 'philipp@10.10.100.30');
+    assert.equal(config.hosts.mob.port, 2222);
+    assert.equal(config.hosts.mob.root, '/srv/nixfiles');
+    assert.equal(config.source, 'project');
+  });
+
+  test('one host registry serves multiple projects', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'shared-'));
+    const documents = initProjectConfig(first, {
+      alias: 'mob',
+      ssh: 'philipp@10.10.100.30',
+      name: 'first',
+      configDir,
+    });
+    saveConfigDocuments(second, documents.hosts, {
+      ...documents.project,
+      name: 'second',
+      hosts: ['mob'],
+      excludes: ['target/'],
+    }, { configDir });
+
+    assert.equal(loadConfig(first, { configDir }).hosts.mob.ssh, 'philipp@10.10.100.30');
+    const secondConfig = loadConfig(second, { configDir });
+    assert.equal(secondConfig.name, 'second');
+    assert.deepEqual(secondConfig.excludes, ['target/']);
+  });
+
+  test('rejects a project that selects an undefined host', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'missing-host-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'missing-host-config-'));
+    assert.throws(
+      () => saveConfigDocuments(workspace, {
+        version: 1,
+        hosts: { other: { ssh: 'u@h' } },
+      }, {
+        version: 1,
+        name: 'proj',
+        hosts: ['nope'],
+        roots: {},
+        excludes: [],
+        env: {},
+        shell: 'bash',
+      }, { configDir }),
+      /unknown host alias/,
+    );
+  });
+
+  test('legacy fleet.json works until a local project config exists', () => {
+    const workspace = writeConfig({ name: 'legacy', hosts: { old: { ssh: 'u@h' } } });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'legacy-config-'));
+    const legacy = loadConfig(workspace, { configDir });
+    assert.equal(legacy.source, 'legacy');
+    assert.equal(legacy.name, 'legacy');
+
+    initProjectConfig(workspace, { alias: 'new', ssh: 'u@h', configDir });
+    const migrated = loadConfig(workspace, { configDir });
+    assert.equal(migrated.source, 'project');
+    assert.deepEqual(Object.keys(migrated.hosts), ['new']);
+  });
+
+  test('an editor view keeps the host registry for a new project', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'editor-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'editor-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'editor-config-'));
+    initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
+
+    const documents = loadConfigDocuments(second, { configDir });
+    assert.deepEqual(Object.keys(documents.hosts.hosts), ['mob']);
+    assert.equal(documents.project.hosts.length, 0);
+    assert.equal(documents.legacy, false);
+  });
+
+  test('an editor view still shows a project whose registry is missing', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'editor-missing-registry-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'editor-missing-registry-config-'));
+    const documents = initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    fs.rmSync(documents.hostsFile);
+
+    const editable = loadConfigDocuments(workspace, { configDir });
+    assert.deepEqual(editable.project.hosts, ['mob']);
+    assert.deepEqual(editable.hosts.hosts, {});
+  });
+
+  test('a split project is not reported as legacy while fleet.json remains', () => {
+    const workspace = writeConfig({ name: 'legacy', hosts: { old: { ssh: 'u@h' } } });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'editor-legacy-config-'));
+    initProjectConfig(workspace, { alias: 'new', ssh: 'u@h', configDir });
+
+    const documents = loadConfigDocuments(workspace, { configDir });
+    assert.equal(documents.legacy, false);
+    assert.deepEqual(documents.project.hosts, ['new']);
+  });
+
+  test('documents default cleanly and round-trip through save', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'docs-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'docs-config-'));
+    const empty = loadConfigDocuments(workspace, { configDir });
+    assert.equal(empty.project.hosts.length, 0);
+    assert.equal(empty.hosts.hosts && Object.keys(empty.hosts.hosts).length, 0);
+
+    const saved = saveConfigDocuments(workspace, {
+      version: 1,
+      hosts: { build: { ssh: 'u@h' } },
+    }, {
+      ...empty.project,
+      hosts: ['build'],
+      excludes: ['.direnv/'],
+    }, { configDir });
+    assert.equal(saved.project.hosts[0], 'build');
+    assert.equal(loadConfig(workspace, { configDir }).hosts.build.root, '~/.cache/openchamber-fleet/' + empty.project.name);
   });
 });
 

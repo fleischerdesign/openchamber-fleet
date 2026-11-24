@@ -25,7 +25,7 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.2.0";
+          version = "0.3.0";
           src = self;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           buildPhase = ''
@@ -70,7 +70,7 @@
         agent = mkAgent pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.2.0";
+          version = "0.3.0";
           src = self;
           doCheck = true;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";

@@ -37,7 +37,8 @@ ssh -T host fleet-agent stdio  ────────────▶  agent pr
 # once per node: install the agent (Nix, cargo, or a release binary)
 nix profile install github:fleischerdesign/openchamber-fleet#fleet-agent
 
-# in the project
+# in the project: writes local host registry + project selection,
+# never a file in the repository
 fleet init --host workstation --ssh philipp@10.10.100.20
 
 fleet sync --host workstation --plan
@@ -59,8 +60,10 @@ The repository builds three artifacts from one controller core:
 - a complete OpenChamber extension in [`extensions/openchamber`](extensions/openchamber).
 
 The extension contributes native tool cards/tables, a project configuration panel, a read-only Work
-Status section and the OpenCode plugin. It uses only public OpenChamber SDK and OpenCode plugin APIs;
-Nix is an optional packaging path, not a runtime requirement.
+Status section and the OpenCode plugin. The panel edits the same local XDG configuration as the CLI:
+hosts are machine-level, projects only select aliases and own excludes. Nothing is written to the
+repository. It uses only public OpenChamber SDK and OpenCode plugin APIs; Nix is an optional
+packaging path, not a runtime requirement.
 
 `fleet_exec` accepts `background: true`. The tool returns a `jobId`, the agent can end its turn, and
 the plugin resumes the same session through OpenCode's official `session.synthetic` API when the job
@@ -107,7 +110,7 @@ extension surface. The live fleet/OpenChamber proof and the remaining rows in
 | [`docs/design.md`](docs/design.md) | invariants and component boundaries |
 | [`docs/edge-cases.md`](docs/edge-cases.md) | the catalogue the tests refer to |
 | [`docs/security.md`](docs/security.md) | trust boundary, grants, audit |
-| [`docs/config.md`](docs/config.md) | `fleet.json` |
+| [`docs/config.md`](docs/config.md) | host registry and project selection |
 | [`docs/cli.md`](docs/cli.md) | commands and exit codes |
 | [`docs/test-coverage.md`](docs/test-coverage.md) | which claim is proven where |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | measured large-workspace numbers |
