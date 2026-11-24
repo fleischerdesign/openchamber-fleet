@@ -185,10 +185,25 @@ export async function syncWorkspace(
   const lease = operationId();
   await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
   let txnId: string | undefined;
+  let beginPromise: Promise<{ txnId: string }> | undefined;
   const onAbort = () => {
     void (async () => {
+      if (beginPromise) {
+        try {
+          const begun = await beginPromise;
+          txnId ??= begun.txnId;
+        } catch {
+          // The agent may have accepted begin before the response was lost.
+        }
+      }
+      if (!txnId) {
+        try {
+          const inspected = (await client.request('sync.inspect', { workspaceId: options.workspaceId })) as { state?: string; txnId?: string };
+          if (inspected.state === 'RECOVERY' && inspected.txnId) txnId = inspected.txnId;
+        } catch { /* connection gone */ }
+      }
       if (txnId) {
-        try { await client.request('sync.abort', { txnId }); } catch { /* connection gone or already aborted */ }
+        try { await client.request('sync.abort', { txnId }); } catch { /* applying, committed or connection gone */ }
       }
       try { await client.request('workspace.release', { leaseId: lease }); } catch { /* connection gone */ }
     })().finally(() => client.close());
@@ -196,13 +211,15 @@ export async function syncWorkspace(
   options.signal?.addEventListener('abort', onAbort, { once: true });
   try {
     throwIfAborted(options.signal);
-    const begin = (await client.request('sync.begin', {
+    beginPromise = client.request('sync.begin', {
       workspaceId: options.workspaceId,
       leaseId: lease,
       baseGeneration: workspace.generation,
       policy: { excludes: options.excludes, preserve: [], deleteManaged: true },
-    })) as { txnId: string };
+    }) as Promise<{ txnId: string }>;
+    const begin = await beginPromise;
     txnId = begin.txnId;
+    throwIfAborted(options.signal);
 
     for (let offset = 0; offset < scanned.entries.length; offset += PAGE) {
       throwIfAborted(options.signal);

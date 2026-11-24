@@ -3,8 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
-import { canonicalArtifactTarget } from '../../dist/v1/operations.js';
-import { startExecCommand } from '../../dist/v1/operations.js';
+import { canonicalArtifactTarget, startExecCommand, syncWorkspace } from '../../dist/v1/operations.js';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-operations-'));
 after(() => fs.rmSync(base, { recursive: true, force: true }));
@@ -24,6 +23,45 @@ describe('local artifact targets', () => {
     fs.mkdirSync(workspace);
     fs.symlinkSync(path.join(base, 'missing'), path.join(workspace, 'link'));
     assert.throws(() => canonicalArtifactTarget(path.join(workspace, 'link'), 'out.txt'), /dangling symlink/);
+  });
+});
+
+describe('sync cancellation cleanup', () => {
+  test('abort during sync.begin waits for the transaction id and aborts it', async () => {
+    const source = path.join(base, 'sync-source');
+    fs.mkdirSync(source);
+    const controller = new AbortController();
+    let beginResolve;
+    const begin = new Promise((resolve) => { beginResolve = resolve; });
+    const calls = [];
+    const client = {
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === 'workspace.open') return { generation: 1, manifestDigest: 'sha256:x', recovery: false };
+        if (method === 'workspace.lease') return { leaseId: 'lease' };
+        if (method === 'sync.begin') return begin;
+        if (method === 'sync.abort') return { ok: true };
+        if (method === 'workspace.release') return { ok: true };
+        throw new Error(`unexpected ${method}`);
+      },
+      close: () => {},
+    };
+    const operation = syncWorkspace(client, { matches: () => false }, {
+      workspaceId: 'workspace',
+      source,
+      root: '/replica',
+      excludes: [],
+      mode: 'plan',
+      signal: controller.signal,
+    });
+    for (let attempt = 0; attempt < 20 && !calls.some(([method]) => method === 'sync.begin'); attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(calls.some(([method]) => method === 'sync.begin'));
+    controller.abort();
+    beginResolve({ txnId: 'txn-1' });
+    await assert.rejects(operation, /cancelled/);
+    assert.ok(calls.some(([method, params]) => method === 'sync.abort' && params.txnId === 'txn-1'));
   });
 });
 

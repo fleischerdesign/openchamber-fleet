@@ -13,9 +13,9 @@ fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
 }));
 after(() => fs.rmSync(workspace, { recursive: true, force: true }));
 
-function harness(location = workspace) {
+function harness(location = workspace, sharedStorage) {
   const notifications = [];
-  const storage = new Map();
+  const storage = sharedStorage ?? new Map();
   const ctx = {
     location: { directory: location },
     session: { synthetic: async (input) => notifications.push(input) },
@@ -154,8 +154,9 @@ describe('background Fleet jobs', () => {
   });
 
   test('a second location does not interrupt a job owned by the first', async () => {
-    const first = harness(workspace);
-    const second = harness(path.join(os.tmpdir(), 'fleet-other-project'));
+    const shared = new Map();
+    const first = harness(workspace, shared);
+    const second = harness(path.join(os.tmpdir(), 'fleet-other-project'), shared);
     first.storage.set('fleet-job:test', storedRecord());
     const registry = new FleetJobRegistry(second.ctx, 'fleet-agent');
     await registry.recoverInterrupted();
@@ -173,6 +174,56 @@ describe('background Fleet jobs', () => {
     assert.equal(notifications[0].resume, true);
     assert.equal(notifications[0].metadata.state, 'succeeded');
     assert.equal(storage.get(key).notified, true);
+  });
+
+  test('job ownership uses the plugin location when the session directory differs', async () => {
+    const sessionDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-session-job-'));
+    fs.writeFileSync(path.join(sessionDirectory, 'fleet.json'), JSON.stringify({
+      name: 'job-tests',
+      hosts: { node: { ssh: 'test@127.0.0.1', port: 1 } },
+    }));
+    const { ctx } = harness(workspace);
+    const pending = deferred();
+    const { executor } = fakeExecutor('job-location', pending);
+    const registry = new FleetJobRegistry(ctx, 'fleet-agent', executor);
+    const config = loadConfig(sessionDirectory);
+    const record = await registry.start({
+      config,
+      host: config.hosts.node,
+      sessionID: 'ses_location',
+      argv: ['true'],
+      agentPath: 'fleet-agent',
+    });
+    assert.equal(record.directory, workspace);
+    await registry.cleanup();
+    pending.resolve({ jobId: 'job-location', state: 'cancelled', exitCode: null, signal: 15, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
+    fs.rmSync(sessionDirectory, { recursive: true, force: true });
+  });
+
+  test('a completed job stays terminal in memory when persistence fails', async () => {
+    const { ctx } = harness();
+    const pending = deferred();
+    const { executor } = fakeExecutor('job-persist', pending);
+    let failPersistence = false;
+    ctx.storage.set = async () => {
+      if (failPersistence) throw new Error('disk full');
+    };
+    const registry = new FleetJobRegistry(ctx, 'fleet-agent', executor);
+    const config = loadConfig(workspace);
+    await registry.start({
+      config,
+      host: config.hosts.node,
+      sessionID: 'ses_persist',
+      argv: ['true'],
+      agentPath: 'fleet-agent',
+    });
+    failPersistence = true;
+    pending.resolve({ jobId: 'job-persist', state: 'succeeded', exitCode: 0, signal: null, stdout: Buffer.from('ok'), stderr: Buffer.alloc(0) });
+    await tick();
+    await tick();
+    const record = await registry.status(config, 'node', 'job-persist', 'ses_persist');
+    assert.equal(record.state, 'succeeded');
+    await registry.cleanup();
   });
 
   test('cancellation still reaches the remote job when persistence fails', async () => {

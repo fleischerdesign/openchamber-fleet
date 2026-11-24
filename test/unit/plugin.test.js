@@ -108,6 +108,20 @@ describe('OpenCode plugin surface', () => {
     }
   });
 
+  test('exec approval changes when an environment value changes', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      const result = tool(tools, 'fleet_exec');
+      await assert.rejects(result.execute({ host: 'node', argv: ['true'], env: { MODE: 'one' } }, context));
+      await assert.rejects(result.execute({ host: 'node', argv: ['true'], env: { MODE: 'two' } }, context));
+      const descriptors = permissions.filter((entry) => entry.action === 'fleet.exec').map((entry) => entry.resources[0]);
+      assert.equal(descriptors.length, 2);
+      assert.notEqual(descriptors[0], descriptors[1]);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('sync apply uses its dedicated permission', async () => {
     const { tools, cleanup, permissions } = await register(workspace);
     try {

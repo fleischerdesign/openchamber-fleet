@@ -1,5 +1,6 @@
 /** Official OpenCode V2 plugin surface over fleet.agent.v1. */
 
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { compileExcludes, loadConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
@@ -310,14 +311,15 @@ export default {
           const inputEnv = input.env && typeof input.env === 'object'
             ? Object.fromEntries(Object.entries(input.env).map(([key, value]) => [key, String(value)]))
             : {};
-          const unsafeEnv = Object.keys(inputEnv).filter((key) => /^(PATH|LD_.*|DYLD_.*|NODE_OPTIONS|PYTHONPATH|BASH_ENV|ENV)$/.test(key));
+          const unsafeEnv = Object.keys(inputEnv).filter((key) => /^(PATH|LD_.*|DYLD_.*|NODE_OPTIONS|PYTHONPATH|BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_ASKPASS|SSH_ASKPASS|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|PERL5OPT|RUBYOPT|PYTHONSTARTUP)$/.test(key));
           if (unsafeEnv.length > 0) {
             throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in fleet.json: ${unsafeEnv.join(', ')}`);
           }
           const env = { ...config.env, ...inputEnv };
           const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;
           const command = commandText(argv);
-          const descriptor = JSON.stringify({ host: host.alias, cwd: cwd ?? '.', envKeys: Object.keys(env).sort(), argv });
+          const envDigest = createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([left], [right]) => left.localeCompare(right)))).digest('hex');
+          const descriptor = JSON.stringify({ host: host.alias, cwd: cwd ?? '.', envKeys: Object.keys(env).sort(), envDigest, argv });
           const metadata = {
             workspace: config.name,
             host: host.alias,

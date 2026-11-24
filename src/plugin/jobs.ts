@@ -182,7 +182,7 @@ export class FleetJobRegistry {
       jobId: handle.jobId,
       sessionID: input.sessionID,
       workspace: input.config.name,
-      directory: input.config.dir,
+      directory: this.ctx.location?.directory ?? input.config.dir,
       host: input.host.alias,
       argv: [...input.argv],
       state: 'running',
@@ -253,6 +253,7 @@ export class FleetJobRegistry {
     for (const job of active) {
       if (job.finished || TERMINAL.has(job.record.state)) {
         job.handle.close();
+        await this.persist(job.record);
         continue;
       }
       job.finished = true;
@@ -280,8 +281,7 @@ export class FleetJobRegistry {
     active.record.stderrTail = result.stderr.toString('utf8').slice(-4096);
     active.record.notified = false;
     active.handle.close();
-    this.jobs.delete(active.record.key);
-    if (this.ctx.storage) await this.ctx.storage.set(storageKey(active.record.key), active.record).catch(() => {});
+    if (await this.persist(active.record)) this.jobs.delete(active.record.key);
     await this.notify(active.record, true);
   }
 
@@ -293,8 +293,7 @@ export class FleetJobRegistry {
     active.record.error = error instanceof Error ? error.message : String(error);
     active.record.notified = false;
     active.handle.close();
-    this.jobs.delete(active.record.key);
-    if (this.ctx.storage) await this.ctx.storage.set(storageKey(active.record.key), active.record).catch(() => {});
+    if (await this.persist(active.record)) this.jobs.delete(active.record.key);
     await this.notify(active.record, true);
   }
 
@@ -330,6 +329,20 @@ export class FleetJobRegistry {
       }
     }
     console.warn('[openchamber-fleet] could not deliver background job notification:', lastError instanceof Error ? lastError.message : String(lastError));
+    return false;
+  }
+
+  private async persist(record: StoredJob): Promise<boolean> {
+    if (!this.ctx.storage) return true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.ctx.storage.set(storageKey(record.key), record);
+        return true;
+      } catch (error) {
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+      }
+    }
+    console.warn('[openchamber-fleet] could not persist terminal job state:', record.jobId);
     return false;
   }
 
