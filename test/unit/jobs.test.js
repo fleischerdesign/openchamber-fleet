@@ -117,6 +117,38 @@ describe('background Fleet jobs', () => {
     await registry.cleanup();
   });
 
+  test('lists only the owning session and project, newest first', async () => {
+    const { ctx, storage } = harness();
+    const now = Date.now();
+    storage.set('fleet-job:a', storedRecord({
+      key: 'job-tests\0node\0job-a',
+      jobId: 'job-a',
+      sessionID: 'ses_1',
+      startedAt: now - 2000,
+      state: 'succeeded',
+      exitCode: 0,
+      notified: true,
+    }));
+    storage.set('fleet-job:b', storedRecord({
+      key: 'job-tests\0node\0job-b',
+      jobId: 'job-b',
+      sessionID: 'ses_1',
+      startedAt: now - 1000,
+      state: 'running',
+    }));
+    storage.set('fleet-job:other', storedRecord({
+      key: 'job-tests\0node\0job-other',
+      jobId: 'job-other',
+      sessionID: 'ses_2',
+      startedAt: 30,
+    }));
+    const registry = new FleetJobRegistry(ctx, 'fleet-agent', fakeExecutor('unused', deferred()).executor);
+    const jobs = await registry.list('ses_1', workspace);
+    assert.deepEqual(jobs.map((job) => job.jobId), ['job-b', 'job-a']);
+    assert.deepEqual(await registry.list('ses_2', '/different-project'), []);
+    await registry.cleanup();
+  });
+
   test('plugin cleanup interrupts active jobs without resuming the session', async () => {
     const { ctx, notifications } = harness();
     const pending = deferred();

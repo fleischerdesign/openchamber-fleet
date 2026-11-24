@@ -1,6 +1,6 @@
 {
   "name": "@fleischerdesign/openchamber-fleet-extension",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "openchamber": {
@@ -95,6 +95,51 @@
               { "label": "Mode", "value": "{output.modeLabel}" }
             ]
           }
+        },
+        {
+          "match": "fleet_run",
+          "name": "Fleet run",
+          "icon": "play",
+          "title": "Fleet run · {output.host}",
+          "subtitle": "{output.syncLabel} · {output.stateLabel}",
+          "output": "card",
+          "card": {
+            "label": "{output.host}",
+            "title": "{output.commandLabel}",
+            "status": {
+              "value": "{output.stateLabel}",
+              "tones": {
+                "Running": "info",
+                "Succeeded": "success",
+                "Failed": "error",
+                "Cancelled": "warning",
+                "Sync required": "warning",
+                "Unknown": "error",
+                "Interrupted": "error"
+              }
+            },
+            "fields": [
+              { "label": "Sync", "value": "{output.syncLabel}" },
+              { "label": "Exit", "value": "{output.exitLabel}" },
+              { "label": "Mode", "value": "{output.modeLabel}" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_hosts",
+          "name": "Fleet hosts",
+          "icon": "server",
+          "title": "Fleet hosts · {output.workspace}",
+          "output": "table",
+          "columns": ["alias", "tagsLabel"]
+        },
+        {
+          "match": "fleet_jobs",
+          "name": "Fleet jobs",
+          "icon": "time",
+          "title": "Fleet jobs",
+          "output": "table",
+          "columns": ["host", "commandLabel", "stateLabel", "exitLabel"]
         },
         {
           "match": "fleet_fetch",

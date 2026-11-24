@@ -19,7 +19,7 @@ root. Nothing is written to the repository.
 {
   "version": 1,
   "hosts": {
-    "workstation": { "ssh": "philipp@10.10.100.20", "port": 22 },
+    "workstation": { "ssh": "philipp@10.10.100.20", "port": 22, "tags": ["linux", "gpu"] },
     "notebook": { "ssh": "philipp@10.10.100.30" }
   }
 }
@@ -30,6 +30,11 @@ root. Nothing is written to the repository.
 | `version` | `1` | configuration format |
 | `hosts.<alias>.ssh` | `user@host` | required |
 | `hosts.<alias>.port` | integer | default 22 |
+| `hosts.<alias>.tags` | string[] | optional capabilities such as `linux`, `gpu`, `large`; lowercase identifiers, at most 20 |
+
+Tags are how an agent selects a machine without a UI choice: `fleet_hosts` lists them, and
+`fleet_run` accepts `host: "auto"` plus required tags. They describe capability; they are not
+authorization.
 
 The registry must define at least one host. Unknown keys are an error. File mode is `0600`.
 

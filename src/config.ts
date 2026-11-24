@@ -11,12 +11,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { FleetError } from './errors.js';
-import { assertAlias, assertRemoteRoot, assertSshTarget, assertWorkspaceName } from './paths.js';
+import { assertAlias, assertRemoteRoot, assertSshTarget, assertTag, assertWorkspaceName } from './paths.js';
 
 const LEGACY_KEYS = new Set(['name', 'hosts', 'excludes', 'env', 'shell']);
-const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root']);
+const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root', 'tags']);
 const HOST_REGISTRY_KEYS = new Set(['version', 'hosts']);
-const HOST_ENTRY_KEYS = new Set(['ssh', 'port']);
+const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags']);
 const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'roots', 'excludes', 'env', 'shell']);
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh']);
 const CONFIG_VERSION = 1;
@@ -26,6 +26,7 @@ export interface HostConfig {
   readonly ssh: string;
   readonly port: number;
   readonly root: string;
+  readonly tags: readonly string[];
 }
 
 export interface ExcludeMatcher {
@@ -50,6 +51,7 @@ export interface WorkspaceConfig {
 export interface HostRegistryEntry {
   readonly ssh: string;
   readonly port?: number;
+  readonly tags?: string[];
 }
 
 export interface HostRegistry {
@@ -98,6 +100,7 @@ export interface InitProjectOptions extends LoadConfigOptions {
   readonly port?: number;
   readonly root?: string;
   readonly name?: string;
+  readonly tags?: readonly string[];
   readonly force?: boolean;
 }
 
@@ -252,6 +255,7 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
   const port = options.port === undefined ? 22 : requirePort(options.port, 'port');
   const root = options.root === undefined ? undefined : assertRemoteRoot(options.root);
   const name = options.name === undefined ? defaultWorkspaceName(cwd) : assertWorkspaceName(options.name);
+  const tags = options.tags === undefined ? undefined : readTags(options.tags, 'tags');
 
   const registry = readHostRegistry(paths.hostsFile, true);
   const registryHosts = { ...registry.hosts };
@@ -279,7 +283,11 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
       for (const [legacyAlias, legacyHost] of Object.entries(legacyConfig.hosts)) {
         const entry = registryHosts[legacyAlias];
         const legacyPort = legacyHost.port === 22 ? undefined : legacyHost.port;
-        const merged = legacyPort === undefined ? { ssh: legacyHost.ssh } : { ssh: legacyHost.ssh, port: legacyPort };
+        const merged = {
+          ssh: legacyHost.ssh,
+          ...(legacyPort === undefined ? {} : { port: legacyPort }),
+          ...(legacyHost.tags.length === 0 ? {} : { tags: [...legacyHost.tags] }),
+        };
         if (!entry) {
           registryHosts[legacyAlias] = merged;
         } else if (entry.ssh !== legacyHost.ssh || (entry.port ?? 22) !== legacyHost.port) {
@@ -298,7 +306,11 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
   }
 
   const existing = registryHosts[alias];
-  const requested = port === 22 ? { ssh } : { ssh, port };
+  const requested = {
+    ssh,
+    ...(port === 22 ? {} : { port }),
+    ...(tags === undefined || tags.length === 0 ? {} : { tags: [...tags] }),
+  };
   const sameTarget = existing !== undefined && existing.ssh === ssh && (existing.port ?? 22) === port;
   if (existing && !sameTarget && !options.force) {
     throw new FleetError('config-invalid', `host ${JSON.stringify(alias)} already exists with a different SSH target`, {
@@ -306,7 +318,7 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
       hint: 'pass --force to replace the shared SSH target',
     });
   }
-  if (!sameTarget || options.force) registryHosts[alias] = requested;
+  if (!sameTarget || options.force || tags !== undefined) registryHosts[alias] = requested;
 
   const hosts: HostRegistry = { version: CONFIG_VERSION, hosts: registryHosts };
   const selected = new Set(project.hosts);
@@ -411,7 +423,7 @@ function loadSplitConfig(paths: ConfigPaths): WorkspaceConfig {
   for (const alias of project.hosts) {
     const entry = registry.hosts[alias]!;
     const root = project.roots[alias] ?? defaultRemoteRoot(project.name);
-    hosts[alias] = { alias, ssh: entry.ssh, port: entry.port ?? 22, root };
+    hosts[alias] = { alias, ssh: entry.ssh, port: entry.port ?? 22, root, tags: entry.tags ?? [] };
   }
 
   return {
@@ -456,7 +468,8 @@ function loadLegacyConfig(file: string): WorkspaceConfig {
     const root = entry.root === undefined
       ? defaultRemoteRoot(name)
       : assertRemoteRoot(requireString(entry, 'root', `hosts.${alias}`));
-    hosts[alias] = { alias, ssh, port, root };
+    const tags = readTags(entry.tags, `hosts.${alias}.tags`);
+    hosts[alias] = { alias, ssh, port, root, tags };
   }
 
   return {
@@ -506,7 +519,12 @@ function parseHostRegistry(value: unknown, file: string): HostRegistry {
     rejectUnknown(entry, HOST_ENTRY_KEYS, `hosts.${alias}`);
     const ssh = assertSshTarget(requireString(entry, 'ssh', `hosts.${alias}`));
     const port = entry.port === undefined ? undefined : requirePort(entry.port, `hosts.${alias}.port`);
-    hosts[alias] = port === undefined ? { ssh } : { ssh, port };
+    const tags = readTags(entry.tags, `hosts.${alias}.tags`);
+    hosts[alias] = {
+      ssh,
+      ...(port === undefined ? {} : { port }),
+      ...(tags.length === 0 ? {} : { tags }),
+    };
   }
   if (Object.keys(hosts).length === 0) {
     throw new FleetError('config-invalid', `${file} must declare at least one host`);
@@ -568,7 +586,11 @@ function documentsFromConfig(config: WorkspaceConfig, paths: ConfigPaths, source
   const hosts: Record<string, HostRegistryEntry> = {};
   const roots: Record<string, string> = {};
   for (const [alias, host] of Object.entries(config.hosts)) {
-    hosts[alias] = host.port === 22 ? { ssh: host.ssh } : { ssh: host.ssh, port: host.port };
+    hosts[alias] = {
+      ssh: host.ssh,
+      ...(host.port === 22 ? {} : { port: host.port }),
+      ...(host.tags.length === 0 ? {} : { tags: [...host.tags] }),
+    };
     if (host.root !== defaultRemoteRoot(config.name)) roots[alias] = host.root;
   }
   return {
@@ -632,6 +654,18 @@ function writeJson(file: string, value: unknown): void {
 
 function readExcludes(top: Record<string, unknown>): string[] {
   return top.excludes === undefined ? [] : requireStringArray(top.excludes, 'excludes');
+}
+
+function readTags(value: unknown, where: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new FleetError('config-invalid', `${where} must be an array`);
+  if (value.length > 20) throw new FleetError('config-invalid', `${where} must contain at most 20 tags`);
+  const tags = value.map((entry) => {
+    if (typeof entry !== 'string') throw new FleetError('config-invalid', `${where} entries must be strings`);
+    return assertTag(entry);
+  });
+  if (new Set(tags).size !== tags.length) throw new FleetError('config-invalid', `${where} must not contain duplicates`);
+  return tags;
 }
 
 function readEnv(top: Record<string, unknown>): Record<string, string> {

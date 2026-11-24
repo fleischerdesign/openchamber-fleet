@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { compileExcludes, configPaths, defaultWorkspaceName, initProjectConfig, loadConfig } from './config.js';
 import { FleetError, friendlyErrorMessage } from './errors.js';
+import { hostViews, selectHost } from './hosts.js';
+import { runWorkspace } from './run.js';
 import { AgentError, exitCodeFor } from './v1/errors.js';
 import { connectSsh, execCommand, fetchArtifact, recoverWorkspace, status, syncWorkspace, } from './v1/operations.js';
 const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file']);
@@ -19,8 +21,10 @@ export async function main(argv) {
             case 'status': return await cmdStatus(parsed);
             case 'recover': return await cmdRecover(parsed);
             case 'sync': return await cmdSync(parsed);
+            case 'run': return await cmdRun(parsed);
             case 'exec': return await cmdExec(parsed);
             case 'fetch': return await cmdFetch(parsed);
+            case 'hosts': return cmdHosts(parsed);
             default: throw new FleetError('usage', `unknown command ${parsed.command}`);
         }
     }
@@ -97,6 +101,12 @@ function agentPath(flags) {
     const value = flags.get('agent-path') ?? process.env.FLEET_AGENT_PATH ?? 'fleet-agent';
     return String(value);
 }
+function tagsOf(flags) {
+    const value = flags.get('tag');
+    if (typeof value !== 'string')
+        return [];
+    return [...new Set(value.split(',').map((tag) => tag.trim()).filter(Boolean))];
+}
 function cmdInit(parsed) {
     const host = parsed.flags.get('host');
     const ssh = parsed.flags.get('ssh');
@@ -107,6 +117,7 @@ function cmdInit(parsed) {
     const portValue = parsed.flags.get('port');
     const root = parsed.flags.get('root');
     const name = parsed.flags.get('name');
+    const tags = tagsOf(parsed.flags);
     if (parsed.flags.has('workspace-file')) {
         const file = path.join(configPaths(process.cwd()).workspaceRoot, 'fleet.json');
         if (fs.existsSync(file) && !parsed.flags.has('force')) {
@@ -118,6 +129,8 @@ function cmdInit(parsed) {
             entry.port = Number(portValue);
         if (typeof root === 'string')
             entry.root = root;
+        if (tags.length > 0)
+            entry.tags = tags;
         const config = { name: workspaceName, hosts: { [host]: entry }, excludes: [], env: {} };
         fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
         process.stdout.write(`wrote ${file}\n`);
@@ -129,6 +142,7 @@ function cmdInit(parsed) {
         ...(typeof portValue === 'string' ? { port: Number(portValue) } : {}),
         ...(typeof root === 'string' ? { root } : {}),
         ...(typeof name === 'string' ? { name } : {}),
+        ...(tags.length > 0 ? { tags } : {}),
         ...(typeof configDir === 'string' ? { configDir } : {}),
         force: parsed.flags.has('force'),
     });
@@ -226,15 +240,9 @@ async function cmdSync(parsed) {
         client.close();
     }
 }
-async function cmdExec(parsed) {
-    const config = configOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
-    const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
-    if (argv.length === 0)
-        throw new FleetError('usage', 'exec needs a command after --');
-    const timeout = parsed.flags.get('timeout');
+function envOf(flags) {
     const env = {};
-    const envFlag = parsed.flags.get('env');
+    const envFlag = flags.get('env');
     if (typeof envFlag === 'string') {
         for (const pair of envFlag.split(',')) {
             const [key, ...rest] = pair.split('=');
@@ -242,6 +250,108 @@ async function cmdExec(parsed) {
                 env[key] = rest.join('=');
         }
     }
+    return env;
+}
+function timeoutMsOf(flags) {
+    const timeout = flags.get('timeout');
+    return typeof timeout === 'string' ? Number(timeout) * 1000 : undefined;
+}
+async function cmdRun(parsed) {
+    const config = configOf(parsed.flags);
+    const host = selectHost(config, {
+        ...(typeof parsed.flags.get('host') === 'string' ? { host: String(parsed.flags.get('host')) } : {}),
+        tags: tagsOf(parsed.flags),
+    });
+    const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
+    if (argv.length === 0)
+        throw new FleetError('usage', 'run needs a command after --');
+    const syncFlag = parsed.flags.get('sync');
+    const sync = syncFlag === 'never' || syncFlag === 'plan' || syncFlag === 'apply'
+        ? syncFlag
+        : parsed.flags.has('plan')
+            ? 'plan'
+            : parsed.flags.has('apply')
+                ? 'apply'
+                : 'auto';
+    if (parsed.flags.has('adopt') && sync !== 'auto' && sync !== 'apply') {
+        throw new FleetError('usage', '--adopt is only valid with --sync auto or --sync apply');
+    }
+    const additions = excludesOf(config, parsed.flags).filter((pattern) => !config.excludes.includes(pattern));
+    const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
+    try {
+        const result = await runWorkspace(client, config, host, {
+            argv,
+            cwd: typeof parsed.flags.get('cwd') === 'string' ? String(parsed.flags.get('cwd')) : undefined,
+            env: envOf(parsed.flags),
+            timeoutMs: timeoutMsOf(parsed.flags),
+            sync,
+            excludes: additions,
+            adopt: parsed.flags.has('adopt'),
+        });
+        if (parsed.flags.has('json')) {
+            process.stdout.write(`${JSON.stringify({
+                host: host.alias,
+                state: result.state,
+                sync: result.sync,
+                jobId: result.exec?.jobId ?? null,
+                exitCode: result.exec?.exitCode ?? null,
+                signal: result.exec?.signal ?? null,
+            }, null, 2)}\n`);
+        }
+        else if (result.state === 'sync-required') {
+            process.stdout.write(`sync required: ${result.sync?.changes ?? 0} change(s)\n`);
+            for (const change of result.sync?.items.slice(0, 50) ?? []) {
+                process.stdout.write(`  ${change.action.padEnd(7)} ${change.path}\n`);
+            }
+        }
+        else if (result.exec) {
+            process.stdout.write(result.exec.stdout);
+            process.stderr.write(result.exec.stderr);
+        }
+        if (result.state === 'sync-required') {
+            process.exitCode = 6;
+        }
+        else if (result.exec) {
+            process.exitCode = result.exec.exitCode ?? 1;
+        }
+    }
+    finally {
+        client.close();
+    }
+}
+function cmdHosts(parsed) {
+    const config = configOf(parsed.flags);
+    const tags = tagsOf(parsed.flags);
+    const views = hostViews(config);
+    let selected = null;
+    if (tags.length > 0) {
+        try {
+            selected = selectHost(config, { tags }).alias;
+        }
+        catch {
+            selected = null;
+        }
+    }
+    if (parsed.flags.has('json')) {
+        process.stdout.write(`${JSON.stringify({ workspace: config.name, hosts: views, selected }, null, 2)}\n`);
+        return;
+    }
+    for (const view of views) {
+        process.stdout.write(`${view.alias}\t${view.tagsLabel}\n`);
+    }
+    if (selected)
+        process.stdout.write(`selected\t${selected}\n`);
+    if (tags.length > 0 && !selected)
+        process.exitCode = 2;
+}
+async function cmdExec(parsed) {
+    const config = configOf(parsed.flags);
+    const host = hostOf(config, parsed.flags);
+    const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
+    if (argv.length === 0)
+        throw new FleetError('usage', 'exec needs a command after --');
+    const env = envOf(parsed.flags);
+    const timeoutMs = timeoutMsOf(parsed.flags);
     const cwd = typeof parsed.flags.get('cwd') === 'string' ? String(parsed.flags.get('cwd')) : undefined;
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
@@ -251,7 +361,7 @@ async function cmdExec(parsed) {
             argv,
             cwd,
             env,
-            timeoutMs: typeof timeout === 'string' ? Number(timeout) * 1000 : undefined,
+            timeoutMs,
         });
         process.stdout.write(result.stdout);
         process.stderr.write(result.stderr);
@@ -293,12 +403,15 @@ function printHelp() {
         'fleet — run work on a machine that has the cores',
         '',
         'usage:',
-        '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]',
+        '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--tag a,b] [--force]',
         '               writes $XDG_CONFIG_HOME/openchamber-fleet/ (use --workspace-file for legacy fleet.json)',
         '  fleet doctor [--host <alias>] [--agent-path PATH]',
+        '  fleet hosts [--tag a,b] [--json]',
         '  fleet status --host <alias> [--json]',
         '  fleet recover --host <alias> [--abort] [--json]',
         '  fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]',
+        '  fleet run [--host <alias|auto>] [--tag a,b] [--cwd P] [--env K=V,...] [--timeout SEC]',
+        '            [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--json] -- <command…>',
         '  fleet exec --host <alias> [--cwd P] [--env K=V,...] [--timeout SEC] [--json] -- <command…>',
         '  fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>',
         '  all commands accept --config-dir <dir>',

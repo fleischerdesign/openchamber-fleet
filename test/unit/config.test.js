@@ -170,6 +170,45 @@ describe('split host registry and project configuration', () => {
     assert.equal(migrated.shell, 'zsh');
   });
 
+  test('host tags round-trip through the split documents', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'tags-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'tags-config-'));
+    const documents = initProjectConfig(workspace, {
+      alias: 'mob',
+      ssh: 'u@h',
+      name: 'tagged',
+      tags: ['linux', 'gpu'],
+      configDir,
+    });
+    assert.deepEqual(documents.hosts.hosts.mob.tags, ['linux', 'gpu']);
+    assert.deepEqual(loadConfig(workspace, { configDir }).hosts.mob.tags, ['linux', 'gpu']);
+
+    const editable = loadConfigDocuments(workspace, { configDir });
+    saveConfigDocuments(workspace, editable.hosts, editable.project, { configDir });
+    assert.deepEqual(loadConfig(workspace, { configDir }).hosts.mob.tags, ['linux', 'gpu']);
+  });
+
+  test('rejects invalid host tags', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'bad-tag-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'bad-tag-config-'));
+    assert.throws(
+      () => initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', tags: ['Bad Tag'], configDir }),
+      /host tag/,
+    );
+  });
+
+  test('legacy host tags survive migration', () => {
+    const workspace = writeConfig({
+      name: 'legacy-tags',
+      hosts: { old: { ssh: 'u@h', tags: ['legacy'] } },
+    });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'legacy-tags-config-'));
+    initProjectConfig(workspace, { alias: 'new', ssh: 'u@h', configDir });
+    const config = loadConfig(workspace, { configDir });
+    assert.deepEqual(config.hosts.old.tags, ['legacy']);
+    assert.deepEqual(config.hosts.new.tags, []);
+  });
+
   test('init selects an existing host without rebinding it', () => {
     const first = fs.mkdtempSync(path.join(tmp, 'select-first-'));
     const second = fs.mkdtempSync(path.join(tmp, 'select-second-'));

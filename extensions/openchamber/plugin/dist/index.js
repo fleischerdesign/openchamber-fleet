@@ -1,6 +1,8 @@
 /** Public API: configuration plus the fleet.agent.v1 controller. */
 export { compileExcludes, configDirOf, configPaths, defaultRemoteRoot, defaultWorkspaceName, initProjectConfig, loadConfig, loadConfigDocuments, loadHostRegistry, loadProjectConfig, saveConfigDocuments, } from './config.js';
 export { FleetError, friendlyErrorMessage } from './errors.js';
+export { hostViews, selectHost } from './hosts.js';
+export { runWorkspace, syncForRun } from './run.js';
 export { replicaState } from './status.js';
 export { AgentClient } from './v1/client.js';
 export { AgentError, exitCodeFor } from './v1/errors.js';

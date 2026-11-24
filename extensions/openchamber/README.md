@@ -36,13 +36,27 @@ $XDG_CONFIG_HOME/openchamber-fleet/
 
 Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit both documents in the
 extension panel. Nothing is written to the repository. The panel refuses a stale save and a host
-removal that another project still selects. The panel can check status, show a sync plan, and inspect
-recovery state. Apply, exec, fetch, cancel, and recover remain explicit agent tools with OpenCode
-permission checks.
+removal that another project still selects. The panel is the configuration and observability surface;
+the agent runs work through the tools. `fleet_run` synchronizes first when needed, so there is no
+user-facing sync toggle.
+
+## Agent workflow
+
+- `fleet_run` is the normal execution tool: it synchronizes, runs, and returns a compact result.
+- `fleet_hosts` lists aliases and tags; `fleet_run` accepts `host: "auto"` with tags.
+- `fleet_jobs` lists the session's background jobs; `fleet_job_status` and `fleet_job_cancel` inspect
+  and cancel them.
+- `fleet_sync` remains for explicit plan/apply review and destructive changes.
+- `fleet_exec` is the low-level no-sync variant.
 
 ## Background jobs
 
-`fleet_exec` accepts `background: true`. It returns a `jobId` and the agent can end its turn. When the job reaches a terminal state, the plugin uses OpenCode's official `session.synthetic` API with `resume: true` to wake the same session. `fleet_job_status` and `fleet_job_cancel` inspect and cancel those jobs.
+`fleet_run` and `fleet_exec` accept `background: true`. They return a `jobId` and the agent can end
+its turn. When the job reaches a terminal state, the plugin uses OpenCode's official
+`session.synthetic` API with `resume: true` to wake the same session. `fleet_jobs`,
+`fleet_job_status` and `fleet_job_cancel` list, inspect and cancel those jobs. A terminal job whose
+notification was not delivered is re-notified once after a plugin restart; a job that was still
+running is reported as interrupted.
 
 Background jobs are tied to the running OpenCode plugin runtime. An OpenCode restart, plugin unload, or location eviction interrupts them; the plugin reports that honestly from its durable job record. Very long jobs should run with a project `experimental.location_idle_timeout` large enough for the expected duration, or `false`.
 

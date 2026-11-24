@@ -32,7 +32,7 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.4.1";
+          version = "0.5.0";
           src = self;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           buildPhase = ''
@@ -79,7 +79,7 @@
         extension = mkExtension pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.4.1";
+          version = "0.5.0";
           src = self;
           doCheck = true;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";

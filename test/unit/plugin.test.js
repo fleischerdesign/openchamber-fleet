@@ -50,15 +50,18 @@ function tool(tools, name) {
 const context = { sessionID: 'ses_test', agent: 'build', messageID: 'msg_test', id: 'call_test' };
 
 describe('OpenCode plugin surface', () => {
-  test('registers the seven V2 tools with input and output schemas', async () => {
+  test('registers the ten V2 tools with input and output schemas', async () => {
     const { tools, cleanup } = await register(workspace);
     try {
       assert.deepEqual(tools.map((entry) => entry.name).sort(), [
         'fleet_exec',
         'fleet_fetch',
+        'fleet_hosts',
         'fleet_job_cancel',
         'fleet_job_status',
+        'fleet_jobs',
         'fleet_recover',
+        'fleet_run',
         'fleet_status',
         'fleet_sync',
       ]);

@@ -6,6 +6,7 @@ import { FleetError } from './errors.js';
 const ALIAS = /^[A-Za-z0-9._-]+$/;
 const SSH_TARGET = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/;
 const NAME = /^[a-z0-9][a-z0-9._-]*$/;
+const TAG = /^[a-z0-9][a-z0-9._-]*$/;
 
 export function assertAlias(value: string): string {
   if (!ALIAS.test(value)) {
@@ -24,6 +25,13 @@ export function assertSshTarget(value: string): string {
 export function assertWorkspaceName(value: string): string {
   if (!NAME.test(value)) {
     throw new FleetError('config-invalid', `workspace name ${JSON.stringify(value)} must match ${String(NAME)}`);
+  }
+  return value;
+}
+
+export function assertTag(value: string): string {
+  if (value.length > 32 || !TAG.test(value)) {
+    throw new FleetError('config-invalid', `host tag ${JSON.stringify(value)} must match ${String(TAG)} and be at most 32 characters`);
   }
   return value;
 }
