@@ -28,7 +28,7 @@ export class AgentClient {
         });
         const result = (await provisional.request('session.initialize', {
             protocol: { major: 1, minor: 0 },
-            client: { name: 'fleet', version: '0.4.0', instance: `${process.pid}-${Date.now()}` },
+            client: { name: 'fleet', version: '0.4.1', instance: `${process.pid}-${Date.now()}` },
             capabilities: options.capabilities ?? [],
         }, options.timeoutMs ?? 15_000));
         if (!result?.protocol || result.protocol.major !== 1) {
