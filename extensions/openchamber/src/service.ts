@@ -1,7 +1,13 @@
 import http from 'node:http';
 import path from 'node:path';
-import { compileExcludes, loadConfig } from '../../../src/config.js';
+import {
+  compileExcludes,
+  loadConfig,
+  loadConfigDocuments,
+  saveConfigDocuments,
+} from '../../../src/config.js';
 import type { HostConfig, WorkspaceConfig } from '../../../src/config.js';
+import { friendlyErrorMessage } from '../../../src/errors.js';
 import { AgentError } from '../../../src/v1/errors.js';
 import {
   connectSsh,
@@ -35,8 +41,8 @@ function reply(response: http.ServerResponse, statusCode: number, body: unknown)
 }
 
 function errorFields(error: unknown): { code: string; message: string } {
-  if (error instanceof AgentError) return { code: error.code, message: error.message };
-  if (error instanceof Error) return { code: 'INTERNAL', message: error.message };
+  if (error instanceof AgentError) return { code: error.code, message: friendlyErrorMessage(error) };
+  if (error instanceof Error) return { code: 'INTERNAL', message: friendlyErrorMessage(error) };
   return { code: 'INTERNAL', message: String(error) };
 }
 
@@ -69,6 +75,13 @@ function directoryOf(value: Record<string, unknown>): string {
     throw new AgentError('INVALID_REQUEST', 'an absolute project directory is required');
   }
   return directory;
+}
+
+function directoryOfQuery(value: string | null): string {
+  if (!value || !path.isAbsolute(value)) {
+    throw new AgentError('INVALID_REQUEST', 'an absolute project directory is required');
+  }
+  return value;
 }
 
 function hostOf(config: WorkspaceConfig, value: Record<string, unknown>): HostConfig {
@@ -115,9 +128,11 @@ async function refresh(directory: string): Promise<GuestStatusView> {
         kind: 'line',
         id: alias,
         label: alias,
-        value: `gen ${result.value.info.generation}`,
+        value: result.value.info.recovery ? 'Recovery needed' : 'Ready',
         dot: result.value.info.recovery ? 'error' : 'success',
-        tooltip: result.value.info.recovery ? 'RECOVERY required' : result.value.info.manifestDigest,
+        tooltip: result.value.info.recovery
+          ? 'The last sync was interrupted; open Fleet recovery before syncing again.'
+          : 'Workspace replica is synchronized.',
       });
     } else {
       const fields = errorFields(result.reason);
@@ -157,6 +172,17 @@ const server = http.createServer(async (request, response) => {
       const view = cached && Date.now() - cached.at < 15_000 ? cached.view : await refresh(directory);
       return reply(response, 200, view);
     }
+    if (request.method === 'GET' && url.pathname === '/config') {
+      try {
+        return reply(response, 200, {
+          ok: true,
+          result: loadConfigDocuments(directoryOfQuery(url.searchParams.get('directory'))),
+        });
+      } catch (error) {
+        const fields = errorFields(error);
+        return reply(response, 400, { ok: false, error: fields });
+      }
+    }
     if (request.method !== 'POST') {
       return reply(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'unknown service route' } });
     }
@@ -164,6 +190,13 @@ const server = http.createServer(async (request, response) => {
     const body = await readBody(request);
     const directory = directoryOf(body);
     lastDirectory = directory;
+
+    if (url.pathname === '/config') {
+      const result = saveConfigDocuments(directory, body.hosts, body.project);
+      cache.delete(directory);
+      return reply(response, 200, { ok: true, result });
+    }
+
     const config = loadConfig(directory);
     const host = hostOf(config, body);
 

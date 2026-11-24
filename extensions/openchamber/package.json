@@ -1,6 +1,6 @@
 {
   "name": "@fleischerdesign/openchamber-fleet-extension",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "openchamber": {
@@ -46,17 +46,18 @@
           "title": "Fleet status · {input.host}",
           "output": "card",
           "card": {
-            "label": "{output.workspace}@{output.host}",
-            "title": "Generation {output.generation}",
+            "label": "{output.host}",
+            "title": "{output.statusLabel}",
             "status": {
-              "value": "{output.recovery}",
+              "value": "{output.statusLabel}",
               "tones": {
-                "false": "success",
-                "true": "error"
+                "Ready": "success",
+                "Recovery needed": "error"
               }
             },
             "fields": [
-              { "label": "Manifest", "value": "{output.manifestDigest}" }
+              { "label": "Workspace", "value": "{output.workspace}" },
+              { "label": "Next step", "value": "{output.nextStep}" }
             ]
           }
         },

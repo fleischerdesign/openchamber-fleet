@@ -21,7 +21,7 @@
     button:hover { background: var(--oc-hover, #333); }
     button.primary { background: var(--oc-primary, #5b8def); color: var(--oc-primary-foreground, white); border-color: transparent; }
     button:disabled { opacity: .5; cursor: default; }
-    textarea { width: 100%; min-height: 150px; resize: vertical; border: 1px solid var(--oc-border, #333); border-radius: 8px; background: var(--oc-background, #111); color: inherit; padding: 8px; }
+    textarea { width: 100%; min-height: 120px; resize: vertical; border: 1px solid var(--oc-border, #333); border-radius: 8px; background: var(--oc-background, #111); color: inherit; padding: 8px; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; padding: 8px; border-radius: 6px; background: var(--oc-muted-surface, #222); max-height: 260px; overflow: auto; }
     .error { color: var(--oc-error-text, #ef6666); }
     .ok { color: var(--oc-success-text, #5ecb8b); }
@@ -30,15 +30,18 @@
 </head>
 <body>
   <h1>Fleet</h1>
-  <p id="directory">Open a project to load its <code>fleet.json</code>.</p>
+  <p id="directory">Open a project to configure Fleet.</p>
   <div id="notice" aria-live="polite"></div>
   <div id="hosts"></div>
-  <h2>Workspace configuration</h2>
-  <p>Hosts live in this project's <code>fleet.json</code>. Nothing is derived from Nix or a global host list.</p>
-  <textarea id="config" spellcheck="false" placeholder="No fleet.json yet. Run fleet init or create one here."></textarea>
+  <h2>Host registry</h2>
+  <p>Machines are stored locally for this OpenChamber instance, never in the repository.</p>
+  <textarea id="hosts-config" spellcheck="false" placeholder="Hosts are not configured yet."></textarea>
+  <h2>Project selection</h2>
+  <p>This project selects host aliases and owns its excludes. Nothing here is committed.</p>
+  <textarea id="project-config" spellcheck="false" placeholder="No project configuration yet."></textarea>
   <div class="row" style="margin-top:8px">
     <button id="reload">Reload</button>
-    <button id="save" class="primary">Save fleet.json</button>
+    <button id="save" class="primary">Save local configuration</button>
   </div>
   <h2>Result</h2>
   <pre id="result" hidden></pre>

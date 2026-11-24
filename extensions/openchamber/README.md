@@ -11,19 +11,18 @@ The extension contributes the Fleet OpenCode plugin, native tool cards/tables, a
 
 ## Configuration
 
-Hosts are declared per workspace in `fleet.json`:
+Hosts are machine-level and shared by projects. A project selects aliases and owns its excludes:
 
-```json
-{
-  "name": "my-project",
-  "hosts": {
-    "workstation": { "ssh": "philipp@10.10.100.20", "port": 22 }
-  },
-  "excludes": ["target/", "node_modules/", ".direnv/"]
-}
+```text
+$XDG_CONFIG_HOME/openchamber-fleet/
+  hosts.json
+  workspaces/<project-id>.json
 ```
 
-Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit the file in the extension panel. The panel can check status, show a sync plan, and inspect recovery state. Apply, exec, fetch, cancel, and recover remain explicit agent tools with OpenCode permission checks.
+Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit both documents in the
+extension panel. Nothing is written to the repository. The panel can check status, show a sync plan,
+and inspect recovery state. Apply, exec, fetch, cancel, and recover remain explicit agent tools with
+OpenCode permission checks.
 
 ## Background jobs
 

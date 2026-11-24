@@ -2,9 +2,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { compileExcludes, loadConfig } from './config.js';
+import { compileExcludes, initProjectConfig, loadConfig } from './config.js';
 import type { HostConfig, WorkspaceConfig } from './config.js';
-import { FleetError } from './errors.js';
+import { FleetError, friendlyErrorMessage } from './errors.js';
 import { AgentError, exitCodeFor } from './v1/errors.js';
 import {
   connectSsh,
@@ -22,7 +22,7 @@ interface Parsed {
   rest: string[];
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help']);
+const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file']);
 
 export async function main(argv: readonly string[]): Promise<void> {
   const parsed = parse(argv);
@@ -43,10 +43,10 @@ export async function main(argv: readonly string[]): Promise<void> {
     }
   } catch (error) {
     if (error instanceof AgentError) {
-      process.stderr.write(`${error.code}: ${error.message}${error.retryable ? ' (retryable)' : ''}\n`);
+      process.stderr.write(`${error.code}: ${friendlyErrorMessage(error)}${error.retryable ? ' (retryable)' : ''}\n`);
       process.exitCode = exitCodeFor(error.code);
     } else if (error instanceof FleetError) {
-      process.stderr.write(`${error.code}: ${error.message}\n`);
+      process.stderr.write(`${error.code}: ${friendlyErrorMessage(error)}\n`);
       process.exitCode = error.exitCode;
     } else {
       const message = error instanceof Error ? error.message : String(error);
@@ -85,7 +85,11 @@ function parse(argv: readonly string[]): Parsed {
 
 function configOf(flags: Map<string, string | boolean>): WorkspaceConfig {
   const config = flags.get('config');
-  return loadConfig(process.cwd(), typeof config === 'string' ? { config } : {});
+  const configDir = flags.get('config-dir');
+  return loadConfig(process.cwd(), {
+    ...(typeof config === 'string' ? { config } : {}),
+    ...(typeof configDir === 'string' ? { configDir } : {}),
+  });
 }
 
 function hostOf(config: WorkspaceConfig, flags: Map<string, string | boolean>): HostConfig {
@@ -104,24 +108,44 @@ function agentPath(flags: Map<string, string | boolean>): string {
 }
 
 function cmdInit(parsed: Parsed): void {
-  const file = path.join(process.cwd(), 'fleet.json');
-  if (fs.existsSync(file) && !parsed.flags.has('force')) {
-    throw new FleetError('config-invalid', 'fleet.json already exists', { hint: 'pass --force to replace it' });
-  }
   const host = parsed.flags.get('host');
   const ssh = parsed.flags.get('ssh');
   if (typeof host !== 'string' || typeof ssh !== 'string') {
     throw new FleetError('usage', 'init needs --host <alias> and --ssh <user@host>');
   }
-  const name = typeof parsed.flags.get('name') === 'string'
-    ? String(parsed.flags.get('name'))
-    : path.basename(process.cwd()).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  const entry: Record<string, unknown> = { ssh };
-  if (typeof parsed.flags.get('port') === 'string') entry.port = Number(parsed.flags.get('port'));
-  if (typeof parsed.flags.get('root') === 'string') entry.root = String(parsed.flags.get('root'));
-  const config = { name, hosts: { [host]: entry }, excludes: [], env: {} };
-  fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o644 });
-  process.stdout.write(`wrote ${file}\n`);
+  const configDir = parsed.flags.get('config-dir');
+  const portValue = parsed.flags.get('port');
+  const root = parsed.flags.get('root');
+  const name = parsed.flags.get('name');
+
+  if (parsed.flags.has('workspace-file')) {
+    const file = path.join(process.cwd(), 'fleet.json');
+    if (fs.existsSync(file) && !parsed.flags.has('force')) {
+      throw new FleetError('config-invalid', 'fleet.json already exists', { hint: 'pass --force to replace it' });
+    }
+    const workspaceName = typeof name === 'string'
+      ? name
+      : path.basename(process.cwd()).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    const entry: Record<string, unknown> = { ssh };
+    if (typeof portValue === 'string') entry.port = Number(portValue);
+    if (typeof root === 'string') entry.root = root;
+    const config = { name: workspaceName, hosts: { [host]: entry }, excludes: [], env: {} };
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+    process.stdout.write(`wrote ${file}\n`);
+    return;
+  }
+
+  const documents = initProjectConfig(process.cwd(), {
+    alias: host,
+    ssh,
+    ...(typeof portValue === 'string' ? { port: Number(portValue) } : {}),
+    ...(typeof root === 'string' ? { root } : {}),
+    ...(typeof name === 'string' ? { name } : {}),
+    ...(typeof configDir === 'string' ? { configDir } : {}),
+    force: parsed.flags.has('force'),
+  });
+  process.stdout.write(`wrote ${documents.hostsFile}\n`);
+  process.stdout.write(`wrote ${documents.projectFile}\n`);
 }
 
 async function cmdDoctor(parsed: Parsed): Promise<void> {
@@ -283,12 +307,14 @@ function printHelp(): void {
     '',
     'usage:',
     '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]',
+    '               writes $XDG_CONFIG_HOME/openchamber-fleet/ (use --workspace-file for legacy fleet.json)',
     '  fleet doctor [--host <alias>] [--agent-path PATH]',
     '  fleet status --host <alias> [--json]',
     '  fleet recover --host <alias> [--abort] [--json]',
     '  fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]',
     '  fleet exec --host <alias> [--cwd P] [--env K=V,...] [--timeout SEC] [--json] -- <command…>',
     '  fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>',
+    '  all commands accept --config-dir <dir>',
     '',
   ].join('\n'));
 }

@@ -87,7 +87,7 @@ describe('OpenCode plugin surface', () => {
       const result = tool(tools, 'fleet_job_status');
       await assert.rejects(
         result.execute({ host: 'node', jobId: 'missing' }, context),
-        /no fleet\.json/,
+        /no Fleet host registry/,
       );
     } finally {
       await cleanup();

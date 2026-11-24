@@ -63,7 +63,7 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 - Secrets inside the workspace are replicated. Exclude them or keep them out of the tree.
 - OpenCode permissions are policy checks, not a sandbox. `fleet_exec` evaluates a host/cwd/env-key
   descriptor under `fleet.exec` and the exact argv under `shell`; execution-sensitive environment
-  overrides must be declared in `fleet.json`. `fleet_fetch` canonicalizes the final local path and
+  overrides must be declared in the project configuration. `fleet_fetch` canonicalizes the final local path and
   evaluates it under `edit` and `external_directory`; `fleet_sync` apply and `fleet_recover` use
   dedicated actions. Planning never adopts a directory.
 - Background jobs live in the OpenCode plugin runtime. A restart, plugin unload or location eviction

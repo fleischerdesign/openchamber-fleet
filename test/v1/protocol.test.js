@@ -58,6 +58,23 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     assert.deepEqual(second.changes, []);
   });
 
+  test('syncs a file larger than one DATA frame', async () => {
+    const bigSource = path.join(base, 'big-source');
+    const bigReplica = path.join(base, 'big-replica');
+    fs.mkdirSync(bigSource, { recursive: true });
+    const big = crypto.randomBytes(5 * 1024 * 1024);
+    fs.writeFileSync(path.join(bigSource, 'big.bin'), big);
+    const result = await syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-big',
+      source: bigSource,
+      root: bigReplica,
+      excludes: [],
+      mode: 'apply',
+    });
+    assert.ok(result.changes.some((change) => change.path === 'big.bin'));
+    assert.equal(fs.readFileSync(path.join(bigReplica, 'big.bin')).length, big.length);
+  });
+
   test('plan refuses adopt before changing an existing directory', async () => {
     const root = path.join(base, 'adopt-replica');
     fs.mkdirSync(root, { recursive: true, mode: 0o755 });

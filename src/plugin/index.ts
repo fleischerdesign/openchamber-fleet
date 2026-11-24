@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { compileExcludes, loadConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
+import { FleetError, friendlyErrorMessage } from '../errors.js';
 import { AgentError } from '../v1/errors.js';
 import {
   canonicalArtifactTarget,
@@ -63,7 +64,17 @@ async function workspaceOf(ctx: PluginContext, context?: ToolContext): Promise<W
       // The location or server cwd remains a useful, explicit fallback.
     }
   }
-  return loadConfig(directory);
+  try {
+    return loadConfig(directory);
+  } catch (error) {
+    if (error instanceof FleetError) {
+      throw new AgentError(error.code === 'config-missing' ? 'CONFIG_MISSING' : 'CONFIG_INVALID', [
+        error.message,
+        error.details?.hint,
+      ].filter(Boolean).join(' '));
+    }
+    throw error;
+  }
 }
 
 function hostOf(config: WorkspaceConfig, input: Record<string, unknown>): HostConfig {
@@ -126,6 +137,11 @@ async function withClient<T>(
   if (options.closeOnAbort !== false) context?.signal?.addEventListener('abort', onAbort, { once: true });
   try {
     return await run(client);
+  } catch (error) {
+    if (error instanceof AgentError) {
+      throw new AgentError(error.code, friendlyErrorMessage(error), error.retryable, error.details);
+    }
+    throw error;
   } finally {
     context?.signal?.removeEventListener('abort', onAbort);
     client.close();
@@ -202,22 +218,31 @@ export default {
     await ctx.tool.transform((tools) => {
       tools.add({
         name: 'fleet_status',
-        description: 'Show the replica generation, manifest digest and recovery state of a configured Fleet host.',
+        description: 'Show whether a configured Fleet host is ready, synchronized, or needs recovery.',
         options: { codemode: false },
         input: schema({ host: string }, ['host']),
         output: output({
-          workspace: string, host: string, generation: { type: 'number' }, manifestDigest: string, recovery: boolean,
-        }, ['workspace', 'host', 'generation', 'manifestDigest', 'recovery']),
+          workspace: string,
+          host: string,
+          generation: { type: 'number' },
+          manifestDigest: string,
+          recovery: boolean,
+          statusLabel: string,
+          nextStep: string,
+        }, ['workspace', 'host', 'generation', 'manifestDigest', 'recovery', 'statusLabel', 'nextStep']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
           const info = await withClient(host, context, (client) => status(client, config.name, host.root, context?.signal));
+          const recovery = info.recovery === true;
           return jsonResult({
             workspace: config.name,
             host: host.alias,
             generation: info.generation,
             manifestDigest: info.manifestDigest,
-            recovery: info.recovery,
+            recovery,
+            statusLabel: recovery ? 'Recovery needed' : 'Ready',
+            nextStep: recovery ? 'Run fleet_recover before the next sync.' : 'Workspace replica is synchronized.',
           });
         },
       });
@@ -313,7 +338,7 @@ export default {
             : {};
           const unsafeEnv = Object.keys(inputEnv).filter((key) => /^(PATH|LD_.*|DYLD_.*|NODE_OPTIONS|PYTHONPATH|BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_ASKPASS|SSH_ASKPASS|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|PERL5OPT|RUBYOPT|PYTHONSTARTUP)$/.test(key));
           if (unsafeEnv.length > 0) {
-            throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in fleet.json: ${unsafeEnv.join(', ')}`);
+            throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in the project config: ${unsafeEnv.join(', ')}`);
           }
           const env = { ...config.env, ...inputEnv };
           const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;

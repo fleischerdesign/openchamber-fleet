@@ -2,6 +2,7 @@
 
 ```
 fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]
+fleet init ... --workspace-file       # opt-in legacy fleet.json in the repository
 fleet doctor [--host <alias>] [--agent-path PATH]
 fleet status --host <alias> [--json]
 fleet recover --host <alias> [--abort] [--json]
@@ -11,7 +12,12 @@ fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>
 ```
 
 Every command opens one SSH session, performs one operation and closes it. `FLEET_AGENT_PATH`
-overrides the agent binary name.
+overrides the agent binary name. Every command accepts `--config-dir <dir>`; the default is
+`$XDG_CONFIG_HOME/openchamber-fleet`.
+
+`fleet init` writes the host registry and project configuration there, never into the repository.
+The host registry is reusable by every project. Use `--workspace-file` only when a repository-local
+legacy file is explicitly wanted.
 
 ## Exit codes
 
@@ -69,6 +75,8 @@ The digest is verified against the agent's report before the file is written.
 $ fleet status --host workstation
 my-project: generation 7 sha256:41ab…
 ```
+
+`my-project` is the project name; the selected host is `workstation`.
 
 `RECOVERY` appears when an interrupted transaction needs resolution. `fleet recover --host <alias>`
 inspects the journal and completes an interrupted apply. `--abort` is only valid before apply has

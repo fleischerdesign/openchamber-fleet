@@ -1,24 +1,48 @@
 import { connectHost, HostRequestError } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
-interface FleetConfig {
+interface HostEntry {
+  ssh: string;
+  port?: number;
+}
+
+interface HostsFile {
+  version?: number;
+  hosts: Record<string, HostEntry>;
+}
+
+interface ProjectFile {
+  version?: number;
   name: string;
-  hosts: Record<string, { ssh: string; port?: number; root?: string }>;
+  hosts: string[];
+  roots?: Record<string, string>;
   excludes?: string[];
+  env?: Record<string, string>;
+  shell?: string;
+}
+
+interface ConfigDocuments {
+  projectId: string;
+  hostsFile: string;
+  projectFile: string;
+  hosts: HostsFile;
+  project: ProjectFile;
+  legacy: boolean;
 }
 
 const host = connectHost();
 const directory = document.querySelector<HTMLParagraphElement>('#directory')!;
 const notice = document.querySelector<HTMLDivElement>('#notice')!;
-const hosts = document.querySelector<HTMLDivElement>('#hosts')!;
-const config = document.querySelector<HTMLTextAreaElement>('#config')!;
+const hostsView = document.querySelector<HTMLDivElement>('#hosts')!;
+const hostsConfig = document.querySelector<HTMLTextAreaElement>('#hosts-config')!;
+const projectConfig = document.querySelector<HTMLTextAreaElement>('#project-config')!;
 const result = document.querySelector<HTMLPreElement>('#result')!;
 const reload = document.querySelector<HTMLButtonElement>('#reload')!;
 const save = document.querySelector<HTMLButtonElement>('#save')!;
 
 let currentDirectory: string | null = null;
 let loadVersion = 0;
-const drafts = new Map<string, string>();
+const drafts = new Map<string, { hosts: string; project: string }>();
 
 function showNotice(message: string, tone: 'info' | 'error' | 'success' = 'info'): void {
   notice.className = tone === 'error' ? 'error' : tone === 'success' ? 'ok' : '';
@@ -28,6 +52,19 @@ function showNotice(message: string, tone: 'info' | 'error' | 'success' = 'info'
 function showResult(value: unknown): void {
   result.hidden = false;
   result.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+function parseObject(text: string, what: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${what} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${what} must be a JSON object.`);
+  }
+  return value as Record<string, unknown>;
 }
 
 async function service(path: string, body: Record<string, unknown>): Promise<unknown> {
@@ -44,17 +81,46 @@ async function service(path: string, body: Record<string, unknown>): Promise<unk
   return parsed.result ?? parsed;
 }
 
-function parseConfig(text: string): FleetConfig {
-  const value = JSON.parse(text) as Partial<FleetConfig>;
-  if (!value || typeof value.name !== 'string' || !value.name || !value.hosts || typeof value.hosts !== 'object') {
-    throw new Error('fleet.json needs a non-empty name and a hosts object.');
+async function loadDocuments(directory: string): Promise<ConfigDocuments> {
+  const response = await host.serviceRequest({
+    method: 'GET',
+    path: `/config?directory=${encodeURIComponent(directory)}`,
+    body: '',
+  });
+  const parsed = JSON.parse(response.body || '{}') as { ok?: boolean; error?: { message?: string }; result?: ConfigDocuments };
+  if (response.status < 200 || response.status >= 300 || parsed.ok === false || !parsed.result) {
+    throw new Error(parsed.error?.message ?? `Fleet service returned HTTP ${response.status}`);
   }
-  return value as FleetConfig;
+  return parsed.result;
 }
 
-function renderHosts(value: FleetConfig): void {
-  hosts.replaceChildren();
-  for (const [alias, entry] of Object.entries(value.hosts)) {
+function parseHosts(text: string): HostsFile {
+  const value = parseObject(text, 'Host registry');
+  if (!value.hosts || typeof value.hosts !== 'object' || Array.isArray(value.hosts)) {
+    throw new Error('Host registry needs a hosts object.');
+  }
+  return value as unknown as HostsFile;
+}
+
+function parseProject(text: string): ProjectFile {
+  const value = parseObject(text, 'Project configuration');
+  if (typeof value.name !== 'string' || !value.name || !Array.isArray(value.hosts)) {
+    throw new Error('Project configuration needs a name and a hosts array.');
+  }
+  return value as unknown as ProjectFile;
+}
+
+function renderHosts(documents: ConfigDocuments): void {
+  hostsView.replaceChildren();
+  const selected = documents.project.hosts ?? [];
+  if (selected.length === 0) {
+    const note = document.createElement('p');
+    note.textContent = 'No hosts selected for this project yet.';
+    hostsView.append(note);
+    return;
+  }
+  for (const alias of selected) {
+    const entry = documents.hosts.hosts?.[alias];
     const row = document.createElement('div');
     row.className = 'host';
     const title = document.createElement('div');
@@ -62,43 +128,53 @@ function renderHosts(value: FleetConfig): void {
     const name = document.createElement('strong');
     name.textContent = alias;
     const ssh = document.createElement('small');
-    ssh.textContent = entry.ssh;
+    ssh.textContent = entry?.ssh ?? 'missing from host registry';
     title.append(name, ssh);
     const actions = document.createElement('div');
     actions.className = 'row';
     actions.style.marginTop = '8px';
-    for (const [label, action] of [['Status', 'status'], ['Plan', 'plan'], ['Inspect recovery', 'recovery']] as const) {
-      const button = document.createElement('button');
-      button.textContent = label;
-      button.dataset.action = action;
-      button.dataset.host = alias;
-      actions.append(button);
+    if (entry) {
+      for (const [label, action] of [['Status', 'status'], ['Plan', 'plan'], ['Inspect recovery', 'recovery']] as const) {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.dataset.action = action;
+        button.dataset.host = alias;
+        actions.append(button);
+      }
     }
     row.append(title, actions);
-    hosts.append(row);
+    hostsView.append(row);
   }
 }
 
+function fill(documents: ConfigDocuments, directory: string): void {
+  const draft = drafts.get(directory);
+  hostsConfig.value = draft?.hosts ?? `${JSON.stringify(documents.hosts, null, 2)}\n`;
+  projectConfig.value = draft?.project ?? `${JSON.stringify(documents.project, null, 2)}\n`;
+  renderHosts(documents);
+  const count = Object.keys(documents.hosts.hosts ?? {}).length;
+  const selected = documents.project.hosts?.length ?? 0;
+  const legacy = documents.legacy ? ' Legacy fleet.json detected; saving migrates it to local configuration.' : '';
+  showNotice(`${count} host(s), ${selected} selected for this project.${legacy}`, 'success');
+}
+
 async function load(): Promise<void> {
-  const directory = currentDirectory;
-  if (!directory) return;
+  const active = currentDirectory;
+  if (!active) return;
   const version = ++loadVersion;
   showNotice('Loading Fleet configuration…');
   try {
-    const response = await host.readFile('fleet.json');
-    if (currentDirectory !== directory || version !== loadVersion) return;
-    const draft = drafts.get(directory);
-    config.value = draft ?? response.content;
-    const value = parseConfig(config.value);
-    renderHosts(value);
-    showNotice(`${Object.keys(value.hosts).length} configured host(s).`, 'success');
+    const documents = await loadDocuments(active);
+    if (currentDirectory !== active || version !== loadVersion) return;
+    fill(documents, active);
   } catch (error) {
-    if (currentDirectory !== directory || version !== loadVersion) return;
-    const draft = drafts.get(directory);
-    config.value = draft ?? '';
-    hosts.replaceChildren();
+    if (currentDirectory !== active || version !== loadVersion) return;
+    const draft = drafts.get(active);
+    hostsConfig.value = draft?.hosts ?? '';
+    projectConfig.value = draft?.project ?? '';
+    hostsView.replaceChildren();
     if (error instanceof HostRequestError && /not found/i.test(error.message)) {
-      showNotice('No fleet.json in this project. Create one below or run fleet init.');
+      showNotice('No local Fleet project configuration yet. Add a host and save.', 'warning');
     } else {
       showNotice(error instanceof Error ? error.message : String(error), 'error');
     }
@@ -108,48 +184,55 @@ async function load(): Promise<void> {
 host.onReady((ready) => {
   applyHostReady(ready, document.documentElement);
   currentDirectory = ready.directory;
-  directory.textContent = currentDirectory ?? 'Open a project to load its fleet.json.';
+  directory.textContent = currentDirectory ?? 'Open a project to configure Fleet.';
   if (currentDirectory) void load();
 });
 
 host.onDirectory((value) => {
   loadVersion += 1;
   currentDirectory = value;
-  directory.textContent = value ?? 'Open a project to load its fleet.json.';
+  directory.textContent = value ?? 'Open a project to configure Fleet.';
   result.hidden = true;
   if (value) void load();
   else {
-    config.value = '';
-    hosts.replaceChildren();
+    hostsConfig.value = '';
+    projectConfig.value = '';
+    hostsView.replaceChildren();
   }
 });
 
-config.addEventListener('input', () => {
-  if (currentDirectory) drafts.set(currentDirectory, config.value);
-});
+function rememberDraft(): void {
+  if (currentDirectory) {
+    drafts.set(currentDirectory, { hosts: hostsConfig.value, project: projectConfig.value });
+  }
+}
+
+hostsConfig.addEventListener('input', rememberDraft);
+projectConfig.addEventListener('input', rememberDraft);
 reload.addEventListener('click', () => void load());
 save.addEventListener('click', () => {
   void (async () => {
-    const directory = currentDirectory;
-    if (!directory) {
+    const active = currentDirectory;
+    if (!active) {
       showNotice('Open a project first.', 'error');
       return;
     }
     try {
-      const value = parseConfig(config.value);
-      await host.writeFile('fleet.json', `${JSON.stringify(value, null, 2)}\n`);
-      if (currentDirectory !== directory) return;
-      drafts.delete(directory);
-      renderHosts(value);
-      showNotice('fleet.json saved.', 'success');
+      const hosts = parseHosts(hostsConfig.value);
+      const project = parseProject(projectConfig.value);
+      const saved = await service('/config', { hosts, project }) as ConfigDocuments;
+      if (currentDirectory !== active) return;
+      drafts.delete(active);
+      fill(saved, active);
+      showNotice('Local Fleet configuration saved. Nothing was written to the repository.', 'success');
     } catch (error) {
-      if (currentDirectory !== directory) return;
+      if (currentDirectory !== active) return;
       showNotice(error instanceof Error ? error.message : String(error), 'error');
     }
   })();
 });
 
-hosts.addEventListener('click', (event) => {
+hostsView.addEventListener('click', (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
   if (!button) return;
   const action = button.dataset.action;

@@ -5,6 +5,9 @@ export const DATA = 2;
 
 export const MAX_CONTROL = 1024 * 1024;
 export const MAX_DATA = 1024 * 1024;
+/** A data payload contains the 12-byte stream header plus the file bytes. */
+export const DATA_HEADER_BYTES = 12;
+export const MAX_DATA_BYTES = MAX_DATA - DATA_HEADER_BYTES;
 
 export interface Frame {
   readonly kind: number;
@@ -31,7 +34,10 @@ export interface DataHeader {
 }
 
 export function encodeData(streamId: number, seq: bigint, bytes: Buffer): Buffer {
-  const header = Buffer.alloc(12);
+  if (bytes.length > MAX_DATA_BYTES) {
+    throw new Error(`data chunk ${bytes.length} exceeds ${MAX_DATA_BYTES} bytes`);
+  }
+  const header = Buffer.alloc(DATA_HEADER_BYTES);
   header.writeUInt32BE(streamId, 0);
   header.writeBigUInt64BE(seq, 4);
   return encodeFrame(DATA, Buffer.concat([header, bytes]));
