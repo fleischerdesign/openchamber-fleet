@@ -38,10 +38,10 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | IDs | Why not yet |
 |---|---|
 | WS-02, WS-05, WS-06 | Need a spawn-kill harness for the journal and a permission test |
-| SYNC-09, SYNC-10 | Two controllers mutating, symlink apply |
+| SYNC-09 | Two controllers mutating one workspace |
 | EXEC-05, EXEC-07, EXEC-08 | Environment isolation test, disconnect cancel, crash-unknown |
 | ART-03, CTL-01, CTL-03 | Artifact refusals, digest parity fixture, SSH argv unit test |
-| FAIL-05 | traversal attacks (partial: path validation) |
+| FAIL-04, FAIL-05 | Large-workspace gate, traversal attacks (partial: path validation) |
 
 ## Rule
 

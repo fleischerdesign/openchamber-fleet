@@ -47,8 +47,29 @@ fleet exec --host workstation -- cargo test --all-features
 fleet fetch --host workstation --dest ./out -- target/release/app
 ```
 
-The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `fleet_fetch` and
-`fleet_status`.
+The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `fleet_fetch`,
+`fleet_status`, `fleet_job_status`, `fleet_job_cancel` and `fleet_recover`.
+
+## OpenCode and OpenChamber
+
+The repository builds three artifacts from one controller core:
+
+- the `fleet` CLI/library,
+- a dependency-free OpenCode V2 plugin (`openchamber-fleet/plugin`),
+- a complete OpenChamber extension in [`extensions/openchamber`](extensions/openchamber).
+
+The extension contributes native tool cards/tables, a project configuration panel, a read-only Work
+Status section and the OpenCode plugin. It uses only public OpenChamber SDK and OpenCode plugin APIs;
+Nix is an optional packaging path, not a runtime requirement.
+
+`fleet_exec` accepts `background: true`. The tool returns a `jobId`, the agent can end its turn, and
+the plugin resumes the same session through OpenCode's official `session.synthetic` API when the job
+finishes. `fleet_job_status` and `fleet_job_cancel` manage those jobs. Background jobs are tied to the
+running OpenCode runtime; restart, plugin unload and location eviction are reported as interruptions.
+
+Permissions follow OpenCode rules: remote exec evaluates `shell`, fetch evaluates `edit` and
+`external_directory`, and sync apply/recovery use dedicated `fleet.sync` / `fleet.recover` actions.
+Status and sync planning are read-only.
 
 ## Guarantees
 
@@ -69,10 +90,11 @@ The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `flee
 
 ## Status
 
-v1 is implemented end to end in this repository: protocol, Rust agent, TypeScript controller, CLI
-and plugin. The failure-injection suite (disconnect at every phase, two controllers, agent kill at
-transaction boundaries, disk full, output flood) and the live fleet/OpenChamber proof are the
-remaining gate before calling it production-ready.
+v1 is implemented end to end in this repository: protocol, Rust agent, TypeScript controller, CLI,
+OpenCode plugin and OpenChamber extension. The test suite covers two controllers, recovery after a
+dead controller, agent kills at transaction boundaries, disk full, cancellation and the packaged
+extension surface. The live fleet/OpenChamber proof and the remaining rows in
+[`docs/test-coverage.md`](docs/test-coverage.md) are still the gate before calling it production-ready.
 
 ## Documentation
 

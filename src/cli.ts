@@ -10,6 +10,7 @@ import {
   connectSsh,
   execCommand,
   fetchArtifact,
+  recoverWorkspace,
   status,
   syncWorkspace,
 } from './v1/operations.js';
@@ -21,7 +22,7 @@ interface Parsed {
   rest: string[];
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'help']);
+const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help']);
 
 export async function main(argv: readonly string[]): Promise<void> {
   const parsed = parse(argv);
@@ -34,6 +35,7 @@ export async function main(argv: readonly string[]): Promise<void> {
       case 'init': return cmdInit(parsed);
       case 'doctor': return await cmdDoctor(parsed);
       case 'status': return await cmdStatus(parsed);
+      case 'recover': return await cmdRecover(parsed);
       case 'sync': return await cmdSync(parsed);
       case 'exec': return await cmdExec(parsed);
       case 'fetch': return await cmdFetch(parsed);
@@ -157,6 +159,31 @@ async function cmdStatus(parsed: Parsed): Promise<void> {
   }
 }
 
+async function cmdRecover(parsed: Parsed): Promise<void> {
+  const config = configOf(parsed.flags);
+  const host = hostOf(config, parsed.flags);
+  const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
+  try {
+    const result = await recoverWorkspace(
+      client,
+      config.name,
+      host.root,
+      parsed.flags.has('abort') ? 'abort' : 'recover',
+    );
+    if (parsed.flags.has('json')) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    if (result.state === 'READY' && !result.recovered) {
+      process.stdout.write(`${config.name}@${host.alias}: READY\n`);
+      return;
+    }
+    process.stdout.write(`${config.name}@${host.alias}: recovered generation ${result.generation ?? 'unknown'} ${result.manifestDigest ?? ''}\n`);
+  } finally {
+    client.close();
+  }
+}
+
 function excludesOf(config: WorkspaceConfig, flags: Map<string, string | boolean>): string[] {
   const extra = flags.get('exclude');
   const additions = typeof extra === 'string'
@@ -258,6 +285,7 @@ function printHelp(): void {
     '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--force]',
     '  fleet doctor [--host <alias>] [--agent-path PATH]',
     '  fleet status --host <alias> [--json]',
+    '  fleet recover --host <alias> [--abort] [--json]',
     '  fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]',
     '  fleet exec --host <alias> [--cwd P] [--env K=V,...] [--timeout SEC] [--json] -- <command…>',
     '  fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>',

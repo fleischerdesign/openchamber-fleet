@@ -21,6 +21,7 @@ export interface ConnectOptions {
 
 const PAGE = 5000;
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
+const DEFAULT_EXEC_WAIT_MS = 24 * 60 * 60 * 1000;
 
 export async function connectSsh(host: Host, options: ConnectOptions = {}): Promise<AgentClient> {
   return AgentClient.connect(sshTransport(host, options.agentPath ?? 'fleet-agent'), {
@@ -39,19 +40,69 @@ function operationId(): string {
   return crypto.randomBytes(6).toString('hex');
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new AgentError('CANCELLED', 'operation cancelled');
+}
+
+async function report<T>(
+  onProgress: ((progress: T) => void | Promise<void>) | undefined,
+  progress: T,
+): Promise<void> {
+  if (!onProgress) return;
+  try {
+    await onProgress(progress);
+  } catch {
+    // Progress reporting is observational and must never change the operation's outcome.
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new AgentError('CANCELLED', 'operation cancelled'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new AgentError('CANCELLED', 'operation cancelled'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export interface WorkspaceInfo {
   generation: number;
   manifestDigest: string;
   recovery: boolean;
 }
 
-export async function openWorkspace(client: AgentClient, workspaceId: string, root: string, adopt = false): Promise<WorkspaceInfo> {
-  return (await client.request('workspace.open', { workspaceId, root, adopt })) as WorkspaceInfo;
+export async function openWorkspace(
+  client: AgentClient,
+  workspaceId: string,
+  root: string,
+  adopt = false,
+  signal?: AbortSignal,
+): Promise<WorkspaceInfo> {
+  throwIfAborted(signal);
+  const result = (await client.request('workspace.open', { workspaceId, root, adopt })) as WorkspaceInfo;
+  throwIfAborted(signal);
+  return result;
 }
 
-export async function status(client: AgentClient, workspaceId: string, root: string): Promise<WorkspaceInfo> {
-  await openWorkspace(client, workspaceId, root, false);
-  return (await client.request('workspace.status', { workspaceId })) as WorkspaceInfo;
+export async function status(
+  client: AgentClient,
+  workspaceId: string,
+  root: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceInfo> {
+  await openWorkspace(client, workspaceId, root, false, signal);
+  const result = (await client.request('workspace.status', { workspaceId })) as WorkspaceInfo;
+  throwIfAborted(signal);
+  return result;
 }
 
 export interface SyncOptions {
@@ -63,6 +114,17 @@ export interface SyncOptions {
   readonly excludes: string[];
   readonly mode: 'plan' | 'apply';
   readonly adopt?: boolean;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (progress: SyncProgress) => void | Promise<void>;
+}
+
+export interface SyncProgress {
+  readonly phase: 'scanning' | 'opening' | 'planning' | 'uploading' | 'committing' | 'done';
+  readonly entries?: number;
+  readonly changes?: number;
+  readonly needed?: number;
+  readonly bytes?: number;
+  readonly digest?: string;
 }
 
 export interface SyncSummary {
@@ -77,11 +139,13 @@ async function fetchPlanPages(
   client: AgentClient,
   txnId: string,
   kind: 'changes' | 'needed',
+  signal?: AbortSignal,
 ): Promise<unknown[]> {
   const items: unknown[] = [];
   let offset = 0;
   for (;;) {
-    const page = (await client.request('sync.planPage', { txnId, kind, offset, limit: 5000 })) as {
+    throwIfAborted(signal);
+    const page = (await client.request('sync.planPage', { txnId, kind, offset, limit: PAGE })) as {
       items: unknown[];
       more: boolean;
     };
@@ -97,7 +161,11 @@ export async function syncWorkspace(
   matcher: { matches(relPath: string, isDir: boolean): boolean },
   options: SyncOptions,
 ): Promise<SyncSummary> {
+  throwIfAborted(options.signal);
+  await report(options.onProgress, { phase: 'scanning' });
   const scanned = await scanWorkspace(options.source, matcher);
+  throwIfAborted(options.signal);
+  await report(options.onProgress, { phase: 'scanning', entries: scanned.entries.length });
   const blobs = new Map<string, { file: string; size: number }>();
   for (const entry of scanned.entries) {
     if (entry.type === 'file' && entry.digest) {
@@ -105,9 +173,10 @@ export async function syncWorkspace(
     }
   }
 
-  const workspace = await openWorkspace(client, options.workspaceId, options.root, options.adopt === true);
+  await report(options.onProgress, { phase: 'opening' });
+  const workspace = await openWorkspace(client, options.workspaceId, options.root, options.adopt === true, options.signal);
   if (workspace.recovery) {
-    throw new AgentError('RECOVERY_REQUIRED', 'workspace has an unfinished transaction; run fleet recover', true);
+    throw new AgentError('RECOVERY_REQUIRED', 'workspace has an unfinished transaction; inspect it with fleet recover', true);
   }
   const lease = operationId();
   await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
@@ -122,10 +191,15 @@ export async function syncWorkspace(
     txnId = begin.txnId;
 
     for (let offset = 0; offset < scanned.entries.length; offset += PAGE) {
+      throwIfAborted(options.signal);
       await client.request('sync.entries', {
         txnId,
         entries: scanned.entries.slice(offset, offset + PAGE),
         more: offset + PAGE < scanned.entries.length,
+      });
+      await report(options.onProgress, {
+        phase: 'planning',
+        entries: Math.min(offset + PAGE, scanned.entries.length),
       });
     }
     const plan = (await client.request('sync.plan', { txnId })) as {
@@ -133,15 +207,24 @@ export async function syncWorkspace(
       changes: number;
       needed: number;
     };
-    const changes = (await fetchPlanPages(client, txnId, 'changes')) as { action: string; path: string }[];
-    const needed = (await fetchPlanPages(client, txnId, 'needed')) as string[];
+    const changes = (await fetchPlanPages(client, txnId, 'changes', options.signal)) as { action: string; path: string }[];
+    const needed = (await fetchPlanPages(client, txnId, 'needed', options.signal)) as string[];
+    await report(options.onProgress, {
+      phase: 'planning',
+      changes: changes.length,
+      needed: needed.length,
+      digest: plan.planDigest,
+    });
 
     if (options.mode === 'plan') {
       await client.request('sync.abort', { txnId });
+      await report(options.onProgress, { phase: 'done', changes: changes.length, digest: plan.planDigest });
       return { planDigest: plan.planDigest, changes, needed };
     }
 
+    let uploaded = 0;
     for (const digest of needed) {
+      throwIfAborted(options.signal);
       const blob = blobs.get(digest);
       if (!blob) throw new AgentError('BLOB_MISSING', `no local file for ${digest}`);
       const put = (await client.request('blob.put', { txnId, digest, size: blob.size })) as { streamId: number };
@@ -150,12 +233,26 @@ export async function syncWorkspace(
         throw new AgentError('BLOB_CORRUPT', `local file ${blob.file} changed during upload`);
       }
       await client.upload(put.streamId, bytes);
+      uploaded += bytes.length;
+      await report(options.onProgress, {
+        phase: 'uploading',
+        bytes: uploaded,
+        needed: needed.length,
+        digest,
+      });
     }
 
+    await report(options.onProgress, { phase: 'committing', digest: plan.planDigest });
     const committed = (await client.request('sync.commit', { txnId, planDigest: plan.planDigest }, 1_800_000)) as {
       generation: number;
       manifestDigest: string;
     };
+    await report(options.onProgress, {
+      phase: 'done',
+      changes: changes.length,
+      bytes: uploaded,
+      digest: committed.manifestDigest,
+    });
     return { planDigest: plan.planDigest, changes, needed, generation: committed.generation, manifestDigest: committed.manifestDigest };
   } finally {
     if (txnId) {
@@ -165,6 +262,53 @@ export async function syncWorkspace(
   }
 }
 
+export interface RecoveryInfo {
+  readonly state: 'READY' | 'RECOVERY';
+  readonly txnId?: string;
+  readonly planDigest?: string;
+  readonly startedAt?: number;
+  readonly phase?: string;
+  readonly generation?: number;
+  readonly manifestDigest?: string;
+  readonly recovered?: boolean;
+}
+
+export async function inspectRecovery(
+  client: AgentClient,
+  workspaceId: string,
+  root: string,
+  signal?: AbortSignal,
+): Promise<RecoveryInfo> {
+  await openWorkspace(client, workspaceId, root, false, signal);
+  const result = (await client.request('sync.inspect', { workspaceId })) as RecoveryInfo;
+  throwIfAborted(signal);
+  return result;
+}
+
+export async function recoverWorkspace(
+  client: AgentClient,
+  workspaceId: string,
+  root: string,
+  mode: 'recover' | 'abort' = 'recover',
+  signal?: AbortSignal,
+): Promise<RecoveryInfo> {
+  const inspected = await inspectRecovery(client, workspaceId, root, signal);
+  if (inspected.state === 'READY') return inspected;
+  if (!inspected.txnId) throw new AgentError('OPERATION_UNKNOWN', 'recovery state has no transaction id');
+  throwIfAborted(signal);
+  if (mode === 'abort') {
+    await client.request('sync.abort', { txnId: inspected.txnId });
+    const current = await status(client, workspaceId, root, signal);
+    return { ...inspected, recovered: true, generation: current.generation, manifestDigest: current.manifestDigest, state: 'READY' };
+  }
+  const resumed = (await client.request('sync.recover', { txnId: inspected.txnId }, 1_800_000)) as {
+    generation: number;
+    manifestDigest: string;
+  };
+  throwIfAborted(signal);
+  return { ...inspected, recovered: true, state: 'READY', generation: resumed.generation, manifestDigest: resumed.manifestDigest };
+}
+
 export interface ExecOptions {
   readonly workspaceId: string;
   readonly root: string;
@@ -172,6 +316,18 @@ export interface ExecOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (progress: ExecProgress) => void | Promise<void>;
+}
+
+export interface ExecProgress {
+  readonly phase: 'starting' | 'streaming' | 'waiting' | 'done';
+  readonly jobId?: string;
+  readonly state?: string;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutTail: string;
+  readonly stderrTail: string;
 }
 
 export interface ExecResult {
@@ -181,14 +337,41 @@ export interface ExecResult {
   readonly signal: number | null;
   readonly stdout: Buffer;
   readonly stderr: Buffer;
+  readonly startedAt?: number;
+  readonly endedAt?: number;
 }
 
-export async function execCommand(client: AgentClient, options: ExecOptions): Promise<ExecResult> {
-  const workspace = await openWorkspace(client, options.workspaceId, options.root, false);
+export interface ExecHandle {
+  readonly jobId: string;
+  readonly result: Promise<ExecResult>;
+  cancel(graceMs?: number): Promise<void>;
+  close(): void;
+}
+
+interface ExecRecord {
+  state: string;
+  exitCode: number | null;
+  signal: number | null;
+  startedAt?: number;
+  endedAt?: number;
+}
+
+function appendTail(current: string, chunk: Buffer): string {
+  return (current + chunk.toString('utf8')).slice(-4096);
+}
+
+export async function startExecCommand(client: AgentClient, options: ExecOptions): Promise<ExecHandle> {
+  throwIfAborted(options.signal);
+  await report(options.onProgress, {
+    phase: 'starting', stdoutBytes: 0, stderrBytes: 0, stdoutTail: '', stderrTail: '',
+  });
+  const workspace = await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
   const lease = operationId();
   await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
+
+  let start: { jobId: string; stdoutStream: number; stderrStream: number };
   try {
-    const start = (await client.request('exec.start', {
+    start = (await client.request('exec.start', {
       workspaceId: options.workspaceId,
       leaseId: lease,
       expectedGeneration: workspace.generation,
@@ -197,30 +380,109 @@ export async function execCommand(client: AgentClient, options: ExecOptions): Pr
       env: options.env ?? {},
       timeoutMs: options.timeoutMs,
     })) as { jobId: string; stdoutStream: number; stderrStream: number };
-
-    const stdout = client.collect(start.stdoutStream, { initialCredit: 8 * 1024 * 1024, timeoutMs: (options.timeoutMs ?? 900_000) + 30_000 });
-    const stderr = client.collect(start.stderrStream, { initialCredit: 8 * 1024 * 1024, timeoutMs: (options.timeoutMs ?? 900_000) + 30_000 });
-    const [out, err] = await Promise.all([stdout, stderr]);
-
-    let record = (await client.request('exec.status', { jobId: start.jobId })) as {
-      state: string; exitCode: number | null; signal: number | null;
-    };
-    const deadline = Date.now() + (options.timeoutMs ?? 900_000) + 60_000;
-    while (!TERMINAL.has(record.state) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      record = (await client.request('exec.status', { jobId: start.jobId })) as typeof record;
-    }
-    return {
-      jobId: start.jobId,
-      state: record.state,
-      exitCode: record.exitCode,
-      signal: record.signal,
-      stdout: out,
-      stderr: err,
-    };
-  } finally {
+  } catch (error) {
     try { await client.request('workspace.release', { leaseId: lease }); } catch { /* connection gone */ }
+    throw error;
   }
+  if (options.signal?.aborted) {
+    try { await client.request('exec.cancel', { jobId: start.jobId, graceMs: 2000 }); } catch { /* connection gone */ }
+    try { await client.request('workspace.release', { leaseId: lease }); } catch { /* connection gone */ }
+    throw new AgentError('CANCELLED', 'operation cancelled');
+  }
+
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let stdoutTail = '';
+  let stderrTail = '';
+  let lastProgress = 0;
+  const progress = (phase: ExecProgress['phase'], state?: string) => {
+    const now = Date.now();
+    if (phase !== 'done' && now - lastProgress < 200) return;
+    lastProgress = now;
+    void report(options.onProgress, {
+      phase,
+      jobId: start.jobId,
+      state,
+      stdoutBytes,
+      stderrBytes,
+      stdoutTail,
+      stderrTail,
+    });
+  };
+
+  const waitMs = options.timeoutMs ?? DEFAULT_EXEC_WAIT_MS;
+  const stdout = client.collect(start.stdoutStream, {
+    initialCredit: 8 * 1024 * 1024,
+    timeoutMs: waitMs + 30_000,
+    onData: (chunk) => {
+      stdoutBytes += chunk.length;
+      stdoutTail = appendTail(stdoutTail, chunk);
+      progress('streaming');
+    },
+  });
+  const stderr = client.collect(start.stderrStream, {
+    initialCredit: 8 * 1024 * 1024,
+    timeoutMs: waitMs + 30_000,
+    onData: (chunk) => {
+      stderrBytes += chunk.length;
+      stderrTail = appendTail(stderrTail, chunk);
+      progress('streaming');
+    },
+  });
+
+  const onAbort = () => {
+    void client.request('exec.cancel', { jobId: start.jobId, graceMs: 2000 }).catch(() => {});
+  };
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+
+  const result = (async (): Promise<ExecResult> => {
+    try {
+      const [out, err] = await Promise.all([stdout, stderr]);
+      let record = (await client.request('exec.status', { jobId: start.jobId })) as ExecRecord;
+      const deadline = Date.now() + waitMs + 60_000;
+      while (!TERMINAL.has(record.state) && Date.now() < deadline) {
+        progress('waiting', record.state);
+        await delay(100, options.signal);
+        record = (await client.request('exec.status', { jobId: start.jobId })) as ExecRecord;
+      }
+      if (!TERMINAL.has(record.state)) {
+        throw new AgentError('OPERATION_UNKNOWN', `job ${start.jobId} did not reach a terminal state`, true);
+      }
+      progress('done', record.state);
+      return {
+        jobId: start.jobId,
+        state: record.state,
+        exitCode: record.exitCode,
+        signal: record.signal,
+        stdout: out,
+        stderr: err,
+        startedAt: record.startedAt,
+        endedAt: record.endedAt,
+      };
+    } finally {
+      options.signal?.removeEventListener('abort', onAbort);
+      try { await client.request('workspace.release', { leaseId: lease }); } catch { /* connection gone */ }
+    }
+  })();
+  void result.catch(() => {});
+
+  return {
+    jobId: start.jobId,
+    result,
+    async cancel(graceMs = 2000) {
+      await client.request('exec.cancel', { jobId: start.jobId, graceMs });
+    },
+    close() {
+      client.close();
+    },
+  };
+}
+
+export async function execCommand(client: AgentClient, options: ExecOptions): Promise<ExecResult> {
+  const handle = await startExecCommand(client, options);
+  const result = await handle.result;
+  throwIfAborted(options.signal);
+  return result;
 }
 
 export interface FetchOptions {
@@ -229,6 +491,14 @@ export interface FetchOptions {
   readonly artifact: string;
   readonly dest: string;
   readonly overwrite?: boolean;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (progress: FetchProgress) => void | Promise<void>;
+}
+
+export interface FetchProgress {
+  readonly phase: 'opening' | 'streaming' | 'writing' | 'done';
+  readonly bytes: number;
+  readonly digest?: string;
 }
 
 export interface FetchResult {
@@ -237,26 +507,40 @@ export interface FetchResult {
   readonly digest: string;
 }
 
+export function artifactTarget(dest: string, artifact: string): string {
+  return path.resolve(dest, path.basename(artifact));
+}
+
 export async function fetchArtifact(client: AgentClient, options: FetchOptions): Promise<FetchResult> {
-  await openWorkspace(client, options.workspaceId, options.root, false);
+  throwIfAborted(options.signal);
+  await report(options.onProgress, { phase: 'opening', bytes: 0 });
+  await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
   const opened = (await client.request('artifact.open', {
     workspaceId: options.workspaceId,
     path: options.artifact,
   })) as { streamId: number; size: number; digest: string };
+  let received = 0;
   const bytes = await client.collect(opened.streamId, {
     initialCredit: 8 * 1024 * 1024,
     timeoutMs: 300_000,
+    onData: (chunk) => {
+      received += chunk.length;
+      void report(options.onProgress, { phase: 'streaming', bytes: received, digest: opened.digest });
+    },
   });
+  throwIfAborted(options.signal);
   const digest = `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`;
   if (digest !== opened.digest) {
     throw new AgentError('BLOB_CORRUPT', `artifact digest mismatch: expected ${opened.digest} got ${digest}`);
   }
-  const target = path.resolve(options.dest, path.basename(options.artifact));
+  const target = artifactTarget(options.dest, options.artifact);
   if (fs.existsSync(target) && options.overwrite !== true) {
     throw new AgentError('INVALID_REQUEST', `${target} exists; pass overwrite`);
   }
+  await report(options.onProgress, { phase: 'writing', bytes: bytes.length, digest });
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, bytes);
+  await report(options.onProgress, { phase: 'done', bytes: bytes.length, digest });
   return { file: target, bytes: bytes.length, digest };
 }
 

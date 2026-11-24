@@ -21,6 +21,7 @@ interface IncomingStream {
   chunks: Buffer[];
   bytes: number;
   nextSeq: bigint;
+  onData?: (chunk: Buffer) => void;
   resolve: (value: Buffer) => void;
   reject: (error: Error) => void;
 }
@@ -28,6 +29,8 @@ interface IncomingStream {
 export interface CollectOptions {
   readonly initialCredit?: number;
   readonly timeoutMs?: number;
+  /** Called for each received DATA payload. Progress reporting must stay bounded. */
+  readonly onData?: (chunk: Buffer) => void;
 }
 
 const DEFAULT_TIMEOUT = 30_000;
@@ -89,7 +92,7 @@ export class AgentClient {
         this.streams.delete(streamId);
         reject(new AgentError('OPERATION_UNKNOWN', `stream ${streamId} did not end`, true));
       }, options.timeoutMs ?? 120_000);
-      this.streams.set(streamId, { chunks: [], bytes: 0, nextSeq: 0n, resolve: (value) => { clearTimeout(timer); resolve(value); }, reject });
+      this.streams.set(streamId, { chunks: [], bytes: 0, nextSeq: 0n, onData: options.onData, resolve: (value) => { clearTimeout(timer); resolve(value); }, reject });
       void this.credit(streamId, options.initialCredit ?? DEFAULT_CREDIT);
     });
   }
@@ -190,6 +193,11 @@ export class AgentClient {
     stream.nextSeq += 1n;
     stream.chunks.push(header.bytes);
     stream.bytes += header.bytes.length;
+    try {
+      stream.onData?.(header.bytes);
+    } catch {
+      // A progress observer cannot invalidate protocol bytes already accepted.
+    }
     // Keep the pipe flowing: grant credit as data is consumed.
     void this.credit(header.streamId, header.bytes.length * 2 + 1024).catch(() => {});
   }

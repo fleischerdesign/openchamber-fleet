@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { compileExcludes } from '../../dist/config.js';
-import { connectProcess, execCommand, fetchArtifact, syncWorkspace } from '../../dist/v1/operations.js';
+import { connectProcess, execCommand, fetchArtifact, startExecCommand, syncWorkspace } from '../../dist/v1/operations.js';
 
 const binary = process.env.FLEET_AGENT_BIN ?? path.resolve('agent/target/debug/fleet-agent');
 const available = fs.existsSync(binary);
@@ -70,6 +70,28 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     assert.equal(result.exitCode, 3);
     assert.equal(result.stdout.toString(), 'hello v1\n');
     assert.equal(result.stderr.toString(), 'err');
+  });
+
+  test('starts a background exec, reports progress and cancels it through the protocol', async () => {
+    const progress = [];
+    const backgroundClient = await connectProcess(binary);
+    const handle = await startExecCommand(backgroundClient, {
+      workspaceId: 'v1-test',
+      root: replica,
+      argv: ['sh', '-c', 'printf started; sleep 5'],
+      timeoutMs: 30_000,
+      onProgress: (update) => progress.push(update),
+    });
+    try {
+      assert.ok(handle.jobId);
+      await handle.cancel(100);
+      const result = await handle.result;
+      assert.equal(result.state, 'cancelled');
+      assert.ok(progress.some((update) => update.phase === 'starting'));
+      assert.ok(progress.some((update) => update.phase === 'done'));
+    } finally {
+      handle.close();
+    }
   });
 
   test('fetches an artifact with digest verification', async () => {

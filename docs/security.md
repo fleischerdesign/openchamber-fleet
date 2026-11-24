@@ -61,6 +61,11 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   rest on the node.
 - Commands run with the SSH user's full privileges. Use a dedicated user if that matters.
 - Secrets inside the workspace are replicated. Exclude them or keep them out of the tree.
+- OpenCode permissions are policy checks, not a sandbox. `fleet_exec` evaluates the exact argv under
+  `shell`; `fleet_fetch` evaluates the final local path under `edit` and `external_directory`;
+  `fleet_sync` apply and `fleet_recover` use dedicated actions.
+- Background jobs live in the OpenCode plugin runtime. A restart, plugin unload or location eviction
+  interrupts them and is reported to the session; no hidden local fallback is attempted.
 
 ## Reporting
 

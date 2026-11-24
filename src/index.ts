@@ -7,22 +7,31 @@ export { AgentClient } from './v1/client.js';
 export type { AgentInfo, CollectOptions } from './v1/client.js';
 export { AgentError, exitCodeFor } from './v1/errors.js';
 export {
+  artifactTarget,
   connectProcess,
   connectSsh,
   execCommand,
   fetchArtifact,
+  inspectRecovery,
   localDigest,
   openWorkspace,
+  recoverWorkspace,
+  startExecCommand,
   status,
   syncWorkspace,
 } from './v1/operations.js';
 export type {
+  ExecHandle,
   ExecOptions,
+  ExecProgress,
   ExecResult,
   FetchOptions,
+  FetchProgress,
   FetchResult,
   Host,
+  RecoveryInfo,
   SyncOptions,
+  SyncProgress,
   SyncSummary,
   WorkspaceInfo,
 } from './v1/operations.js';

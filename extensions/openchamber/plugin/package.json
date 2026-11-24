@@ -1,0 +1,9 @@
+{
+  "name": "openchamber-fleet-plugin",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/plugin/index.js"
+  }
+}

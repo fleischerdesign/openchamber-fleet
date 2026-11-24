@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { AgentError } from '../../dist/v1/errors.js';
-import { connectProcess, openWorkspace } from '../../dist/v1/operations.js';
+import { connectProcess, openWorkspace, recoverWorkspace } from '../../dist/v1/operations.js';
 
 const binary = process.env.FLEET_AGENT_BIN ?? path.resolve('agent/target/debug/fleet-agent');
 const available = fs.existsSync(binary);
@@ -195,8 +195,9 @@ describe('crash during apply (SYNC-08)', { skip: !available && `agent binary not
         second.request('sync.abort', { txnId }),
         (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',
       );
-      const resumed = await second.request('sync.recover', { txnId });
+      const resumed = await recoverWorkspace(second, 'fail-crash', crashRoot, 'recover');
       assert.equal(resumed.generation, 1);
+      assert.equal(resumed.recovered, true);
       assert.equal(fs.readFileSync(path.join(crashRoot, 'file.txt'), 'utf8'), 'crash payload');
       const lease = await second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-after', ttlMs: 60_000 });
       assert.ok(lease.leaseId);
