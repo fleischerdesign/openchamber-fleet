@@ -121,8 +121,9 @@ read-only; `adopt` is apply-only.
 
 - OpenChamber ≥ 2.8.0 for the extension; Node.js ≥ 22 for the CLI and the standalone OpenCode plugin.
 - Node: `ssh`, `git` and the `fleet-agent` binary. Nothing else — no rsync, no bash wrapper, no service.
-- The agent is a static Rust binary; the release workflow publishes Linux x86_64/aarch64 and macOS
-  x86_64/aarch64 builds. `cargo install --path agent` builds it from source.
+- The agent is a Rust binary; the release publishes Linux x86_64/aarch64 builds. On macOS, build it
+  from source with `cargo install --path agent` (or `cargo install --git
+  https://github.com/fleischerdesign/openchamber-fleet fleet-agent`).
 - Linux is tested; macOS is expected to work (Unix APIs only); Windows is unsupported.
 - SSH key authentication, host keys verified (`StrictHostKeyChecking=yes`).
 
