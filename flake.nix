@@ -21,11 +21,18 @@
           src = ./agent;
           cargoLock.lockFile = ./agent/Cargo.lock;
         };
+      extensionVersion = (builtins.fromJSON (builtins.readFile ./extensions/openchamber/package.json)).version;
+      mkExtension =
+        pkgs:
+        pkgs.runCommand "openchamber-fleet-extension-${extensionVersion}" { } ''
+          mkdir -p $out
+          cp -R ${./extensions/openchamber}/. $out/
+        '';
       mkController =
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.3.2";
+          version = "0.4.0";
           src = self;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           buildPhase = ''
@@ -47,6 +54,7 @@
       packages = each (pkgs: {
         fleet-agent = mkAgent pkgs;
         controller = mkController pkgs;
+        extension = mkExtension pkgs;
         default = mkAgent pkgs;
       });
 
@@ -68,9 +76,10 @@
 
       checks = each (pkgs: {
         agent = mkAgent pkgs;
+        extension = mkExtension pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.3.2";
+          version = "0.4.0";
           src = self;
           doCheck = true;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";

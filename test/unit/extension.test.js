@@ -10,10 +10,15 @@ const root = path.resolve('extensions/openchamber');
 describe('OpenChamber extension package', () => {
   test('manifest parses with the public SDK and covers every Fleet tool', async () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    assert.equal(manifest.openchamber.id, 'openchamber-fleet');
+    assert.equal(manifest.openchamber.id.startsWith('openchamber-builtin-'), false);
     const parsed = parseManifestJson(JSON.stringify(manifest));
     assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.error);
     if (!parsed.ok) return;
     assert.equal(parsed.manifest.contributes.panel.id, 'openchamber-fleet');
+    assert.equal(parsed.manifest.contributes.panel.name, 'Fleet');
+    assert.equal(parsed.manifest.contributes.panel.icon, 'server');
+    assert.equal(parsed.manifest.engines.openchamber, '>=2.8.0');
     assert.deepEqual(parsed.manifest.contributes.tools.map((tool) => tool.match).sort(), [
       'fleet_exec',
       'fleet_fetch',
