@@ -78,15 +78,19 @@ function sessionIDOf(context) {
 async function assertPermission(ctx, context, action, resources, metadata, save) {
     if (!ctx.permission)
         return;
-    await ctx.permission.assert({
+    const input = {
         sessionID: sessionIDOf(context),
         agent: context?.agent,
         source: { type: 'tool', messageID: context?.messageID, id: context?.id },
         action,
         resources,
-        save,
         metadata,
-    });
+    };
+    // The permission schema validates a present save field as an array; an
+    // explicit undefined is rejected by the runtime.
+    if (save !== undefined)
+        input.save = save;
+    await ctx.permission.assert(input);
 }
 function progressReporter(context) {
     let last = 0;
