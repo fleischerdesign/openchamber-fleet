@@ -8,6 +8,7 @@ export type { AgentInfo, CollectOptions } from './v1/client.js';
 export { AgentError, exitCodeFor } from './v1/errors.js';
 export {
   artifactTarget,
+  canonicalArtifactTarget,
   connectProcess,
   connectSsh,
   execCommand,

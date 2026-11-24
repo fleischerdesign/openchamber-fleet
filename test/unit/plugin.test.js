@@ -18,7 +18,7 @@ async function register(sessionDirectory) {
   const permissions = [];
   const storage = new Map();
   const ctx = {
-    location: { directory: sessionDirectory ?? '/nonexistent' },
+    location: { directory: '/different-server-directory' },
     tool: { transform: async (edit) => edit({ add: (tool) => tools.push(tool) }) },
     session: {
       get: async () => ({ location: { directory: sessionDirectory ?? '/nonexistent' } }),
@@ -99,16 +99,16 @@ describe('OpenCode plugin surface', () => {
     try {
       const result = tool(tools, 'fleet_exec');
       await assert.rejects(result.execute({ host: 'node', argv: ['echo', 'hello world'] }, context));
-      assert.equal(permissions.length, 1);
-      assert.equal(permissions[0].action, 'shell');
-      assert.ok(permissions[0].resources.includes("echo 'hello world'"));
-      assert.ok(permissions[0].resources.some((resource) => resource.startsWith('fleet node ')));
+      assert.deepEqual(permissions.map((entry) => entry.action), ['fleet.exec', 'shell']);
+      assert.deepEqual(permissions[1].resources, ["echo 'hello world'"]);
+      assert.deepEqual(permissions[1].save, ["echo 'hello world'"]);
+      assert.match(permissions[0].resources[0], /"host":"node"/);
     } finally {
       await cleanup();
     }
   });
 
-  test('sync apply uses its dedicated permission while plan stays read-only', async () => {
+  test('sync apply uses its dedicated permission', async () => {
     const { tools, cleanup, permissions } = await register(workspace);
     try {
       const result = tool(tools, 'fleet_sync');

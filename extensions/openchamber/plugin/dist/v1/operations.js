@@ -80,6 +80,9 @@ async function fetchPlanPages(client, txnId, kind, signal) {
     return items;
 }
 export async function syncWorkspace(client, matcher, options) {
+    if (options.mode === 'plan' && options.adopt === true) {
+        throw new AgentError('INVALID_REQUEST', 'adopt is only valid with mode=apply');
+    }
     throwIfAborted(options.signal);
     await report(options.onProgress, { phase: 'scanning' });
     const scanned = await scanWorkspace(options.source, matcher);
@@ -100,6 +103,21 @@ export async function syncWorkspace(client, matcher, options) {
     const lease = operationId();
     await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
     let txnId;
+    const onAbort = () => {
+        void (async () => {
+            if (txnId) {
+                try {
+                    await client.request('sync.abort', { txnId });
+                }
+                catch { /* connection gone or already aborted */ }
+            }
+            try {
+                await client.request('workspace.release', { leaseId: lease });
+            }
+            catch { /* connection gone */ }
+        })().finally(() => client.close());
+    };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     try {
         throwIfAborted(options.signal);
         const begin = (await client.request('sync.begin', {
@@ -166,6 +184,7 @@ export async function syncWorkspace(client, matcher, options) {
         return { planDigest: plan.planDigest, changes, needed, generation: committed.generation, manifestDigest: committed.manifestDigest };
     }
     finally {
+        options.signal?.removeEventListener('abort', onAbort);
         if (txnId) {
             try {
                 await client.request('sync.abort', { txnId });
@@ -310,6 +329,13 @@ export async function startExecCommand(client, options) {
                 endedAt: record.endedAt,
             };
         }
+        catch (error) {
+            try {
+                await client.request('exec.cancel', { jobId: start.jobId, graceMs: 2000 }, 5000);
+            }
+            catch { /* connection gone or job already terminal */ }
+            throw error;
+        }
         finally {
             options.signal?.removeEventListener('abort', onAbort);
             try {
@@ -339,6 +365,35 @@ export async function execCommand(client, options) {
 export function artifactTarget(dest, artifact) {
     return path.resolve(dest, path.basename(artifact));
 }
+/** Resolve existing symlinks and reject dangling links before a local artifact write. */
+export function canonicalArtifactTarget(dest, artifact) {
+    const target = artifactTarget(dest, artifact);
+    let current = target;
+    const missing = [];
+    for (;;) {
+        try {
+            fs.lstatSync(current);
+            break;
+        }
+        catch (error) {
+            if (error.code !== 'ENOENT')
+                throw error;
+            const parent = path.dirname(current);
+            if (parent === current)
+                throw new AgentError('PATH_UNSAFE', `cannot resolve ${target}`);
+            missing.unshift(path.basename(current));
+            current = parent;
+        }
+    }
+    let real;
+    try {
+        real = fs.realpathSync(current);
+    }
+    catch {
+        throw new AgentError('PATH_UNSAFE', `artifact target contains a dangling symlink: ${current}`);
+    }
+    return path.join(real, ...missing);
+}
 export async function fetchArtifact(client, options) {
     throwIfAborted(options.signal);
     await report(options.onProgress, { phase: 'opening', bytes: 0 });
@@ -367,15 +422,22 @@ export async function fetchArtifact(client, options) {
     if (digest !== opened.digest) {
         throw new AgentError('BLOB_CORRUPT', `artifact digest mismatch: expected ${opened.digest} got ${digest}`);
     }
-    const target = artifactTarget(options.dest, options.artifact);
+    const target = canonicalArtifactTarget(options.dest, options.artifact);
+    if (options.expectedTarget && target !== options.expectedTarget) {
+        throw new AgentError('PATH_UNSAFE', `artifact target changed after permission check: expected ${options.expectedTarget}, got ${target}`);
+    }
     if (fs.existsSync(target) && options.overwrite !== true) {
         throw new AgentError('INVALID_REQUEST', `${target} exists; pass overwrite`);
     }
     await report(options.onProgress, { phase: 'writing', bytes: bytes.length, digest });
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, bytes);
+    const finalTarget = canonicalArtifactTarget(options.dest, options.artifact);
+    if (finalTarget !== target) {
+        throw new AgentError('PATH_UNSAFE', `artifact target changed while writing: expected ${target}, got ${finalTarget}`);
+    }
+    fs.writeFileSync(finalTarget, bytes);
     await report(options.onProgress, { phase: 'done', bytes: bytes.length, digest });
-    return { file: target, bytes: bytes.length, digest };
+    return { file: finalTarget, bytes: bytes.length, digest };
 }
 export async function localDigest(file) {
     return sha256File(file);

@@ -58,6 +58,21 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     assert.deepEqual(second.changes, []);
   });
 
+  test('plan refuses adopt before changing an existing directory', async () => {
+    const root = path.join(base, 'adopt-replica');
+    fs.mkdirSync(root, { recursive: true, mode: 0o755 });
+    fs.chmodSync(root, 0o755);
+    await assert.rejects(syncWorkspace(client, matcher, {
+      workspaceId: 'v1-test',
+      source,
+      root,
+      excludes: ['target/'],
+      mode: 'plan',
+      adopt: true,
+    }), /adopt is only valid/);
+    assert.equal(fs.statSync(root).mode & 0o777, 0o755);
+  });
+
   test('executes in the replica and streams output', async () => {
     const result = await execCommand(client, {
       workspaceId: 'v1-test',

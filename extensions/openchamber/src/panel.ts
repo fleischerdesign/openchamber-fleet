@@ -17,6 +17,8 @@ const reload = document.querySelector<HTMLButtonElement>('#reload')!;
 const save = document.querySelector<HTMLButtonElement>('#save')!;
 
 let currentDirectory: string | null = null;
+let loadVersion = 0;
+const drafts = new Map<string, string>();
 
 function showNotice(message: string, tone: 'info' | 'error' | 'success' = 'info'): void {
   notice.className = tone === 'error' ? 'error' : tone === 'success' ? 'ok' : '';
@@ -65,7 +67,7 @@ function renderHosts(value: FleetConfig): void {
     const actions = document.createElement('div');
     actions.className = 'row';
     actions.style.marginTop = '8px';
-    for (const [label, action] of [['Status', 'status'], ['Plan', 'plan'], ['Recovery', 'recovery']] as const) {
+    for (const [label, action] of [['Status', 'status'], ['Plan', 'plan'], ['Inspect recovery', 'recovery']] as const) {
       const button = document.createElement('button');
       button.textContent = label;
       button.dataset.action = action;
@@ -78,15 +80,22 @@ function renderHosts(value: FleetConfig): void {
 }
 
 async function load(): Promise<void> {
+  const directory = currentDirectory;
+  if (!directory) return;
+  const version = ++loadVersion;
   showNotice('Loading Fleet configuration…');
   try {
     const response = await host.readFile('fleet.json');
-    config.value = response.content;
-    const value = parseConfig(response.content);
+    if (currentDirectory !== directory || version !== loadVersion) return;
+    const draft = drafts.get(directory);
+    config.value = draft ?? response.content;
+    const value = parseConfig(config.value);
     renderHosts(value);
     showNotice(`${Object.keys(value.hosts).length} configured host(s).`, 'success');
   } catch (error) {
-    config.value = '';
+    if (currentDirectory !== directory || version !== loadVersion) return;
+    const draft = drafts.get(directory);
+    config.value = draft ?? '';
     hosts.replaceChildren();
     if (error instanceof HostRequestError && /not found/i.test(error.message)) {
       showNotice('No fleet.json in this project. Create one below or run fleet init.');
@@ -104,6 +113,7 @@ host.onReady((ready) => {
 });
 
 host.onDirectory((value) => {
+  loadVersion += 1;
   currentDirectory = value;
   directory.textContent = value ?? 'Open a project to load its fleet.json.';
   result.hidden = true;
@@ -114,15 +124,26 @@ host.onDirectory((value) => {
   }
 });
 
+config.addEventListener('input', () => {
+  if (currentDirectory) drafts.set(currentDirectory, config.value);
+});
 reload.addEventListener('click', () => void load());
 save.addEventListener('click', () => {
   void (async () => {
+    const directory = currentDirectory;
+    if (!directory) {
+      showNotice('Open a project first.', 'error');
+      return;
+    }
     try {
       const value = parseConfig(config.value);
       await host.writeFile('fleet.json', `${JSON.stringify(value, null, 2)}\n`);
+      if (currentDirectory !== directory) return;
+      drafts.delete(directory);
       renderHosts(value);
       showNotice('fleet.json saved.', 'success');
     } catch (error) {
+      if (currentDirectory !== directory) return;
       showNotice(error instanceof Error ? error.message : String(error), 'error');
     }
   })();

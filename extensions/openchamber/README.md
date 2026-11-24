@@ -23,7 +23,7 @@ Hosts are declared per workspace in `fleet.json`:
 }
 ```
 
-Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit the file in the extension panel. The panel can check status, show a sync plan, and inspect recovery. Apply, exec, fetch, cancel, and recover remain explicit agent tools with OpenCode permission checks.
+Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit the file in the extension panel. The panel can check status, show a sync plan, and inspect recovery state. Apply, exec, fetch, cancel, and recover remain explicit agent tools with OpenCode permission checks.
 
 ## Background jobs
 

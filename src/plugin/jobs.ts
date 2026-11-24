@@ -53,6 +53,7 @@ function isStoredJob(value: unknown): value is StoredJob {
     && typeof job.jobId === 'string'
     && typeof job.sessionID === 'string'
     && typeof job.workspace === 'string'
+    && typeof job.directory === 'string'
     && typeof job.host === 'string'
     && Array.isArray(job.argv)
     && typeof job.state === 'string'
@@ -107,21 +108,31 @@ export class FleetJobRegistry {
 
   async recoverInterrupted(): Promise<void> {
     if (!this.ctx.storage) return;
-    const page = await this.ctx.storage.scan({ prefix: STORAGE_PREFIX, limit: 1000 });
-    for (const entry of page.entries) {
-      if (!isStoredJob(entry.value)) continue;
-      const record = entry.value;
-      if (record.startedAt + RETENTION_MS < Date.now()) {
-        await this.ctx.storage.remove(entry.key).catch(() => {});
-        continue;
+    const location = this.ctx.location?.directory;
+    let after: string | undefined;
+    do {
+      const page = await this.ctx.storage.scan({ prefix: STORAGE_PREFIX, limit: 1000, after });
+      for (const entry of page.entries) {
+        if (!isStoredJob(entry.value)) continue;
+        const record = entry.value;
+        if (location && record.directory !== location) continue;
+        if (record.startedAt + RETENTION_MS < Date.now()) {
+          await this.ctx.storage.remove(entry.key).catch(() => {});
+          continue;
+        }
+        if (TERMINAL.has(record.state)) {
+          if (record.notified !== true) await this.notify(record, true);
+          continue;
+        }
+        record.state = 'interrupted';
+        record.endedAt = Date.now();
+        record.notified = false;
+        record.error = 'OpenCode restarted or the plugin was unloaded before the job finished.';
+        await this.ctx.storage.set(entry.key, record).catch(() => {});
+        await this.notify(record, false);
       }
-      if (TERMINAL.has(record.state)) continue;
-      record.state = 'interrupted';
-      record.endedAt = Date.now();
-      record.error = 'OpenCode restarted or the plugin was unloaded before the job finished.';
-      await this.ctx.storage.set(entry.key, record).catch(() => {});
-      await this.notify(record, false);
-    }
+      after = page.next;
+    } while (after);
   }
 
   watchSessionDeletion(): void {
@@ -171,9 +182,11 @@ export class FleetJobRegistry {
       jobId: handle.jobId,
       sessionID: input.sessionID,
       workspace: input.config.name,
+      directory: input.config.dir,
       host: input.host.alias,
       argv: [...input.argv],
       state: 'running',
+      notified: false,
       notificationID: notificationID(key),
       startedAt: Date.now(),
       stdoutBytes: 0,
@@ -202,24 +215,25 @@ export class FleetJobRegistry {
     return record;
   }
 
-  async status(config: WorkspaceConfig, host: string, jobId: string): Promise<StoredJob> {
+  async status(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob> {
     const key = jobKey(config.name, host, jobId);
     const active = this.jobs.get(key);
-    if (active) return active.record;
-    if (!this.ctx.storage) throw new AgentError('OPERATION_UNKNOWN', `unknown job ${jobId}`);
-    const value = await this.ctx.storage.get(storageKey(key));
-    if (!isStoredJob(value)) throw new AgentError('OPERATION_UNKNOWN', `unknown job ${jobId}`);
-    return value;
+    const record = active?.record ?? (this.ctx.storage ? await this.ctx.storage.get(storageKey(key)) : undefined);
+    if (!isStoredJob(record)) throw new AgentError('OPERATION_UNKNOWN', `unknown job ${jobId}`);
+    if (record.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
+    return record;
   }
 
-  async cancel(config: WorkspaceConfig, host: string, jobId: string): Promise<StoredJob> {
-    const record = await this.status(config, host, jobId);
+  async cancel(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob> {
+    const record = await this.status(config, host, jobId, sessionID);
     if (TERMINAL.has(record.state)) return record;
     const active = this.jobs.get(record.key);
     if (!active) return record;
     record.state = 'cancel-requested';
-    if (this.ctx.storage) await this.ctx.storage.set(storageKey(record.key), record);
     await active.handle.cancel(2000);
+    if (this.ctx.storage) await this.ctx.storage.set(storageKey(record.key), record).catch((error) => {
+      console.warn('[openchamber-fleet] cancellation succeeded but job state could not be persisted:', error instanceof Error ? error.message : String(error));
+    });
     return record;
   }
 
@@ -245,6 +259,7 @@ export class FleetJobRegistry {
       job.record.state = 'interrupted';
       job.record.endedAt = Date.now();
       job.record.error = 'The Fleet plugin stopped before the job finished.';
+      job.record.notified = false;
       if (this.ctx.storage) await this.ctx.storage.set(storageKey(job.record.key), job.record).catch(() => {});
       await job.handle.cancel(2000).catch(() => {});
       job.handle.close();
@@ -263,7 +278,9 @@ export class FleetJobRegistry {
     active.record.stderrBytes = result.stderr.length;
     active.record.stdoutTail = result.stdout.toString('utf8').slice(-4096);
     active.record.stderrTail = result.stderr.toString('utf8').slice(-4096);
+    active.record.notified = false;
     active.handle.close();
+    this.jobs.delete(active.record.key);
     if (this.ctx.storage) await this.ctx.storage.set(storageKey(active.record.key), active.record).catch(() => {});
     await this.notify(active.record, true);
   }
@@ -274,13 +291,15 @@ export class FleetJobRegistry {
     active.record.state = error instanceof AgentError && error.code === 'OPERATION_UNKNOWN' ? 'unknown' : 'failed';
     active.record.endedAt = Date.now();
     active.record.error = error instanceof Error ? error.message : String(error);
+    active.record.notified = false;
     active.handle.close();
+    this.jobs.delete(active.record.key);
     if (this.ctx.storage) await this.ctx.storage.set(storageKey(active.record.key), active.record).catch(() => {});
     await this.notify(active.record, true);
   }
 
-  private async notify(record: StoredJob, resume: boolean): Promise<void> {
-    if (!this.ctx.session?.synthetic) return;
+  private async notify(record: StoredJob, resume: boolean): Promise<boolean> {
+    if (!this.ctx.session?.synthetic) return false;
     const input: SyntheticInput = {
       sessionID: record.sessionID,
       id: record.notificationID,
@@ -302,14 +321,21 @@ export class FleetJobRegistry {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         await this.ctx.session.synthetic(input);
-        return;
+        return this.markNotified(record);
       } catch (error) {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
-        if (/not found|404|conflict|409/i.test(message)) return;
+        if (/not found|404|conflict|409/i.test(message)) return this.markNotified(record);
         if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
       }
     }
     console.warn('[openchamber-fleet] could not deliver background job notification:', lastError instanceof Error ? lastError.message : String(lastError));
+    return false;
+  }
+
+  private async markNotified(record: StoredJob): Promise<boolean> {
+    record.notified = true;
+    if (this.ctx.storage) await this.ctx.storage.set(storageKey(record.key), record).catch(() => {});
+    return true;
   }
 }

@@ -5,7 +5,7 @@ import { compileExcludes, loadConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
 import { AgentError } from '../v1/errors.js';
 import {
-  artifactTarget,
+  canonicalArtifactTarget,
   connectSsh,
   execCommand,
   fetchArtifact,
@@ -114,6 +114,7 @@ async function withClient<T>(
   host: HostConfig,
   context: ToolContext | undefined,
   run: (client: Awaited<ReturnType<typeof connectSsh>>) => Promise<T>,
+  options: { closeOnAbort?: boolean } = {},
 ): Promise<T> {
   const client = await connectSsh(host, { agentPath: agentPath() });
   if (context?.signal?.aborted) {
@@ -121,7 +122,7 @@ async function withClient<T>(
     throw new AgentError('CANCELLED', 'operation cancelled');
   }
   const onAbort = () => client.close();
-  context?.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options.closeOnAbort !== false) context?.signal?.addEventListener('abort', onAbort, { once: true });
   try {
     return await run(client);
   } finally {
@@ -210,7 +211,13 @@ export default {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
           const info = await withClient(host, context, (client) => status(client, config.name, host.root, context?.signal));
-          return jsonResult({ workspace: config.name, host: host.alias, ...info });
+          return jsonResult({
+            workspace: config.name,
+            host: host.alias,
+            generation: info.generation,
+            manifestDigest: info.manifestDigest,
+            recovery: info.recovery,
+          });
         },
       });
 
@@ -261,7 +268,7 @@ export default {
             adopt: input.adopt === true,
             signal: context?.signal,
             onProgress: (update: SyncProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
-          }));
+          }), { closeOnAbort: false });
           return jsonResult(syncOutput(config, host, mode, result), { host: host.alias, mode, planDigest: result.planDigest });
         },
       });
@@ -303,14 +310,24 @@ export default {
           const inputEnv = input.env && typeof input.env === 'object'
             ? Object.fromEntries(Object.entries(input.env).map(([key, value]) => [key, String(value)]))
             : {};
+          const unsafeEnv = Object.keys(inputEnv).filter((key) => /^(PATH|LD_.*|DYLD_.*|NODE_OPTIONS|PYTHONPATH|BASH_ENV|ENV)$/.test(key));
+          if (unsafeEnv.length > 0) {
+            throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in fleet.json: ${unsafeEnv.join(', ')}`);
+          }
           const env = { ...config.env, ...inputEnv };
+          const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;
           const command = commandText(argv);
-          await assertPermission(ctx, context, 'shell', [`fleet ${host.alias} ${command}`, command], {
+          const descriptor = JSON.stringify({ host: host.alias, cwd: cwd ?? '.', envKeys: Object.keys(env).sort(), argv });
+          const metadata = {
             workspace: config.name,
             host: host.alias,
             argv,
+            cwd: cwd ?? '.',
+            envKeys: Object.keys(env).sort(),
             background: input.background === true,
-          }, [`fleet ${host.alias} *`]);
+          };
+          await assertPermission(ctx, context, 'fleet.exec', [descriptor], metadata, [descriptor]);
+          await assertPermission(ctx, context, 'shell', [command], metadata, [command]);
 
           if (input.background === true) {
             const record = await registry.start({
@@ -318,7 +335,7 @@ export default {
               host,
               sessionID: sessionIDOf(context),
               argv,
-              cwd: typeof input.cwd === 'string' ? input.cwd : undefined,
+              cwd,
               env,
               timeoutMs: timeout,
               startupSignal: context?.signal,
@@ -343,12 +360,12 @@ export default {
             workspaceId: config.name,
             root: host.root,
             argv,
-            cwd: typeof input.cwd === 'string' ? input.cwd : undefined,
+            cwd,
             env,
             timeoutMs: timeout,
             signal: context?.signal,
             onProgress: (update: ExecProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
-          }));
+          }), { closeOnAbort: false });
           return jsonResult(execOutput(config, host, argv, false, result), {
             host: host.alias,
             jobId: result.jobId,
@@ -383,12 +400,12 @@ export default {
             throw new AgentError('INVALID_REQUEST', 'artifact and dest are required');
           }
           const artifact = input.artifact;
-          const dest = input.dest;
-          const target = artifactTarget(dest, artifact);
+          const dest = path.resolve(config.dir, input.dest);
+          const target = canonicalArtifactTarget(dest, artifact);
           await assertPermission(ctx, context, 'edit', [target], {
             workspace: config.name,
             host: host.alias,
-            artifact: input.artifact,
+            artifact,
             target,
           }, [`${path.dirname(target)}/*`]);
           const relative = path.relative(config.dir, target);
@@ -406,6 +423,7 @@ export default {
             artifact,
             dest,
             overwrite: input.overwrite === true,
+            expectedTarget: target,
             signal: context?.signal,
             onProgress: (update: FetchProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
           }));
@@ -429,7 +447,7 @@ export default {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
           if (typeof input.jobId !== 'string') throw new AgentError('INVALID_REQUEST', 'jobId is required');
-          return jsonResult(storedJobOutput(await registry.status(config, host.alias, input.jobId)));
+          return jsonResult(storedJobOutput(await registry.status(config, host.alias, input.jobId, sessionIDOf(context))));
         },
       });
 
@@ -454,7 +472,7 @@ export default {
             host: host.alias,
             jobId: input.jobId,
           });
-          return jsonResult(storedJobOutput(await registry.cancel(config, host.alias, input.jobId)));
+          return jsonResult(storedJobOutput(await registry.cancel(config, host.alias, input.jobId, sessionIDOf(context))));
         },
       });
 
@@ -488,7 +506,7 @@ export default {
             host.root,
             mode,
             context?.signal,
-          ));
+          ), { closeOnAbort: false });
           return jsonResult({
             workspace: config.name,
             host: host.alias,

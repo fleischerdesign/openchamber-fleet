@@ -5,7 +5,7 @@ import type { HostConfig, WorkspaceConfig } from '../../../src/config.js';
 import { AgentError } from '../../../src/v1/errors.js';
 import {
   connectSsh,
-  recoverWorkspace,
+  inspectRecovery,
   status,
   syncWorkspace,
 } from '../../../src/v1/operations.js';
@@ -206,11 +206,9 @@ const server = http.createServer(async (request, response) => {
       }
     }
     if (url.pathname === '/recovery') {
-      const mode = body.mode === 'abort' ? 'abort' : 'recover';
       const client = await connectSsh(host, { agentPath: agentPath() });
       try {
-        const result = await recoverWorkspace(client, config.name, host.root, mode);
-        cache.delete(directory);
+        const result = await inspectRecovery(client, config.name, host.root);
         return reply(response, 200, { ok: true, result: { workspace: config.name, host: host.alias, ...result } });
       } finally {
         client.close();

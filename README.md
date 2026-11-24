@@ -67,9 +67,10 @@ the plugin resumes the same session through OpenCode's official `session.synthet
 finishes. `fleet_job_status` and `fleet_job_cancel` manage those jobs. Background jobs are tied to the
 running OpenCode runtime; restart, plugin unload and location eviction are reported as interruptions.
 
-Permissions follow OpenCode rules: remote exec evaluates `shell`, fetch evaluates `edit` and
-`external_directory`, and sync apply/recovery use dedicated `fleet.sync` / `fleet.recover` actions.
-Status and sync planning are read-only.
+Permissions follow OpenCode rules: remote exec evaluates a descriptor under `fleet.exec` and the
+exact command under `shell`, fetch evaluates `edit` and `external_directory`, and sync
+apply/recovery use dedicated `fleet.sync` / `fleet.recover` actions. Status and sync planning are
+read-only; `adopt` is apply-only.
 
 ## Guarantees
 

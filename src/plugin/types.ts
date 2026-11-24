@@ -57,6 +57,7 @@ export interface StoredJob {
   jobId: string;
   sessionID: string;
   workspace: string;
+  directory: string;
   host: string;
   argv: string[];
   state: string;
@@ -70,6 +71,7 @@ export interface StoredJob {
   stdoutTail: string;
   stderrTail: string;
   error?: string;
+  notified?: boolean;
 }
 
 export interface PluginContext {
@@ -84,7 +86,7 @@ export interface PluginContext {
     get: (key: string) => Promise<unknown>;
     set: (key: string, value: unknown) => Promise<void>;
     remove: (key: string) => Promise<void>;
-    scan: (options: { prefix: string; limit: number }) => Promise<{ entries: Array<{ key: string; value: unknown }> }>;
+    scan: (options: { prefix: string; limit: number; after?: string }) => Promise<{ entries: Array<{ key: string; value: unknown }>; next?: string }>;
   };
   event?: {
     subscribe: (options: { types: string[]; signal?: AbortSignal }) => AsyncIterable<{ type: string; data?: Record<string, unknown> }>;
