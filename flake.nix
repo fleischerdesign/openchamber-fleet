@@ -27,7 +27,6 @@
           pname = "openchamber-fleet";
           version = "0.2.0";
           src = self;
-          nativeBuildInputs = [ pkgs.makeWrapper ];
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           buildPhase = ''
             npm run build
@@ -35,11 +34,12 @@
           installPhase = ''
             mkdir -p $out/lib/node_modules/openchamber-fleet $out/bin
             cp -r package.json dist bin extensions docs README.md LICENSE $out/lib/node_modules/openchamber-fleet/
-            cp $out/lib/node_modules/openchamber-fleet/bin/fleet.js $out/bin/fleet
+            cat > $out/bin/fleet <<EOF
+            #!${pkgs.runtimeShell}
+            export PATH=${pkgs.openssh}/bin:\$PATH
+            exec ${pkgs.nodejs}/bin/node $out/lib/node_modules/openchamber-fleet/bin/fleet.js "\$@"
+            EOF
             chmod +x $out/bin/fleet
-          '';
-          postFixup = ''
-            wrapProgram $out/bin/fleet --prefix PATH : ${pkgs.openssh}/bin
           '';
         };
     in
