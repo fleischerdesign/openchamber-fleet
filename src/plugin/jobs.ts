@@ -348,7 +348,16 @@ export class FleetJobRegistry {
 
   private async markNotified(record: StoredJob): Promise<boolean> {
     record.notified = true;
-    if (this.ctx.storage) await this.ctx.storage.set(storageKey(record.key), record).catch(() => {});
+    let persisted = true;
+    if (this.ctx.storage) {
+      try {
+        await this.ctx.storage.set(storageKey(record.key), record);
+      } catch {
+        persisted = false;
+      }
+    }
+    const active = this.jobs.get(record.key);
+    if (persisted && active?.finished && TERMINAL.has(active.record.state)) this.jobs.delete(record.key);
     return true;
   }
 }
