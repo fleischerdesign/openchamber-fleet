@@ -159,6 +159,7 @@ function syncOutput(
     workspace: config.name,
     host: host.alias,
     mode,
+    modeLabel: mode === 'apply' ? 'Applied' : 'Planned',
     planDigest: result.planDigest,
     generation: result.generation ?? null,
     manifestDigest: result.manifestDigest ?? null,
@@ -167,6 +168,32 @@ function syncOutput(
     needed: result.needed.length,
     items,
   };
+}
+
+const STATE_LABELS: Record<string, string> = {
+  running: 'Running',
+  'cancel-requested': 'Cancelling',
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  interrupted: 'Interrupted',
+  unknown: 'Unknown',
+};
+
+function stateLabelOf(state: string): string {
+  return STATE_LABELS[state] ?? state;
+}
+
+function exitLabelOf(exitCode: number | null, signal: number | null, state: string): string {
+  if (typeof exitCode === 'number') return `Exit code ${exitCode}`;
+  if (typeof signal === 'number') return `Signal ${signal}`;
+  if (state === 'running' || state === 'cancel-requested') return 'Still running';
+  return 'No exit code';
+}
+
+function commandLabelOf(argv: string[]): string {
+  const text = argv.join(' ');
+  return text.length > 80 ? `${text.slice(0, 77)}…` : text;
 }
 
 function execOutput(
@@ -180,10 +207,14 @@ function execOutput(
     workspace: config.name,
     host: host.alias,
     argv,
+    commandLabel: commandLabelOf(argv),
     background,
+    modeLabel: background ? 'Background job' : 'Foreground',
     jobId: result.jobId,
     state: result.state,
+    stateLabel: stateLabelOf(result.state),
     exitCode: result.exitCode,
+    exitLabel: exitLabelOf(result.exitCode, result.signal, result.state),
     signal: result.signal,
     stdout: truncated(result.stdout.toString('utf8')),
     stderr: truncated(result.stderr.toString('utf8')),
@@ -196,7 +227,9 @@ function storedJobOutput(record: StoredJob): Record<string, unknown> {
     host: record.host,
     jobId: record.jobId,
     state: record.state,
+    stateLabel: stateLabelOf(record.state),
     exitCode: record.exitCode ?? null,
+    exitLabel: exitLabelOf(record.exitCode ?? null, record.signal ?? null, record.state),
     signal: record.signal ?? null,
     startedAt: record.startedAt,
     endedAt: record.endedAt ?? null,
@@ -242,7 +275,7 @@ export default {
             manifestDigest: info.manifestDigest,
             recovery,
             statusLabel: recovery ? 'Recovery needed' : 'Ready',
-            nextStep: recovery ? 'Run fleet_recover before the next sync.' : 'Workspace replica is synchronized.',
+            nextStep: recovery ? 'Run fleet_recover before the next sync.' : 'No action needed.',
           });
         },
       });
@@ -261,6 +294,7 @@ export default {
           workspace: string,
           host: string,
           mode: string,
+          modeLabel: string,
           planDigest: string,
           generation: { type: ['number', 'null'] },
           manifestDigest: { type: ['string', 'null'] },
@@ -268,7 +302,7 @@ export default {
           changesTruncated: boolean,
           needed: { type: 'number' },
           items: { type: 'array', items: schema({ action: string, path: string }, ['action', 'path']) },
-        }, ['workspace', 'host', 'mode', 'planDigest', 'changes', 'needed', 'items']),
+        }, ['workspace', 'host', 'mode', 'modeLabel', 'planDigest', 'changes', 'needed', 'items']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
@@ -315,14 +349,18 @@ export default {
           workspace: string,
           host: string,
           argv: stringArray,
+          commandLabel: string,
           background: boolean,
+          modeLabel: string,
           jobId: string,
           state: string,
+          stateLabel: string,
           exitCode: { type: ['number', 'null'] },
+          exitLabel: string,
           signal: { type: ['number', 'null'] },
           stdout: string,
           stderr: string,
-        }, ['workspace', 'host', 'argv', 'background', 'jobId', 'state']),
+        }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'modeLabel', 'jobId', 'state', 'stateLabel', 'exitLabel']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
@@ -372,10 +410,14 @@ export default {
               workspace: config.name,
               host: host.alias,
               argv,
+              commandLabel: commandLabelOf(argv),
               background: true,
+              modeLabel: 'Background job',
               jobId: record.jobId,
               state: record.state,
+              stateLabel: stateLabelOf(record.state),
               exitCode: null,
+              exitLabel: exitLabelOf(null, null, record.state),
               signal: null,
               stdout: '',
               stderr: '',
@@ -419,7 +461,8 @@ export default {
           file: string,
           bytes: { type: 'number' },
           digest: string,
-        }, ['workspace', 'host', 'artifact', 'file', 'bytes', 'digest']),
+          statusLabel: string,
+        }, ['workspace', 'host', 'artifact', 'file', 'bytes', 'digest', 'statusLabel']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
@@ -454,7 +497,7 @@ export default {
             signal: context?.signal,
             onProgress: (update: FetchProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
           }));
-          return jsonResult({ workspace: config.name, host: host.alias, artifact, ...result });
+          return jsonResult({ workspace: config.name, host: host.alias, artifact, statusLabel: 'Verified', ...result });
         },
       });
 
@@ -464,12 +507,12 @@ export default {
         options: { codemode: false },
         input: schema({ host: string, jobId: string }, ['host', 'jobId']),
         output: output({
-          workspace: string, host: string, jobId: string, state: string,
-          exitCode: { type: ['number', 'null'] }, signal: { type: ['number', 'null'] },
+          workspace: string, host: string, jobId: string, state: string, stateLabel: string,
+          exitCode: { type: ['number', 'null'] }, exitLabel: string, signal: { type: ['number', 'null'] },
           startedAt: { type: 'number' }, endedAt: { type: ['number', 'null'] },
           stdoutBytes: { type: 'number' }, stderrBytes: { type: 'number' },
           stdoutTail: string, stderrTail: string, error: { type: ['string', 'null'] },
-        }, ['workspace', 'host', 'jobId', 'state', 'startedAt', 'stdoutBytes', 'stderrBytes']),
+        }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
@@ -484,12 +527,12 @@ export default {
         options: { codemode: false, permission: 'fleet.job.cancel' },
         input: schema({ host: string, jobId: string }, ['host', 'jobId']),
         output: output({
-          workspace: string, host: string, jobId: string, state: string,
-          exitCode: { type: ['number', 'null'] }, signal: { type: ['number', 'null'] },
+          workspace: string, host: string, jobId: string, state: string, stateLabel: string,
+          exitCode: { type: ['number', 'null'] }, exitLabel: string, signal: { type: ['number', 'null'] },
           startedAt: { type: 'number' }, endedAt: { type: ['number', 'null'] },
           stdoutBytes: { type: 'number' }, stderrBytes: { type: 'number' },
           stdoutTail: string, stderrTail: string, error: { type: ['string', 'null'] },
-        }, ['workspace', 'host', 'jobId', 'state', 'startedAt', 'stdoutBytes', 'stderrBytes']),
+        }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
@@ -517,7 +560,9 @@ export default {
           generation: { type: ['number', 'null'] },
           manifestDigest: { type: ['string', 'null'] },
           recovered: boolean,
-        }, ['workspace', 'host', 'state', 'recovered']),
+          resultLabel: string,
+          nextStep: string,
+        }, ['workspace', 'host', 'state', 'recovered', 'resultLabel', 'nextStep']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
@@ -534,6 +579,13 @@ export default {
             mode,
             context?.signal,
           ), { closeOnAbort: false });
+          const recovered = result.recovered === true;
+          const ready = result.state === 'READY';
+          const resultLabel = ready
+            ? recovered
+              ? mode === 'abort' ? 'Recovery aborted' : 'Recovered'
+              : 'Nothing to recover'
+            : 'Recovery still needed';
           return jsonResult({
             workspace: config.name,
             host: host.alias,
@@ -542,7 +594,11 @@ export default {
             phase: result.phase ?? null,
             generation: result.generation ?? null,
             manifestDigest: result.manifestDigest ?? null,
-            recovered: result.recovered === true,
+            recovered,
+            resultLabel,
+            nextStep: ready
+              ? recovered ? 'The replica is ready; continue with fleet_sync.' : 'No action needed.'
+              : 'Inspect the workspace and retry fleet_recover.',
           });
         },
       });
