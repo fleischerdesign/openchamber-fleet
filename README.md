@@ -31,11 +31,28 @@ ssh -T host fleet-agent stdio  ────────────▶  agent pr
 - **Honest outcomes**: a crash yields `unknown`, never a guess; commits record the generation only
   after a clean apply.
 
-## Quickstart
+## Install
+
+### OpenChamber extension (no Nix)
+
+1. Download `openchamber-fleet-extension-<version>.zip` from the latest GitHub release, or clone this
+   repository and use `extensions/openchamber`.
+2. In OpenChamber, open **Settings → Extensions** and install the ZIP or folder. Approve the local
+   service (`ssh`, `git`) and the OpenCode plugin permission. The extension appears as
+   `openchamber-fleet`.
+3. On the target machine, install the matching `fleet-agent` release binary, or build it with
+   `cargo install --path agent`, and put it on the SSH user's `PATH`. `ssh` and `git` are required
+   there.
+4. Open the Fleet panel, add the host and project, and use the seven tools from any OpenCode session.
+
+The extension bundles the controller and the OpenCode plugin. The `fleet` CLI is optional. A ZIP or
+folder install runs from OpenChamber's writable extension catalog and needs no Nix.
+
+### CLI (optional)
 
 ```bash
-# once per node: install the agent (Nix, cargo, or a release binary)
-nix profile install github:fleischerdesign/openchamber-fleet#fleet-agent
+# release tarball; or: npm ci && npm run build && npm link
+npm install -g ./openchamber-fleet-<version>.tgz
 
 # in the project: writes local host registry + project selection,
 # never a file in the repository
@@ -51,6 +68,16 @@ fleet fetch --host workstation --dest ./out -- target/release/app
 The same operations are exposed to an agent as `fleet_sync`, `fleet_exec`, `fleet_fetch`,
 `fleet_status`, `fleet_job_status`, `fleet_job_cancel` and `fleet_recover`.
 
+### Nix (optional)
+
+```bash
+nix profile install github:fleischerdesign/openchamber-fleet#fleet-agent
+nix profile install github:fleischerdesign/openchamber-fleet#controller
+```
+
+The flake also exposes `packages.<system>.extension`, the portable package for declarative runtime
+installs.
+
 ## OpenCode and OpenChamber
 
 The repository builds three artifacts from one controller core:
@@ -60,10 +87,14 @@ The repository builds three artifacts from one controller core:
 - a complete OpenChamber extension in [`extensions/openchamber`](extensions/openchamber).
 
 The extension contributes native tool cards/tables, a project configuration panel, a read-only Work
-Status section and the OpenCode plugin. The panel edits the same local XDG configuration as the CLI:
-hosts are machine-level, projects only select aliases and own excludes. Nothing is written to the
-repository. It uses only public OpenChamber SDK and OpenCode plugin APIs; Nix is an optional
-packaging path, not a runtime requirement.
+Status section and the OpenCode plugin. It is a normal runtime extension: install it from Settings →
+Extensions and approve the declared service and plugin permissions. The panel edits the same local
+XDG configuration as the CLI: hosts are machine-level, projects only select aliases and own excludes.
+Nothing is written to the repository. It uses only public OpenChamber SDK and OpenCode plugin APIs;
+Nix is an optional packaging path, not a runtime requirement.
+
+Without OpenChamber, install the npm package and add `openchamber-fleet/plugin` to OpenCode's plugin
+list. That path provides the seven tools and the CLI, but not the OpenChamber panel or status section.
 
 `fleet_exec` accepts `background: true`. The tool returns a `jobId`, the agent can end its turn, and
 the plugin resumes the same session through OpenCode's official `session.synthetic` API when the job
@@ -88,18 +119,21 @@ read-only; `adopt` is apply-only.
 
 ## Requirements
 
-- Controller: Node.js ≥ 22.
-- Node: `ssh` and the `fleet-agent` binary. Nothing else — no rsync, no bash wrapper, no service.
-- Linux is tested; macOS is expected to work (Unix APIs only) but has no CI job yet; Windows is unsupported.
+- OpenChamber ≥ 2.8.0 for the extension; Node.js ≥ 22 for the CLI and the standalone OpenCode plugin.
+- Node: `ssh`, `git` and the `fleet-agent` binary. Nothing else — no rsync, no bash wrapper, no service.
+- The agent is a static Rust binary; the release workflow publishes Linux x86_64/aarch64 and macOS
+  x86_64/aarch64 builds. `cargo install --path agent` builds it from source.
+- Linux is tested; macOS is expected to work (Unix APIs only); Windows is unsupported.
 - SSH key authentication, host keys verified (`StrictHostKeyChecking=yes`).
 
 ## Status
 
 v1 is implemented end to end in this repository: protocol, Rust agent, TypeScript controller, CLI,
-OpenCode plugin and OpenChamber extension. The test suite covers two controllers, recovery after a
-dead controller, agent kills at transaction boundaries, disk full, cancellation and the packaged
-extension surface. The live fleet/OpenChamber proof and the remaining rows in
-[`docs/test-coverage.md`](docs/test-coverage.md) are still the gate before calling it production-ready.
+OpenCode plugin and OpenChamber runtime extension. The test suite covers two controllers, recovery
+after a dead controller, agent kills at transaction boundaries, disk full, cancellation, the
+negotiated frame size and the packaged extension surface. The extension is installed and exercised
+live as a runtime extension in the Nixfiles fleet; the remaining rows in
+[`docs/test-coverage.md`](docs/test-coverage.md) stay the public coverage ledger.
 
 ## Documentation
 

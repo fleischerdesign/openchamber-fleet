@@ -4,10 +4,25 @@ This folder is a complete OpenChamber extension package. It uses only public Ope
 
 ## Install
 
-- In OpenChamber: Settings → Extensions → install this folder, a release ZIP, or the Git repository subdirectory `extensions/openchamber`.
-- In OpenCode without OpenChamber: install `openchamber-fleet/plugin` as a local plugin package, or use the repository's root `./plugin` export.
+Prerequisites on the machine Fleet connects to:
 
-The extension contributes the Fleet OpenCode plugin, native tool cards/tables, a project configuration panel, and a read-only Work Status section. It does not patch OpenChamber or OpenCode and does not require Nix.
+- `ssh` and `git` on `PATH`.
+- `fleet-agent` on the SSH user's `PATH` (release binary or `cargo install --path agent`).
+- A writable replica root.
+
+Then:
+
+- In OpenChamber: Settings → Extensions → install this folder, the release
+  `openchamber-fleet-extension-<version>.zip`, or the Git repository subdirectory
+  `extensions/openchamber`.
+- Approve the local service (`ssh`, `git`) and the OpenCode plugin permission. The extension appears
+  as `openchamber-fleet`.
+- In OpenCode without OpenChamber: install the `openchamber-fleet` npm package and add
+  `openchamber-fleet/plugin` to the plugin list.
+
+The extension contributes the Fleet OpenCode plugin, native tool cards/tables, a project
+configuration panel, and a read-only Work Status section. It is a normal runtime extension, does not
+patch OpenChamber or OpenCode, and does not require Nix.
 
 ## Configuration
 
