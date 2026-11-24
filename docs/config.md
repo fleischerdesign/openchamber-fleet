@@ -93,8 +93,16 @@ The legacy shape is accepted for migration:
 }
 ```
 
-`fleet init` writes the split format. `fleet init --workspace-file` is the explicit opt-in for the
-legacy file. The OpenChamber panel saves the split format locally and never writes to the repository.
+`fleet init` writes the split format. When a legacy `fleet.json` exists and no split project
+configuration does, it migrates instead of replacing: the name, hosts, replica roots, excludes,
+environment and shell are preserved. Selecting an alias that already exists in the shared registry
+only adds it to the project; `--force` replaces its SSH target. `fleet init --workspace-file` is the
+explicit opt-in for the legacy file and writes it at the workspace root.
+
+The OpenChamber panel saves the split format locally and never writes to the repository. It loads
+both documents independently, so a new project keeps the existing host registry and a project with a
+missing host remains editable. A save carries the revision it loaded; a stale save is refused instead
+of overwriting a concurrent change. Removing a host that another project still selects is refused.
 
 ## Excludes
 
@@ -112,6 +120,9 @@ A call may add patterns (`--exclude`, or `excludes` on the tool). The union is u
 transaction and stored with the replica, so the next `exec`/`status` judges it against the set it
 was synced with. Nothing is guessed from the project type; a plan names generated output it is about
 to replicate, and the caller decides.
+
+Patterns are compiled before `fleet init` or a panel save writes the project. An invalid exclusion
+is refused instead of producing a configuration the tools reject on the next read.
 
 ## Replica root
 

@@ -25,7 +25,7 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.3.0";
+          version = "0.3.1";
           src = self;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";
           buildPhase = ''
@@ -36,7 +36,7 @@
             cp -r package.json dist bin extensions docs README.md LICENSE $out/lib/node_modules/openchamber-fleet/
             cat > $out/bin/fleet <<EOF
             #!${pkgs.runtimeShell}
-            export PATH=${pkgs.openssh}/bin:\$PATH
+            export PATH=${pkgs.openssh}/bin:${pkgs.git}/bin:\$PATH
             exec ${pkgs.nodejs}/bin/node $out/lib/node_modules/openchamber-fleet/bin/fleet.js "\$@"
             EOF
             chmod +x $out/bin/fleet
@@ -70,7 +70,7 @@
         agent = mkAgent pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.3.0";
+          version = "0.3.1";
           src = self;
           doCheck = true;
           npmDepsHash = "sha256-9FOy0zeJsIb+P4AkqzhCLLsMedVY/rkOIlMQmN+0uDA=";

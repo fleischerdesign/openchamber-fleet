@@ -21,10 +21,13 @@ export type {
   HostRegistry,
   HostRegistryEntry,
   ProjectConfigFile,
+  SaveConfigOptions,
   Shell,
   WorkspaceConfig,
 } from './config.js';
 export { FleetError, friendlyErrorMessage } from './errors.js';
+export { replicaState } from './status.js';
+export type { ReplicaState, ReplicaStateInput, ReplicaTone } from './status.js';
 export { AgentClient } from './v1/client.js';
 export type { AgentInfo, CollectOptions } from './v1/client.js';
 export { AgentError, exitCodeFor } from './v1/errors.js';

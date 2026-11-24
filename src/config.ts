@@ -75,6 +75,8 @@ export interface ConfigDocuments {
   readonly hosts: HostRegistry;
   readonly project: ProjectConfigFile;
   readonly legacy: boolean;
+  /** Content hash of both local documents; a save must present the revision it loaded. */
+  readonly revision: string;
 }
 
 export interface ConfigPaths {
@@ -97,6 +99,10 @@ export interface InitProjectOptions extends LoadConfigOptions {
   readonly root?: string;
   readonly name?: string;
   readonly force?: boolean;
+}
+
+export interface SaveConfigOptions extends LoadConfigOptions {
+  readonly expectedRevision?: string;
 }
 
 export function defaultRemoteRoot(name: string): string {
@@ -208,19 +214,26 @@ export function loadConfigDocuments(
   const project = fs.existsSync(paths.projectFile)
     ? readProjectConfig(paths.projectFile, false, name)
     : defaultProjectConfig(name);
-  return { ...paths, hosts, project, legacy: false };
+  return { ...paths, hosts, project, legacy: false, revision: configRevision(paths) };
 }
 
 export function saveConfigDocuments(
   cwd: string,
   hosts: unknown,
   project: unknown,
-  options: LoadConfigOptions = {},
+  options: SaveConfigOptions = {},
 ): ConfigDocuments {
   const paths = configPaths(cwd, options);
+  if (options.expectedRevision !== undefined && options.expectedRevision !== configRevision(paths)) {
+    throw new FleetError('config-invalid', 'the local Fleet configuration changed since it was loaded', {
+      hint: 'reload the panel and apply your changes again',
+    });
+  }
   const registry = parseHostRegistry(hosts, paths.hostsFile);
   const projectConfig = parseProjectConfig(project, paths.projectFile, defaultWorkspaceName(cwd));
   validateProjectSelection(projectConfig, registry, paths);
+  compileExcludes(projectConfig.excludes);
+  assertNoCrossProjectRemoval(paths, registry);
   writeJson(paths.hostsFile, registry);
   writeJson(paths.projectFile, projectConfig);
   return {
@@ -228,6 +241,7 @@ export function saveConfigDocuments(
     hosts: registry,
     project: projectConfig,
     legacy: false,
+    revision: configRevision(paths),
   };
 }
 
@@ -240,25 +254,67 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
   const name = options.name === undefined ? defaultWorkspaceName(cwd) : assertWorkspaceName(options.name);
 
   const registry = readHostRegistry(paths.hostsFile, true);
-  const existing = registry.hosts[alias];
-  if (existing && !options.force) {
-    throw new FleetError('config-invalid', `host ${JSON.stringify(alias)} already exists`, {
+  const registryHosts = { ...registry.hosts };
+  let project: ProjectConfigFile;
+
+  if (fs.existsSync(paths.projectFile)) {
+    project = readProjectConfig(paths.projectFile, false, name);
+  } else {
+    const legacy = legacyPath(cwd);
+    if (legacy) {
+      // Migrating rather than replacing: a legacy file keeps its name, hosts,
+      // roots, excludes, environment and shell until the user changes them.
+      const legacyConfig = loadLegacyConfig(legacy);
+      project = {
+        version: CONFIG_VERSION,
+        name: legacyConfig.name,
+        hosts: Object.keys(legacyConfig.hosts),
+        roots: Object.fromEntries(Object.entries(legacyConfig.hosts)
+          .filter(([, host]) => host.root !== defaultRemoteRoot(legacyConfig.name))
+          .map(([legacyAlias, host]) => [legacyAlias, host.root])),
+        excludes: [...legacyConfig.excludes],
+        env: { ...legacyConfig.env },
+        shell: legacyConfig.shell,
+      };
+      for (const [legacyAlias, legacyHost] of Object.entries(legacyConfig.hosts)) {
+        const entry = registryHosts[legacyAlias];
+        const legacyPort = legacyHost.port === 22 ? undefined : legacyHost.port;
+        const merged = legacyPort === undefined ? { ssh: legacyHost.ssh } : { ssh: legacyHost.ssh, port: legacyPort };
+        if (!entry) {
+          registryHosts[legacyAlias] = merged;
+        } else if (entry.ssh !== legacyHost.ssh || (entry.port ?? 22) !== legacyHost.port) {
+          if (!options.force) {
+            throw new FleetError('config-invalid', `legacy host ${JSON.stringify(legacyAlias)} conflicts with the shared registry`, {
+              file: paths.hostsFile,
+              hint: 'pass --force to rebind the shared host or resolve the registry entry first',
+            });
+          }
+          registryHosts[legacyAlias] = merged;
+        }
+      }
+    } else {
+      project = defaultProjectConfig(name);
+    }
+  }
+
+  const existing = registryHosts[alias];
+  const requested = port === 22 ? { ssh } : { ssh, port };
+  const sameTarget = existing !== undefined && existing.ssh === ssh && (existing.port ?? 22) === port;
+  if (existing && !sameTarget && !options.force) {
+    throw new FleetError('config-invalid', `host ${JSON.stringify(alias)} already exists with a different SSH target`, {
       file: paths.hostsFile,
-      hint: 'pass --force to replace the SSH target',
+      hint: 'pass --force to replace the shared SSH target',
     });
   }
-  const hosts: HostRegistry = {
-    version: CONFIG_VERSION,
-    hosts: { ...registry.hosts, [alias]: port === 22 ? { ssh } : { ssh, port } },
-  };
+  if (!sameTarget || options.force) registryHosts[alias] = requested;
 
-  const project = readProjectConfig(paths.projectFile, true, name);
+  const hosts: HostRegistry = { version: CONFIG_VERSION, hosts: registryHosts };
   const selected = new Set(project.hosts);
   selected.add(alias);
   const roots = { ...project.roots };
   if (root !== undefined) roots[alias] = root;
   const projectConfig: ProjectConfigFile = {
-    version: CONFIG_VERSION,
+    ...project,
     name: options.name === undefined ? project.name || name : name,
     hosts: [...selected],
     roots,
@@ -268,6 +324,7 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
   };
 
   validateProjectSelection(projectConfig, hosts, paths);
+  compileExcludes(projectConfig.excludes);
   writeJson(paths.hostsFile, hosts);
   writeJson(paths.projectFile, projectConfig);
   return {
@@ -275,7 +332,66 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
     hosts,
     project: projectConfig,
     legacy: false,
+    revision: configRevision(paths),
   };
+}
+
+function configRevision(paths: ConfigPaths): string {
+  const files = [paths.hostsFile, paths.projectFile];
+  // While a legacy file is still the active view, its contents are part of the
+  // revision too; otherwise a stale panel could overwrite a changed legacy file.
+  if (!fs.existsSync(paths.projectFile)) {
+    const legacy = path.join(paths.workspaceRoot, 'fleet.json');
+    if (fs.existsSync(legacy)) files.push(legacy);
+  }
+  const hash = crypto.createHash('sha256');
+  for (const file of files) {
+    hash.update(path.basename(file)).update('\0');
+    try {
+      hash.update(fs.readFileSync(file));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      hash.update('missing');
+    }
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+function assertNoCrossProjectRemoval(paths: ConfigPaths, next: HostRegistry): void {
+  let previous: HostRegistry;
+  try {
+    previous = readHostRegistry(paths.hostsFile, false);
+  } catch {
+    return;
+  }
+  const removed = Object.keys(previous.hosts).filter((alias) => !next.hosts[alias]);
+  if (removed.length === 0) return;
+
+  const directory = path.dirname(paths.projectFile);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(directory);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.endsWith('.json') || path.join(directory, name) === paths.projectFile) continue;
+    try {
+      const other = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8')) as { hosts?: unknown };
+      if (!Array.isArray(other.hosts)) continue;
+      const selected: unknown[] = other.hosts;
+      const used = removed.find((alias) => selected.includes(alias));
+      if (used) {
+        throw new FleetError('config-invalid', `host ${JSON.stringify(used)} is still selected by another project`, {
+          hint: 'remove the alias from that project before deleting it from the shared registry',
+        });
+      }
+    } catch (error) {
+      if (error instanceof FleetError) throw error;
+      // A different project's malformed file does not block this project's edit.
+    }
+  }
 }
 
 export function loadHostRegistry(file: string): HostRegistry {
@@ -468,6 +584,7 @@ function documentsFromConfig(config: WorkspaceConfig, paths: ConfigPaths, source
       shell: config.shell,
     },
     legacy: config.source === 'legacy' || (sourceFile !== null && path.basename(sourceFile) === 'fleet.json'),
+    revision: configRevision(paths),
   };
 }
 

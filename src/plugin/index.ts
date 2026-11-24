@@ -5,6 +5,7 @@ import path from 'node:path';
 import { compileExcludes, loadConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
 import { FleetError, friendlyErrorMessage } from '../errors.js';
+import { replicaState } from '../status.js';
 import { AgentError } from '../v1/errors.js';
 import {
   canonicalArtifactTarget,
@@ -192,8 +193,10 @@ function exitLabelOf(exitCode: number | null, signal: number | null, state: stri
 }
 
 function commandLabelOf(argv: string[]): string {
-  const text = argv.join(' ');
-  return text.length > 80 ? `${text.slice(0, 77)}…` : text;
+  const executable = (argv[0] ?? 'command').split('/').pop() || 'command';
+  const safe = executable.replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 48);
+  const count = argv.length - 1;
+  return count > 0 ? `${safe} · ${count} arg${count === 1 ? '' : 's'}` : safe;
 }
 
 function execOutput(
@@ -267,15 +270,15 @@ export default {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input);
           const info = await withClient(host, context, (client) => status(client, config.name, host.root, context?.signal));
-          const recovery = info.recovery === true;
+          const state = replicaState(info);
           return jsonResult({
             workspace: config.name,
             host: host.alias,
             generation: info.generation,
             manifestDigest: info.manifestDigest,
-            recovery,
-            statusLabel: recovery ? 'Recovery needed' : 'Ready',
-            nextStep: recovery ? 'Run fleet_recover before the next sync.' : 'No action needed.',
+            recovery: info.recovery === true,
+            statusLabel: state.label,
+            nextStep: state.nextStep,
           });
         },
       });

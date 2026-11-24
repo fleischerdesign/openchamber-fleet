@@ -1,6 +1,6 @@
 /** Protocol client: requests, notifications, credit-controlled streams. */
 
-import { FrameDecoder, MAX_DATA_BYTES, decodeData, encodeControl, encodeData } from './frame.js';
+import { DATA_HEADER_BYTES, FrameDecoder, MAX_DATA_BYTES, decodeData, encodeControl, encodeData } from './frame.js';
 import { AgentError } from './errors.js';
 import type { AgentTransport } from './transport.js';
 
@@ -62,11 +62,15 @@ export class AgentClient {
     });
     const result = (await provisional.request('session.initialize', {
       protocol: { major: 1, minor: 0 },
-      client: { name: 'fleet', version: '0.2.0', instance: `${process.pid}-${Date.now()}` },
+      client: { name: 'fleet', version: '0.3.1', instance: `${process.pid}-${Date.now()}` },
       capabilities: options.capabilities ?? [],
     }, options.timeoutMs ?? 15_000)) as AgentInfo;
     if (!result?.protocol || result.protocol.major !== 1) {
       throw new AgentError('UNSUPPORTED_PROTOCOL', 'agent did not accept protocol major 1');
+    }
+    const maxData = result.limits?.maxData;
+    if (typeof maxData !== 'number' || !Number.isFinite(maxData) || maxData <= DATA_HEADER_BYTES) {
+      throw new AgentError('UNSUPPORTED_CAPABILITY', `agent maxData ${String(maxData)} cannot carry a stream header`);
     }
     return new AgentClient(transport, result);
   }
@@ -103,9 +107,11 @@ export class AgentClient {
 
   /** Upload bytes as DATA frames, then end the stream. */
   async upload(streamId: number, data: Buffer): Promise<unknown> {
+    const chunkSize = Math.min(MAX_DATA_BYTES, this.info.limits.maxData - DATA_HEADER_BYTES);
+    if (chunkSize < 1) throw new AgentError('UNSUPPORTED_CAPABILITY', 'agent maxData cannot carry a stream payload');
     let seq = 0n;
-    for (let offset = 0; offset < data.length; offset += MAX_DATA_BYTES) {
-      const chunk = data.subarray(offset, offset + MAX_DATA_BYTES);
+    for (let offset = 0; offset < data.length; offset += chunkSize) {
+      const chunk = data.subarray(offset, offset + chunkSize);
       this.transport.stdin.write(encodeData(streamId, seq, chunk));
       seq += 1n;
     }

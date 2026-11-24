@@ -42,6 +42,7 @@ const save = document.querySelector<HTMLButtonElement>('#save')!;
 
 let currentDirectory: string | null = null;
 let loadVersion = 0;
+let revision: string | null = null;
 const drafts = new Map<string, { hosts: string; project: string }>();
 
 function showNotice(message: string, tone: 'info' | 'error' | 'success' = 'info'): void {
@@ -149,6 +150,7 @@ function renderHosts(documents: ConfigDocuments): void {
 
 function fill(documents: ConfigDocuments, directory: string): void {
   const draft = drafts.get(directory);
+  revision = documents.revision;
   hostsConfig.value = draft?.hosts ?? `${JSON.stringify(documents.hosts, null, 2)}\n`;
   projectConfig.value = draft?.project ?? `${JSON.stringify(documents.project, null, 2)}\n`;
   renderHosts(documents);
@@ -169,6 +171,7 @@ async function load(): Promise<void> {
     fill(documents, active);
   } catch (error) {
     if (currentDirectory !== active || version !== loadVersion) return;
+    revision = null;
     const draft = drafts.get(active);
     hostsConfig.value = draft?.hosts ?? '';
     projectConfig.value = draft?.project ?? '';
@@ -195,6 +198,7 @@ host.onDirectory((value) => {
   result.hidden = true;
   if (value) void load();
   else {
+    revision = null;
     hostsConfig.value = '';
     projectConfig.value = '';
     hostsView.replaceChildren();
@@ -220,7 +224,11 @@ save.addEventListener('click', () => {
     try {
       const hosts = parseHosts(hostsConfig.value);
       const project = parseProject(projectConfig.value);
-      const saved = await service('/config', { hosts, project }) as ConfigDocuments;
+      const saved = await service('/config', {
+        hosts,
+        project,
+        ...(revision ? { revision } : {}),
+      }) as ConfigDocuments;
       if (currentDirectory !== active) return;
       drafts.delete(active);
       fill(saved, active);

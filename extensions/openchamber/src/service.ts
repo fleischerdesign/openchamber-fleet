@@ -7,7 +7,8 @@ import {
   saveConfigDocuments,
 } from '../../../src/config.js';
 import type { HostConfig, WorkspaceConfig } from '../../../src/config.js';
-import { friendlyErrorMessage } from '../../../src/errors.js';
+import { FleetError, friendlyErrorMessage } from '../../../src/errors.js';
+import { replicaState } from '../../../src/status.js';
 import { AgentError } from '../../../src/v1/errors.js';
 import {
   connectSsh,
@@ -42,8 +43,33 @@ function reply(response: http.ServerResponse, statusCode: number, body: unknown)
 
 function errorFields(error: unknown): { code: string; message: string } {
   if (error instanceof AgentError) return { code: error.code, message: friendlyErrorMessage(error) };
+  if (error instanceof FleetError) return { code: error.code, message: friendlyErrorMessage(error) };
   if (error instanceof Error) return { code: 'INTERNAL', message: friendlyErrorMessage(error) };
   return { code: 'INTERNAL', message: String(error) };
+}
+
+function errorLabel(error: unknown): string {
+  const code = error instanceof AgentError || error instanceof FleetError ? error.code : 'INTERNAL';
+  switch (code) {
+    case 'WORKSPACE_BUSY':
+    case 'lease-busy':
+      return 'Busy';
+    case 'RECOVERY_REQUIRED':
+      return 'Recovery needed';
+    case 'NOT_INITIALIZED':
+    case 'WORKSPACE_UNKNOWN':
+      return 'Not synced';
+    case 'config-missing':
+      return 'Not configured';
+    case 'config-invalid':
+      return 'Configuration error';
+    case 'node-unreachable':
+    case 'ssh-auth-failed':
+    case 'host-key-mismatch':
+      return 'Unreachable';
+    default:
+      return code;
+  }
 }
 
 async function readBody(request: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -124,15 +150,14 @@ async function refresh(directory: string): Promise<GuestStatusView> {
   results.forEach((result, index) => {
     const alias = aliases[index]!;
     if (result.status === 'fulfilled') {
+      const state = replicaState(result.value.info);
       rows.push({
         kind: 'line',
         id: alias,
         label: alias,
-        value: result.value.info.recovery ? 'Recovery needed' : 'Ready',
-        dot: result.value.info.recovery ? 'error' : 'success',
-        tooltip: result.value.info.recovery
-          ? 'The last sync was interrupted; open Fleet recovery before syncing again.'
-          : 'Workspace replica is synchronized.',
+        value: state.label,
+        dot: state.tone,
+        tooltip: state.tooltip,
       });
     } else {
       const fields = errorFields(result.reason);
@@ -140,7 +165,7 @@ async function refresh(directory: string): Promise<GuestStatusView> {
         kind: 'line',
         id: alias,
         label: alias,
-        value: fields.code,
+        value: errorLabel(result.reason),
         dot: 'error',
         tooltip: fields.message.slice(0, 300),
       });
@@ -192,7 +217,9 @@ const server = http.createServer(async (request, response) => {
     lastDirectory = directory;
 
     if (url.pathname === '/config') {
-      const result = saveConfigDocuments(directory, body.hosts, body.project);
+      const result = saveConfigDocuments(directory, body.hosts, body.project, {
+        ...(typeof body.revision === 'string' ? { expectedRevision: body.revision } : {}),
+      });
       cache.delete(directory);
       return reply(response, 200, { ok: true, result });
     }
