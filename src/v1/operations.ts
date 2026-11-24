@@ -178,10 +178,12 @@ export async function syncWorkspace(
   if (workspace.recovery) {
     throw new AgentError('RECOVERY_REQUIRED', 'workspace has an unfinished transaction; inspect it with fleet recover', true);
   }
+  throwIfAborted(options.signal);
   const lease = operationId();
   await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
   let txnId: string | undefined;
   try {
+    throwIfAborted(options.signal);
     const begin = (await client.request('sync.begin', {
       workspaceId: options.workspaceId,
       leaseId: lease,
@@ -371,6 +373,7 @@ export async function startExecCommand(client: AgentClient, options: ExecOptions
 
   let start: { jobId: string; stdoutStream: number; stderrStream: number };
   try {
+    throwIfAborted(options.signal);
     start = (await client.request('exec.start', {
       workspaceId: options.workspaceId,
       leaseId: lease,
@@ -519,12 +522,17 @@ export async function fetchArtifact(client: AgentClient, options: FetchOptions):
     workspaceId: options.workspaceId,
     path: options.artifact,
   })) as { streamId: number; size: number; digest: string };
+  throwIfAborted(options.signal);
   let received = 0;
+  let lastProgress = 0;
   const bytes = await client.collect(opened.streamId, {
     initialCredit: 8 * 1024 * 1024,
     timeoutMs: 300_000,
     onData: (chunk) => {
       received += chunk.length;
+      const now = Date.now();
+      if (now - lastProgress < 200) return;
+      lastProgress = now;
       void report(options.onProgress, { phase: 'streaming', bytes: received, digest: opened.digest });
     },
   });

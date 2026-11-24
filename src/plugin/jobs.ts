@@ -183,7 +183,17 @@ export class FleetJobRegistry {
     };
     const active: ActiveJob = { record, handle, finished: false };
     this.jobs.set(key, active);
-    if (this.ctx.storage) await this.ctx.storage.set(storageKey(key), record);
+    if (this.ctx.storage) {
+      try {
+        await this.ctx.storage.set(storageKey(key), record);
+      } catch (error) {
+        active.finished = true;
+        this.jobs.delete(key);
+        await handle.cancel(2000).catch(() => {});
+        handle.close();
+        throw error;
+      }
+    }
 
     void handle.result.then(
       (result) => this.finish(active, result),
