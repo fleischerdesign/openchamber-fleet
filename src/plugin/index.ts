@@ -18,7 +18,7 @@ import {
 } from '../v1/operations.js';
 import type { ExecProgress, FetchProgress, SyncProgress } from '../v1/operations.js';
 import { FleetJobRegistry } from './jobs.js';
-import type { PluginContext, StoredJob, ToolContext, ToolDefinition, ToolResult } from './types.js';
+import type { PermissionInput, PluginContext, StoredJob, ToolContext, ToolDefinition, ToolResult } from './types.js';
 
 const string = { type: 'string' } as const;
 const boolean = { type: 'boolean' } as const;
@@ -102,15 +102,18 @@ async function assertPermission(
   save?: string[],
 ): Promise<void> {
   if (!ctx.permission) return;
-  await ctx.permission.assert({
+  const input: PermissionInput = {
     sessionID: sessionIDOf(context),
     agent: context?.agent,
     source: { type: 'tool', messageID: context?.messageID, id: context?.id },
     action,
     resources,
-    save,
     metadata,
-  });
+  };
+  // The permission schema validates a present save field as an array; an
+  // explicit undefined is rejected by the runtime.
+  if (save !== undefined) input.save = save;
+  await ctx.permission.assert(input);
 }
 
 function progressReporter(context?: ToolContext): (update: Record<string, unknown>) => Promise<void> {

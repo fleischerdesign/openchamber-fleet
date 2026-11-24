@@ -127,6 +127,22 @@ describe('OpenCode plugin surface', () => {
     }
   });
 
+  test('cancel does not send an undefined save field to the permission API', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      const result = tool(tools, 'fleet_job_cancel');
+      await assert.rejects(
+        result.execute({ host: 'node', jobId: 'missing' }, context),
+        /unknown job/,
+      );
+      assert.equal(permissions.length, 1);
+      assert.equal(permissions[0].action, 'fleet.job.cancel');
+      assert.equal('save' in permissions[0], false);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('sync apply uses its dedicated permission', async () => {
     const { tools, cleanup, permissions } = await register(workspace);
     try {
