@@ -88,6 +88,7 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | WS-07 | A project without a workspace file derives a safe, isolated workspace | `test/unit/config.test.js` |
 | WS-08 | Two checkouts with the same basename get different replica ids | `test/unit/config.test.js` |
 | WS-09 | A real project derives its own workspace instead of borrowing the default | `test/unit/config.test.js` |
+| WS-10 | Saving a derived config keeps replica ids per checkout while settings stay shared | `test/unit/config.test.js` |
 | HOST-01 | A host's `allow` limits workspace, scratch and transfer operations | `test/unit/config.test.js` |
 | HOST-02 | Invalid host operation names are refused | `test/unit/config.test.js` |
 | HOST-03 | An idle supervisor of another version is replaced; a busy one defers | `test/unit/health.test.js` |

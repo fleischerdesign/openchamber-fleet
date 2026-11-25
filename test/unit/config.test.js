@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -142,7 +143,8 @@ describe('split host registry and project configuration', () => {
 
     assert.equal(loadConfig(first, { configDir }).hosts.mob.ssh, 'philipp@10.10.100.30');
     const secondConfig = loadConfig(second, { configDir });
-    assert.equal(secondConfig.name, 'second');
+    assert.equal(secondConfig.label, path.basename(second).toLowerCase());
+    assert.equal(secondConfig.source, 'project');
     assert.deepEqual(secondConfig.excludes, ['target/']);
   });
 
@@ -186,6 +188,34 @@ describe('split host registry and project configuration', () => {
     const right = loadConfig(second, { configDir });
     assert.equal(left.label, 'project');
     assert.equal(right.label, 'project');
+    assert.notEqual(left.name, right.name);
+    assert.notEqual(left.hosts.node.root, right.hosts.node.root);
+  });
+
+  test('saving a derived config keeps replica identity per checkout', () => {
+    const remote = 'https://example.invalid/team/shared.git';
+    const first = path.join(tmp, 'scoped', 'first');
+    const second = path.join(tmp, 'scoped', 'second');
+    fs.mkdirSync(first, { recursive: true });
+    fs.mkdirSync(second, { recursive: true });
+    for (const checkout of [first, second]) {
+      execFileSync('git', ['init', '-q', checkout]);
+      execFileSync('git', ['-C', checkout, 'remote', 'add', 'origin', remote]);
+    }
+    const configDir = fs.mkdtempSync(path.join(tmp, 'scoped-config-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { node: { ssh: 'u@h' } },
+    }));
+
+    const documents = loadConfigDocuments(first, { configDir });
+    const saved = saveConfigDocuments(first, documents.hosts, documents.project, { configDir });
+    assert.equal(saved.project.scope, 'checkout');
+
+    const left = loadConfig(first, { configDir });
+    const right = loadConfig(second, { configDir });
+    assert.equal(left.label, 'first');
+    assert.equal(right.label, 'second');
     assert.notEqual(left.name, right.name);
     assert.notEqual(left.hosts.node.root, right.hosts.node.root);
   });
@@ -694,7 +724,9 @@ describe('split host registry and project configuration', () => {
       excludes: ['.direnv/'],
     }, { configDir });
     assert.equal(saved.project.hosts[0], 'build');
-    assert.equal(loadConfig(workspace, { configDir }).hosts.build.root, '~/.cache/openchamber-fleet/' + empty.project.name);
+    assert.equal(saved.project.scope, 'checkout');
+    const loaded = loadConfig(workspace, { configDir });
+    assert.equal(loaded.hosts.build.root, '~/.cache/openchamber-fleet/' + loaded.name);
   });
 });
 

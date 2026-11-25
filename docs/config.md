@@ -55,7 +55,10 @@ directory and the global registry:
 - excludes are `.git`, `.direnv/` and `result*`.
 - the default replica root is `~/.cache/openchamber-fleet/<workspace-id>`.
 
-Saving the derived configuration from the panel or `fleet init` creates the explicit file.
+Saving the derived configuration from the panel writes `scope: "checkout"`: the settings file is
+still shared by clones, but each checkout computes its own replica id and default root. `fleet init`
+creates a name-scoped file for compatibility; use `scope: "checkout"` explicitly if that project is
+worked on from several checkouts.
 
 ```json
 {
@@ -73,7 +76,8 @@ Saving the derived configuration from the panel or `fleet init` creates the expl
 
 | Key | Type | Meaning |
 |---|---|---|
-| `name` | `^[a-z0-9][a-z0-9._-]*$` | workspace identity; also the default replica directory name |
+| `name` | `^[a-z0-9][a-z0-9._-]*$` | display/name identity; a name-scoped file also uses it as replica id |
+| `scope` | `name` \| `checkout` | optional; `checkout` keeps replica id per working tree while settings stay shared |
 | `hosts` | string[] | optional allowlist; omitted means every host in the registry |
 | `requires` | string[] | optional capabilities; a host must carry every listed tag |
 | `roots` | object | optional per-host replica-root overrides |
@@ -110,8 +114,9 @@ Unknown keys are an error.
 The project settings file is keyed by the repository's `remote.origin.url`, so clones and worktrees
 share the same local project settings. Without a git remote, the canonical workspace path is used.
 Moving a non-git directory therefore creates a new settings identity. A derived replica id also
-includes the canonical checkout path, so two checkouts never share a replica by accident. An
-explicit project file keeps its configured `name` and remains opt-in sharing.
+includes the canonical checkout path, so two checkouts never share a replica by accident. A file
+written from a derived configuration records `scope: "checkout"` and keeps that guarantee. An
+explicit `fleet init` file without scope uses its `name` and remains opt-in sharing.
 
 ## Default workspace for projectless chats
 
