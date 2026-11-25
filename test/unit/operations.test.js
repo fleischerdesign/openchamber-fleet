@@ -227,6 +227,31 @@ describe('read-only planning', () => {
   });
 });
 
+describe('exec ownership', () => {
+  test('a lost owner is refused before the remote start', async () => {
+    const calls = [];
+    const client = {
+      request: async (method) => {
+        calls.push(method);
+        if (method === 'workspace.open') return { generation: 0, manifestDigest: 'sha256:x', recovery: false };
+        if (method === 'workspace.lease') return { leaseId: 'lease-1', generation: 0 };
+        if (method === 'workspace.release') return { ok: true };
+        if (method === 'exec.start') return { jobId: 'unexpected', stdoutStream: 1, stderrStream: 2 };
+        throw new Error(`unexpected ${method}`);
+      },
+      close: () => {},
+    };
+    await assert.rejects(startExecCommand(client, {
+      workspaceId: 'ownership',
+      root: '/replica',
+      argv: ['true'],
+      assertOwnership: () => false,
+    }), (error) => error.code === 'CANCELLED');
+    assert.equal(calls.includes('exec.start'), false);
+    assert.equal(calls.includes('workspace.release'), true);
+  });
+});
+
 describe('exec failure cleanup', () => {
   test('a stream failure cancels the remote job before releasing the lease', async () => {
     const calls = [];

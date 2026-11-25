@@ -318,8 +318,14 @@ export class SupervisorCore {
         env: request.env,
         ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
         ...(request.expectedGeneration === undefined ? {} : { expectedGeneration: request.expectedGeneration }),
+        assertOwnership: () => !this.requireLock || this.store.ownsLock(this.supervisor.instance),
         onProgress: progress,
       });
+      if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+        await handle.cancel(2_000).catch(() => {});
+        handle.close();
+        return;
+      }
       const current = this.store.readJob(record.jobId) ?? record;
       if (this.stopping || isTerminal(current.state)) {
         await handle.cancel(2000).catch(() => {});
