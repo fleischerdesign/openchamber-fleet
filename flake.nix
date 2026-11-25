@@ -20,6 +20,11 @@
           version = "0.1.0";
           src = ./agent;
           cargoLock.lockFile = ./agent/Cargo.lock;
+          # The handshake fixture creates the installation identity in the state root.
+          # The Nix sandbox has no writable HOME, so give the test phase its own.
+          preCheck = ''
+            export FLEET_AGENT_STATE_DIR=$(mktemp -d)
+          '';
         };
       extensionVersion = (builtins.fromJSON (builtins.readFile ./extensions/openchamber/package.json)).version;
       mkExtension =
