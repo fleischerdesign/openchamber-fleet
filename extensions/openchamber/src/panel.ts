@@ -16,6 +16,7 @@ interface HostsFile {
 interface ProjectFile {
   version?: number;
   name: string;
+  scope?: 'name' | 'checkout';
   hosts?: string[];
   requires?: string[];
   roots?: Record<string, string>;

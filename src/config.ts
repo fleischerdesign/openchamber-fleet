@@ -17,7 +17,7 @@ const LEGACY_KEYS = new Set(['name', 'hosts', 'excludes', 'env', 'shell']);
 const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root', 'tags']);
 const HOST_REGISTRY_KEYS = new Set(['version', 'hosts']);
 const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags', 'allow']);
-const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'requires', 'roots', 'excludes', 'env', 'shell']);
+const PROJECT_KEYS = new Set(['version', 'name', 'scope', 'hosts', 'requires', 'roots', 'excludes', 'env', 'shell']);
 const DEFAULTS_KEYS = new Set(['version', 'directory']);
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh']);
 const CONFIG_VERSION = 1;
@@ -76,6 +76,8 @@ export interface HostRegistry {
 export interface ProjectConfigFile {
   readonly version: number;
   readonly name: string;
+  /** `checkout` keeps replica identity per working tree; `name` is the compatibility default. */
+  readonly scope?: 'name' | 'checkout';
   /** Optional allowlist. Absent means every host in the global registry. */
   readonly hosts?: string[];
   /** Optional capability filter; a host must carry every tag. */
@@ -382,8 +384,15 @@ export function saveConfigDocuments(
       hint: 'reload the panel and apply your changes again',
     });
   }
+  const hadProject = fs.existsSync(paths.projectFile);
   const registry = parseHostRegistry(hosts, paths.hostsFile);
-  const projectConfig = parseProjectConfig(project, paths.projectFile, defaultWorkspaceName(cwd));
+  const parsedProject = parseProjectConfig(project, paths.projectFile, defaultWorkspaceName(cwd));
+  const projectConfig: ProjectConfigFile = !hadProject
+    && Object.keys(registry.hosts).length > 0
+    && !isOpenChamberInternalDirectory(paths.workspaceRoot)
+    && parsedProject.scope === undefined
+    ? { ...parsedProject, scope: 'checkout' }
+    : parsedProject;
   validateProjectSelection(projectConfig, registry, paths);
   compileExcludes(projectConfig.excludes);
   assertNoCrossProjectRemoval(paths, registry);
@@ -618,10 +627,12 @@ function loadSplitConfig(paths: ConfigPaths): WorkspaceConfig {
       : derivedProjectConfig(paths);
   validateProjectSelection(project, registry, paths);
 
+  const scoped = project.scope === 'checkout';
+  const workspaceName = scoped ? derivedWorkspaceName(paths) : project.name;
   const hosts: Record<string, HostConfig> = {};
   for (const alias of selectedAliases(project, registry)) {
     const entry = registry.hosts[alias]!;
-    const root = project.roots[alias] ?? defaultRemoteRoot(project.name);
+    const root = project.roots[alias] ?? defaultRemoteRoot(workspaceName);
     hosts[alias] = {
       alias,
       ssh: entry.ssh,
@@ -633,8 +644,8 @@ function loadSplitConfig(paths: ConfigPaths): WorkspaceConfig {
   }
 
   return {
-    name: project.name,
-    label: explicit ? project.name : defaultWorkspaceName(paths.workspaceRoot),
+    name: workspaceName,
+    label: scoped || !explicit ? defaultWorkspaceName(paths.workspaceRoot) : project.name,
     dir: paths.workspaceRoot,
     file: paths.projectFile,
     hosts,
@@ -749,6 +760,10 @@ function parseProjectConfig(value: unknown, file: string, nameFallback: string):
   const name = top.name === undefined
     ? nameFallback
     : assertWorkspaceName(requireString(top, 'name', 'project'));
+  if (top.scope !== undefined && top.scope !== 'name' && top.scope !== 'checkout') {
+    throw new FleetError('config-invalid', `${file} has an invalid project.scope`);
+  }
+  const scope = top.scope === 'checkout' ? 'checkout' : undefined;
   const hosts = top.hosts === undefined
     ? undefined
     : requireStringArray(top.hosts, 'project.hosts');
@@ -768,6 +783,7 @@ function parseProjectConfig(value: unknown, file: string, nameFallback: string):
   return {
     version,
     name,
+    ...(scope === undefined ? {} : { scope }),
     ...(hosts === undefined ? {} : { hosts }),
     ...(requires.length === 0 ? {} : { requires }),
     roots,
