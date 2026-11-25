@@ -1795,11 +1795,22 @@ mod tests {
             String::from_utf8_lossy(streams.get(&stderr).unwrap()),
             "err"
         );
-        let status = reply(
+        let mut status = reply(
             &mut session,
             &json!({"jsonrpc":"2.0","id":"6","method":"exec.status","params":{"jobId":job}})
                 .to_string(),
         );
+        for _ in 0..200 {
+            if status["result"]["state"] != "running" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            status = reply(
+                &mut session,
+                &json!({"jsonrpc":"2.0","id":"7","method":"exec.status","params":{"jobId":job}})
+                    .to_string(),
+            );
+        }
         assert_eq!(status["result"]["state"], "failed");
         assert_eq!(status["result"]["exitCode"], 3);
     }
