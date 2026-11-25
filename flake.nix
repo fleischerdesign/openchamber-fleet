@@ -37,9 +37,9 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.6.1";
+          version = "0.6.2";
           src = self;
-          npmDepsHash = "sha256-WX7JpYsSWkjykUPwLjYyJTZA66oJL/R2dsLqDD00PQo=";
+          npmDepsHash = "sha256-JEZRRRzymCgk/lhRMhXs0cIiEhb5Jy2l9DHubO3BCO0=";
           buildPhase = ''
             npm run build
           '';
@@ -84,10 +84,10 @@
         extension = mkExtension pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.6.1";
+          version = "0.6.2";
           src = self;
           doCheck = true;
-          npmDepsHash = "sha256-WX7JpYsSWkjykUPwLjYyJTZA66oJL/R2dsLqDD00PQo=";
+          npmDepsHash = "sha256-JEZRRRzymCgk/lhRMhXs0cIiEhb5Jy2l9DHubO3BCO0=";
           nativeBuildInputs = with pkgs; [
             openssh
             git

@@ -68,6 +68,29 @@ async function request(service, method, route, body) {
 }
 
 describe('Fleet service configuration route', () => {
+  test('status view distinguishes a chat location from an unconfigured project', async () => {
+    const service = await startService();
+    const chat = path.join(tmp, '.config', 'openchamber', 'chats', 'session-1');
+    const project = path.join(tmp, 'unconfigured-project');
+    fs.mkdirSync(chat, { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    try {
+      const chatView = await request(service, 'GET', `/status-view?directory=${encodeURIComponent(chat)}`);
+      assert.equal(chatView.status, 200);
+      assert.equal(chatView.body.rows[0].tone, 'muted');
+      assert.match(chatView.body.rows[0].text, /No project selected/);
+      assert.doesNotMatch(chatView.body.rows[0].text, /fleet init/);
+
+      const projectView = await request(service, 'GET', `/status-view?directory=${encodeURIComponent(project)}`);
+      assert.equal(projectView.status, 200);
+      assert.equal(projectView.body.rows[0].tone, 'warning');
+      assert.match(projectView.body.rows[0].text, /Fleet is not configured/);
+      assert.match(projectView.body.rows[0].text, /legacy fleet\.json is not required/);
+    } finally {
+      service.child.kill();
+    }
+  });
+
   test('reads and saves the split documents outside the project', async () => {
     const service = await startService();
     const workspace = fs.mkdtempSync(path.join(tmp, 'workspace-'));

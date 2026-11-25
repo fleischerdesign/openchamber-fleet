@@ -38,7 +38,9 @@ Use `fleet init --host workstation --ssh philipp@10.10.100.20` or edit both docu
 extension panel. Nothing is written to the repository. The panel refuses a stale save and a host
 removal that another project still selects. The panel is the configuration and observability surface;
 the agent runs work through the tools. `fleet_run` synchronizes first when needed, so there is no
-user-facing sync toggle.
+user-facing sync toggle. A chat without a project uses OpenChamber's internal chat-data directory; the
+status section treats that as “no project selected” instead of asking for Fleet configuration. A real
+unconfigured project gets a short hint that the legacy `fleet.json` is not required.
 
 ## Agent workflow
 

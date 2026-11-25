@@ -131,6 +131,15 @@ function agentPath(): string {
   return process.env.FLEET_AGENT_PATH ?? 'fleet-agent';
 }
 
+/** OpenChamber uses its own chat-data directory as a session location before a project is picked. */
+function isOpenChamberChatDirectory(directory: string): boolean {
+  const parts = path.resolve(directory).split(path.sep);
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    if (parts[index] === 'openchamber' && parts[index + 1] === 'chats') return true;
+  }
+  return false;
+}
+
 async function refresh(directory: string): Promise<GuestStatusView> {
   lastDirectory = directory;
   let config: WorkspaceConfig;
@@ -138,8 +147,15 @@ async function refresh(directory: string): Promise<GuestStatusView> {
     config = loadConfig(directory);
   } catch (error) {
     const fields = errorFields(error);
+    const missing = fields.code === 'config-missing';
+    const internal = missing && isOpenChamberChatDirectory(directory);
+    const text = missing
+      ? internal
+        ? 'No project selected. Fleet is available in a configured project workspace.'
+        : 'Fleet is not configured for this project. Use the Fleet panel or run `fleet init`; a legacy fleet.json is not required.'
+      : `${fields.code}: ${fields.message}`;
     const view: GuestStatusView = {
-      rows: [{ kind: 'note', id: 'config', text: `${fields.code}: ${fields.message}`, tone: 'warning' }],
+      rows: [{ kind: 'note', id: 'config', text, tone: internal ? 'muted' : 'warning' }],
     };
     cache.set(directory, { at: Date.now(), view });
     return view;
