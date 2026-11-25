@@ -94,6 +94,19 @@ installed binary per node. That is the trade: one contract instead of three.
 - A connection loss cancels the jobs of that connection and records the outcome; an agent crash
   leaves `unknown`.
 
+### Detached background jobs
+
+The OpenCode plugin's background jobs can outlive an OpenCode runtime restart without turning Fleet
+into a remote daemon. The extension service launches a local supervisor with the app runtime; the
+supervisor owns the SSH connection and writes atomic job records under
+`~/.local/state/openchamber-fleet`. The plugin writes start/cancel requests and reads records through
+the same directory. There is no listener and no new credential.
+
+The agent still spawns per connection. Its new teardown rule is that closing the stdio session
+terminates the job's process group, so a dead supervisor cannot leave an orphan on the node. The
+supervisor's own teardown cancels active jobs first; a crash is reported as `interrupted`. The
+design and its failure table are in ADR-0007.
+
 ## 8. Errors and recovery
 
 Stable codes (`protocol/errors.json`) and a `retryable` hint. Mutations are not replayed

@@ -106,6 +106,16 @@ pub enum Action {
     Close(Option<String>),
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The agent is a per-connection process. When its stdio session ends, a process
+        // group it started must not outlive the connection and leak on the node.
+        for job in self.jobs.values() {
+            job.terminate_now();
+        }
+    }
+}
+
 impl Session {
     pub fn new() -> io::Result<Self> {
         Ok(Self {

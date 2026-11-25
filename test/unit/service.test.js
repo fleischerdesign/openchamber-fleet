@@ -23,6 +23,8 @@ async function startService() {
   const token = 'service-test-token';
   const configDir = fs.mkdtempSync(path.join(tmp, 'config-'));
   const dataDir = fs.mkdtempSync(path.join(tmp, 'data-'));
+  const stateDir = fs.mkdtempSync(path.join(tmp, 'state-'));
+  const temp = fs.mkdtempSync(path.join(tmp, 'tmp-'));
   const child = spawn(process.execPath, [path.resolve('extensions/openchamber/service/main.js')], {
     env: {
       ...process.env,
@@ -30,6 +32,9 @@ async function startService() {
       OPENCHAMBER_SERVICE_TOKEN: token,
       OPENCHAMBER_SERVICE_DATA_DIR: dataDir,
       FLEET_CONFIG_DIR: configDir,
+      FLEET_STATE_DIR: stateDir,
+      FLEET_SUPERVISOR: 'off',
+      TMPDIR: temp,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

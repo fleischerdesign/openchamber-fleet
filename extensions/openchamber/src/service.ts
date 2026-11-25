@@ -1,5 +1,7 @@
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   compileExcludes,
   loadConfig,
@@ -8,8 +10,15 @@ import {
 } from '../../../src/config.js';
 import type { HostConfig, WorkspaceConfig } from '../../../src/config.js';
 import { FleetError, friendlyErrorMessage } from '../../../src/errors.js';
+import {
+  configuredStateRoot,
+  removeServiceHeartbeat,
+  writeRuntimePointer,
+  writeServiceHeartbeat,
+} from '../../../src/jobs/paths.js';
 import { replicaState } from '../../../src/status.js';
 import { AgentError } from '../../../src/v1/errors.js';
+import { ensureSupervisor, type SupervisorState } from './supervisor-launch.js';
 import {
   connectSsh,
   inspectRecovery,
@@ -285,3 +294,53 @@ server.listen(port, '127.0.0.1');
 setInterval(() => {
   if (lastDirectory) void refresh(lastDirectory).catch(() => {});
 }, 30_000).unref();
+
+function packageVersion(): string {
+  try {
+    const value = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as { version?: unknown };
+    return typeof value.version === 'string' ? value.version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const stateRoot = configuredStateRoot();
+const version = packageVersion();
+let lastSupervisor: SupervisorState | null = null;
+const logSupervisor = (message: string): void => {
+  console.warn(`openchamber-fleet supervisor: ${message}`);
+};
+const ensure = (): void => {
+  void ensureSupervisor({ stateRoot, version, log: logSupervisor }).then((state) => {
+    if (state === lastSupervisor) return;
+    lastSupervisor = state;
+    if (state === 'unavailable') logSupervisor('unavailable; background jobs stay bound to the OpenCode runtime');
+    else if (state !== 'disabled') console.log(`openchamber-fleet supervisor: ${state}`);
+  }).catch((error: unknown) => {
+    logSupervisor(error instanceof Error ? error.message : String(error));
+  });
+};
+
+try {
+  writeRuntimePointer(stateRoot, process.pid);
+  writeServiceHeartbeat();
+} catch (error) {
+  logSupervisor(`could not write the runtime pointer: ${error instanceof Error ? error.message : String(error)}`);
+}
+ensure();
+setInterval(() => {
+  try {
+    writeServiceHeartbeat();
+  } catch (error) {
+    logSupervisor(`could not write the service heartbeat: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  ensure();
+}, 5000).unref();
+
+const shutdown = (): void => {
+  removeServiceHeartbeat();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

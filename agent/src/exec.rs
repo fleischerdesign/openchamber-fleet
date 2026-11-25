@@ -91,6 +91,15 @@ pub struct JobRecord {
     pub command: String,
 }
 
+impl JobRecord {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled | JobState::Unknown
+        )
+    }
+}
+
 pub struct Job {
     pub record: Arc<Mutex<JobRecord>>,
     pub stdout: Arc<Buffer>,
@@ -129,6 +138,30 @@ impl Job {
 
     pub fn status(&self) -> JobRecord {
         self.record.lock().unwrap().clone()
+    }
+
+    /// Best-effort synchronous kill for process teardown. Unlike `cancel`, this does not
+    /// spawn a thread: the agent is exiting and the remote work must not outlive its session.
+    pub fn terminate_now(&self) {
+        let running = self
+            .record
+            .lock()
+            .map(|record| !record.is_terminal())
+            .unwrap_or(false);
+        if !running {
+            return;
+        }
+        let pid = self
+            .child
+            .lock()
+            .map(|child| child.id() as i32)
+            .unwrap_or(0);
+        if pid <= 0 {
+            return;
+        }
+        signal_group(pid, libc::SIGTERM);
+        thread::sleep(Duration::from_millis(100));
+        signal_group(pid, libc::SIGKILL);
     }
 }
 
@@ -401,6 +434,22 @@ mod tests {
         job.cancel(200);
         let record = wait_for(&job, 5000);
         assert_eq!(record.state, JobState::Cancelled);
+    }
+
+    #[test]
+    fn terminate_now_kills_the_process_group() {
+        let job = spawn(request(vec!["sh", "-c", "sleep 30"])).unwrap();
+        let pid = job.status().pid.unwrap();
+        thread::sleep(Duration::from_millis(50));
+        job.terminate_now();
+        let record = wait_for(&job, 5000);
+        assert!(matches!(
+            record.state,
+            JobState::Cancelled | JobState::Failed
+        ));
+        thread::sleep(Duration::from_millis(100));
+        let alive = unsafe { libc::kill(-pid, 0) } == 0;
+        assert!(!alive, "process group {pid} survived terminate_now");
     }
 
     #[test]

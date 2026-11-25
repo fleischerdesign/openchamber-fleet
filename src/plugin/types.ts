@@ -61,10 +61,13 @@ export interface StoredJob {
   host: string;
   argv: string[];
   state: string;
+  supervised?: boolean;
+  remoteJobId?: string;
   exitCode?: number | null;
   signal?: number | null;
   notificationID: string;
   startedAt: number;
+  updatedAt?: number;
   endedAt?: number;
   stdoutBytes: number;
   stderrBytes: number;

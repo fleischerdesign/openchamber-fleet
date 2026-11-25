@@ -1,6 +1,6 @@
 {
   "name": "@fleischerdesign/openchamber-fleet-extension",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "openchamber": {
@@ -82,6 +82,8 @@
             "status": {
               "value": "{output.stateLabel}",
               "tones": {
+                "Queued": "info",
+                "Starting": "info",
                 "Running": "info",
                 "Succeeded": "success",
                 "Failed": "error",
@@ -109,6 +111,8 @@
             "status": {
               "value": "{output.stateLabel}",
               "tones": {
+                "Queued": "info",
+                "Starting": "info",
                 "Running": "info",
                 "Succeeded": "success",
                 "Failed": "error",
@@ -139,7 +143,7 @@
           "icon": "time",
           "title": "Fleet jobs",
           "output": "table",
-          "columns": ["host", "commandLabel", "stateLabel", "exitLabel"]
+          "columns": ["host", "commandLabel", "stateLabel", "runLabel", "exitLabel"]
         },
         {
           "match": "fleet_fetch",
@@ -175,6 +179,8 @@
             "status": {
               "value": "{output.stateLabel}",
               "tones": {
+                "Queued": "info",
+                "Starting": "info",
                 "Running": "info",
                 "Cancelling": "warning",
                 "Succeeded": "success",
@@ -185,6 +191,7 @@
               }
             },
             "fields": [
+              { "label": "Run", "value": "{output.runLabel}" },
               { "label": "Exit", "value": "{output.exitLabel}" },
               { "label": "stdout", "value": "{output.stdoutBytes} bytes" },
               { "label": "stderr", "value": "{output.stderrBytes} bytes" }
@@ -204,6 +211,8 @@
             "status": {
               "value": "{output.stateLabel}",
               "tones": {
+                "Queued": "info",
+                "Starting": "info",
                 "Running": "info",
                 "Cancelling": "warning",
                 "Cancelled": "warning",
@@ -214,6 +223,7 @@
               }
             },
             "fields": [
+              { "label": "Run", "value": "{output.runLabel}" },
               { "label": "Exit", "value": "{output.exitLabel}" }
             ]
           }

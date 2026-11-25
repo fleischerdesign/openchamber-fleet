@@ -55,10 +55,24 @@ user-facing sync toggle.
 its turn. When the job reaches a terminal state, the plugin uses OpenCode's official
 `session.synthetic` API with `resume: true` to wake the same session. `fleet_jobs`,
 `fleet_job_status` and `fleet_job_cancel` list, inspect and cancel those jobs. A terminal job whose
-notification was not delivered is re-notified once after a plugin restart; a job that was still
-running is reported as interrupted.
+notification was not delivered is re-notified once after a plugin restart.
 
-Background jobs are tied to the running OpenCode plugin runtime. An OpenCode restart, plugin unload, or location eviction interrupts them; the plugin reports that honestly from its durable job record. Very long jobs should run with a project `experimental.location_idle_timeout` large enough for the expected duration, or `false`.
+The extension service launches a **detached local supervisor** with the app runtime. It owns the
+SSH connection and writes atomic records under `~/.local/state/openchamber-fleet`; the plugin writes
+start and cancel requests and reads the records. An OpenCode runtime restart, plugin unload or
+location eviction therefore leaves the job running, and the new plugin instance resumes the session
+when it finishes. The supervisor has no listener and no new credential. It uses the app runtime
+(Bun or Electron-as-Node), so no system `node` is required.
+
+If the service is not approved or not running, background jobs fall back to the runtime-bound
+implementation and report `supervised: false`; there, an OpenCode restart interrupts the job. Very
+long runtime-bound jobs need a project `experimental.location_idle_timeout` large enough for the
+expected duration, or `false`.
+
+An OpenChamber service stop or machine reboot removes the supervisor; the next plugin run marks the
+job `interrupted` and the remote agent kills its process group when the SSH session closes. The
+state directory is `0700` and its files are `0600`; request files carry environment values only
+until the supervisor claims them. `FLEET_SUPERVISOR=off` disables the detached path explicitly.
 
 ## Security
 

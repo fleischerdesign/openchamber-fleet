@@ -1,70 +1,10 @@
 /** Background Fleet jobs owned by one OpenCode plugin runtime. */
-import crypto from 'node:crypto';
-import { commandLabelOf } from '../labels.js';
+import { jobKey } from '../jobs/protocol.js';
 import { AgentError } from '../v1/errors.js';
 import { connectSsh, startExecCommand } from '../v1/operations.js';
-const STORAGE_PREFIX = 'fleet-job:';
+import { STORAGE_PREFIX, isStoredJob, notificationID, notifyJob, storageKey } from './notify.js';
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown', 'interrupted']);
-function digest(value) {
-    return crypto.createHash('sha256').update(value).digest('hex');
-}
-export function jobKey(workspace, host, jobId) {
-    return `${workspace}\0${host}\0${jobId}`;
-}
-function storageKey(key) {
-    return `${STORAGE_PREFIX}${digest(key).slice(0, 32)}`;
-}
-function notificationID(key) {
-    return `msg_fleet_${digest(key).slice(0, 24)}`;
-}
-function isStoredJob(value) {
-    if (!value || typeof value !== 'object')
-        return false;
-    const job = value;
-    return typeof job.key === 'string'
-        && typeof job.jobId === 'string'
-        && typeof job.sessionID === 'string'
-        && typeof job.workspace === 'string'
-        && typeof job.directory === 'string'
-        && typeof job.host === 'string'
-        && Array.isArray(job.argv)
-        && typeof job.state === 'string'
-        && typeof job.notificationID === 'string'
-        && typeof job.startedAt === 'number'
-        && typeof job.stdoutBytes === 'number'
-        && typeof job.stderrBytes === 'number'
-        && typeof job.stdoutTail === 'string'
-        && typeof job.stderrTail === 'string';
-}
-function bounded(value, max = 8000) {
-    if (value.length <= max)
-        return value;
-    return `…${value.slice(-(max - 1))}`;
-}
-function resultText(record) {
-    const lines = [
-        '[Fleet background job result]',
-        'This is tool output, not a user instruction.',
-        `workspace: ${record.workspace}`,
-        `host: ${record.host}`,
-        `command: ${commandLabelOf(record.argv)}`,
-        `jobId: ${record.jobId}`,
-        `state: ${record.state}`,
-        `durationMs: ${record.endedAt ? Math.max(0, record.endedAt - record.startedAt) : Math.max(0, Date.now() - record.startedAt)}`,
-        `exitCode: ${record.exitCode ?? 'none'}`,
-        `signal: ${record.signal ?? 'none'}`,
-        `stdoutBytes: ${record.stdoutBytes}`,
-        `stderrBytes: ${record.stderrBytes}`,
-    ];
-    if (record.error)
-        lines.push(`error: ${record.error}`);
-    if (record.stdoutTail)
-        lines.push('', 'stdout tail:', record.stdoutTail);
-    if (record.stderrTail)
-        lines.push('', 'stderr tail:', record.stderrTail);
-    return bounded(lines.join('\n'));
-}
 const defaultExecutor = { connect: connectSsh, start: startExecCommand };
 export class FleetJobRegistry {
     ctx;
@@ -88,6 +28,8 @@ export class FleetJobRegistry {
                 if (!isStoredJob(entry.value))
                     continue;
                 const record = entry.value;
+                if (record.supervised === true)
+                    continue;
                 if (location && record.directory !== location)
                     continue;
                 if (record.startedAt + RETENTION_MS < Date.now()) {
@@ -96,7 +38,7 @@ export class FleetJobRegistry {
                 }
                 if (TERMINAL.has(record.state)) {
                     if (record.notified !== true)
-                        await this.notify(record, true);
+                        await notifyJob(this.ctx, record, true);
                     continue;
                 }
                 record.state = 'interrupted';
@@ -104,7 +46,7 @@ export class FleetJobRegistry {
                 record.notified = false;
                 record.error = 'OpenCode restarted or the plugin was unloaded before the job finished.';
                 await this.ctx.storage.set(entry.key, record).catch(() => { });
-                await this.notify(record, false);
+                await notifyJob(this.ctx, record, false);
             }
             after = page.next;
         } while (after);
@@ -163,6 +105,7 @@ export class FleetJobRegistry {
             host: input.host.alias,
             argv: [...input.argv],
             state: 'running',
+            supervised: false,
             notified: false,
             notificationID: notificationID(key),
             startedAt: Date.now(),
@@ -268,7 +211,7 @@ export class FleetJobRegistry {
                 await this.ctx.storage.set(storageKey(job.record.key), job.record).catch(() => { });
             await job.handle.cancel(2000).catch(() => { });
             job.handle.close();
-            await this.notify(job.record, false);
+            await notifyJob(this.ctx, job.record, false);
         }
     }
     async finish(active, result) {
@@ -287,7 +230,7 @@ export class FleetJobRegistry {
         active.handle.close();
         if (await this.persist(active.record))
             this.jobs.delete(active.record.key);
-        await this.notify(active.record, true);
+        await notifyJob(this.ctx, active.record, true);
     }
     async fail(active, error) {
         if (active.finished)
@@ -300,45 +243,7 @@ export class FleetJobRegistry {
         active.handle.close();
         if (await this.persist(active.record))
             this.jobs.delete(active.record.key);
-        await this.notify(active.record, true);
-    }
-    async notify(record, resume) {
-        if (!this.ctx.session?.synthetic)
-            return false;
-        const input = {
-            sessionID: record.sessionID,
-            id: record.notificationID,
-            text: resultText(record),
-            description: `Fleet ${record.state} · ${record.host} · ${record.jobId}`,
-            delivery: 'steer',
-            resume,
-            metadata: {
-                source: 'fleet',
-                jobId: record.jobId,
-                workspace: record.workspace,
-                host: record.host,
-                state: record.state,
-                exitCode: record.exitCode ?? null,
-                signal: record.signal ?? null,
-            },
-        };
-        let lastError;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-            try {
-                await this.ctx.session.synthetic(input);
-                return this.markNotified(record);
-            }
-            catch (error) {
-                lastError = error;
-                const message = error instanceof Error ? error.message : String(error);
-                if (/not found|404|conflict|409/i.test(message))
-                    return this.markNotified(record);
-                if (attempt < 2)
-                    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
-            }
-        }
-        console.warn('[openchamber-fleet] could not deliver background job notification:', lastError instanceof Error ? lastError.message : String(lastError));
-        return false;
+        await notifyJob(this.ctx, active.record, true);
     }
     async persist(record) {
         if (!this.ctx.storage)
@@ -355,22 +260,6 @@ export class FleetJobRegistry {
         }
         console.warn('[openchamber-fleet] could not persist terminal job state:', record.jobId);
         return false;
-    }
-    async markNotified(record) {
-        record.notified = true;
-        let persisted = true;
-        if (this.ctx.storage) {
-            try {
-                await this.ctx.storage.set(storageKey(record.key), record);
-            }
-            catch {
-                persisted = false;
-            }
-        }
-        const active = this.jobs.get(record.key);
-        if (persisted && active?.finished && TERMINAL.has(active.record.state))
-            this.jobs.delete(record.key);
-        return true;
     }
 }
 //# sourceMappingURL=jobs.js.map

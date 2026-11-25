@@ -1,6 +1,8 @@
 /** Human-readable labels shared by the plugin, tools and job notifications. */
 
 export const STATE_LABELS: Record<string, string> = {
+  queued: 'Queued',
+  starting: 'Starting',
   running: 'Running',
   'cancel-requested': 'Cancelling',
   succeeded: 'Succeeded',
@@ -18,6 +20,8 @@ export function stateLabelOf(state: string): string {
 export function exitLabelOf(exitCode: number | null, signal: number | null, state: string): string {
   if (typeof exitCode === 'number') return `Exit code ${exitCode}`;
   if (typeof signal === 'number') return `Signal ${signal}`;
+  if (state === 'queued') return 'Waiting to start';
+  if (state === 'starting') return 'Starting';
   if (state === 'running' || state === 'cancel-requested') return 'Still running';
   if (state === 'sync-required') return 'Not run';
   return 'No exit code';

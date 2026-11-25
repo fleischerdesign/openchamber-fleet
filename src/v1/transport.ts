@@ -57,6 +57,15 @@ export function spawnTransport(command: string, args: readonly string[], env?: N
   };
 }
 
-export function sshTransport(host: SshTarget, agentPath: string): AgentTransport {
-  return spawnTransport(process.env.FLEET_SSH_PATH ?? 'ssh', sshArgs(host, agentPath));
+export function sshTransport(
+  host: SshTarget,
+  agentPath: string,
+  env?: Record<string, string>,
+  sshPath?: string,
+): AgentTransport {
+  return spawnTransport(
+    sshPath ?? process.env.FLEET_SSH_PATH ?? 'ssh',
+    sshArgs(host, agentPath),
+    env === undefined ? process.env : { ...process.env, ...env },
+  );
 }

@@ -53,6 +53,23 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 - Job records and the transaction journal are written before the effect and updated after it.
   `unknown` is recorded, never rewritten to a guess.
 
+## Detached jobs
+
+- The OpenChamber extension service launches one local supervisor per user with the app runtime. It
+  is a child process with a minimal environment: `HOME`, `PATH`, the temp directory, the SSH agent
+  socket and Fleet's own paths. The service token and the host's other secrets are not passed.
+- The supervisor and the plugin exchange atomic JSON files under
+  `~/.local/state/openchamber-fleet`; there is no listener, port or new token. Directories are
+  `0700`, files `0600`, and the supervisor log excludes argv and environment values.
+- A start request contains the environment the agent approved for that one job. It is deleted as
+  soon as the supervisor claims it; the durable job record keeps the argv and output tails, never the
+  environment.
+- The `fleet.run` / `fleet.exec` / `shell` approvals are evaluated before the request is written.
+  The supervisor executes only that approved argv; it is not a second policy engine.
+- A supervisor crash, an OpenChamber service stop or a machine reboot is reported as `interrupted`.
+  The remote agent kills its process group when the SSH session closes, so the interruption does not
+  leave an orphan. A detached job does not survive a machine reboot.
+
 ## What is not protected
 
 - A malicious node can lie about what it ran and what it produced. SHA-256 proves byte identity,
@@ -66,11 +83,13 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   overrides must be declared in the project configuration. `fleet_fetch` canonicalizes the final local path and
   evaluates it under `edit` and `external_directory`; `fleet_sync` apply and `fleet_recover` use
   dedicated actions. Planning never adopts a directory.
-- Background jobs live in the OpenCode plugin runtime. A restart, plugin unload or location eviction
-  interrupts them and is reported to the session; no hidden local fallback is attempted.
+- The detached supervisor runs with the user's full privileges, like the extension service and the
+  OpenCode plugin. It is inside the same trust boundary, not a sandbox.
+- Without the extension service (the npm-only plugin path), background jobs stay in the OpenCode
+  plugin runtime and a restart interrupts them; the tool reports `supervised: false`.
 
 ## Reporting
 
-No runtime service, no listener, no credential store. A vulnerability is a way to execute something
-the caller did not ask for, read outside the workspace, escape the root guard or exhaust the agent.
-Report privately to the maintainer.
+No remote runtime service, no listener, no credential store. A vulnerability is a way to execute
+something the caller did not ask for, read outside the workspace, escape the root guard or exhaust
+the agent. Report privately to the maintainer.

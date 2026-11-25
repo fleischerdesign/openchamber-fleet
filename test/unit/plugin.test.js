@@ -12,10 +12,13 @@ fs.writeFileSync(path.join(workspace, 'fleet.json'), JSON.stringify({
   excludes: [],
 }));
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-plugin-config-'));
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-plugin-state-'));
 process.env.FLEET_CONFIG_DIR = configDir;
+process.env.FLEET_STATE_DIR = stateDir;
 after(() => {
   fs.rmSync(workspace, { recursive: true, force: true });
   fs.rmSync(configDir, { recursive: true, force: true });
+  fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
 async function register(sessionDirectory) {

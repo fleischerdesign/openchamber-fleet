@@ -15,7 +15,22 @@ export class AgentClient {
         this.transport = transport;
         this.info = info;
         this.transport.stdout.on('data', (chunk) => this.onData(chunk));
-        this.transport.stdout.on('end', () => this.failAll(new AgentError('INVALID_FRAME', 'agent closed the connection')));
+        this.transport.stdout.on('end', () => {
+            if (this.closed)
+                return;
+            this.closed = true;
+            this.failAll(new AgentError('INVALID_FRAME', 'agent closed the connection'));
+        });
+        this.transport.stdin.on('error', (error) => {
+            if (this.closed)
+                return;
+            this.closed = true;
+            this.failAll(new AgentError('INVALID_FRAME', `agent connection closed: ${error.message}`));
+            try {
+                this.transport.kill();
+            }
+            catch { /* already gone */ }
+        });
         this.transport.stderr.on('data', (chunk) => { if (process.env.FLEET_DEBUG)
             process.stderr.write(chunk); });
     }
@@ -28,7 +43,7 @@ export class AgentClient {
         });
         const result = (await provisional.request('session.initialize', {
             protocol: { major: 1, minor: 0 },
-            client: { name: 'fleet', version: '0.5.0', instance: `${process.pid}-${Date.now()}` },
+            client: { name: 'fleet', version: '0.6.0', instance: `${process.pid}-${Date.now()}` },
             capabilities: options.capabilities ?? [],
         }, options.timeoutMs ?? 15_000));
         if (!result?.protocol || result.protocol.major !== 1) {
@@ -62,8 +77,15 @@ export class AgentClient {
                 this.streams.delete(streamId);
                 reject(new AgentError('OPERATION_UNKNOWN', `stream ${streamId} did not end`, true));
             }, options.timeoutMs ?? 120_000);
-            this.streams.set(streamId, { chunks: [], bytes: 0, nextSeq: 0n, onData: options.onData, resolve: (value) => { clearTimeout(timer); resolve(value); }, reject });
-            void this.credit(streamId, options.initialCredit ?? DEFAULT_CREDIT);
+            this.streams.set(streamId, {
+                chunks: [],
+                bytes: 0,
+                nextSeq: 0n,
+                onData: options.onData,
+                resolve: (value) => { clearTimeout(timer); resolve(value); },
+                reject: (error) => { clearTimeout(timer); reject(error); },
+            });
+            void this.credit(streamId, options.initialCredit ?? DEFAULT_CREDIT).catch(() => { });
         });
     }
     async credit(streamId, bytes) {
