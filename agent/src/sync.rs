@@ -155,6 +155,28 @@ pub fn compute(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, Str
         if policy.is_excluded(&entry.path, entry.is_dir()) {
             continue;
         }
+        // The manifest is not the filesystem. A local directory that Fleet
+        // never recorded must not be replaced recursively by a file/symlink.
+        let actual = ws.root.join(&entry.path);
+        match fs::symlink_metadata(&actual) {
+            Ok(metadata) => {
+                let actual_dir = metadata.is_dir() && !metadata.file_type().is_symlink();
+                if !entry.is_dir() && actual_dir {
+                    return Err(format!(
+                        "UNSUPPORTED_METADATA {} would replace a real directory that is not in the managed manifest",
+                        entry.path
+                    ));
+                }
+                if entry.is_dir() && (!metadata.is_dir() || metadata.file_type().is_symlink()) {
+                    return Err(format!(
+                        "UNSUPPORTED_METADATA {} changes to a directory over an existing non-directory",
+                        entry.path
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_message(error)),
+        }
         seen.insert(entry.path.as_str());
         match old.get(entry.path.as_str()) {
             None => {
@@ -407,10 +429,12 @@ fn apply(
                 if entry.is_symlink() {
                     if let Ok(metadata) = fs::symlink_metadata(&target) {
                         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                            fs::remove_dir_all(&target).map_err(io_message)?;
-                        } else {
-                            fs::remove_file(&target).map_err(io_message)?;
+                            return Err(format!(
+                                "UNSUPPORTED_METADATA {} refuses to replace a real directory",
+                                entry.path
+                            ));
                         }
+                        fs::remove_file(&target).map_err(io_message)?;
                     }
                     let link = entry.link.clone().unwrap_or_default();
                     std::os::unix::fs::symlink(&link, &target).map_err(io_message)?;
@@ -662,6 +686,34 @@ mod tests {
             Ok(_) => panic!("directory-to-symlink must be refused"),
             Err(error) => assert!(error.contains("UNSUPPORTED_METADATA"), "{error}"),
         }
+    }
+
+    #[test]
+    fn an_unmanaged_real_directory_is_never_replaced() {
+        let (root, state) = temp_workspace("real-dir");
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::write(root.join("real/keep.txt"), "keep").unwrap();
+        let ws = workspace(&root, &state);
+        let mut txn = begin(&ws, Policy::default(), 0, "t", "lease").unwrap();
+        add_entries(
+            &mut txn,
+            vec![Entry {
+                path: "real".into(),
+                kind: "symlink".into(),
+                mode: "0777".into(),
+                size: 0,
+                mtime_ms: 0,
+                digest: None,
+                link: Some("target".into()),
+            }],
+            &ws,
+        )
+        .unwrap();
+        match plan(&mut txn, &ws) {
+            Ok(_) => panic!("an unmanaged directory must not be replaced"),
+            Err(error) => assert!(error.contains("real directory"), "{error}"),
+        }
+        assert!(root.join("real/keep.txt").exists());
     }
 
     #[test]

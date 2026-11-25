@@ -62,7 +62,8 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   workspaces. A journal without a live owner needs an explicit recovery lease. `ttlMs` is advisory:
   a lease lives with its connection, so a long accepted job cannot lose its fence halfway through.
   Metadata reads and the short journal/manifest publish sections share a registry lock, so a reader
-  never sees a generation from one commit with a manifest from another.
+  never sees a generation from one commit with a manifest from another. Recovery publishes
+  `baseGeneration + 1`, so a crash after the state rename replays idempotently.
 - A read-only plan is an in-memory preview. It creates no journal, so a cancelled preview cannot
   leave `RECOVERY` behind.
 - Job records and the transaction journal are written before the effect and updated after it.
@@ -109,6 +110,8 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   workspace root it was given; "uploads only into scratch" follows from the controller choosing the
   scratch root, not from a second agent-side identity. A legacy project file cannot silently bind an
   existing registry alias to another SSH target; normal loading refuses the conflict.
+- The agent refuses a non-directory entry over a real directory that is not in the managed
+  manifest, before any recursive delete; an unexpected type is `UNSUPPORTED_METADATA`.
 - Transfer permissions bind the canonical path plus the opened source `dev/ino` (upload) or the
   destination parent `dev/ino` (download). A download refuses a missing destination parent and
   re-checks the parent immediately before writing. Node exposes no `openat`; a path component

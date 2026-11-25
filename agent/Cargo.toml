@@ -1,6 +1,6 @@
 [package]
 name = "fleet-agent"
-version = "0.11.3"
+version = "0.11.4"
 edition = "2021"
 license = "MIT"
 description = "Node-side agent for openchamber-fleet: a process spoken to over SSH stdio."

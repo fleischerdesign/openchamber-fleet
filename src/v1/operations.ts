@@ -637,6 +637,7 @@ export async function recoverWorkspace(
     operationId: operation,
     ttlMs: 600_000,
     recovery: true,
+    txnId: inspected.txnId,
   })) as { leaseId: string };
   const lease = leaseInfo.leaseId;
   try {
@@ -1168,7 +1169,16 @@ export function canonicalArtifactTarget(dest: string, artifact: string): string 
 
 export async function fetchArtifact(client: AgentClient, options: FetchOptions): Promise<FetchResult> {
   throwIfAborted(options.signal);
-  const target = canonicalTransferTarget(path.join(options.dest, path.basename(options.artifact)));
+  const target = canonicalTransferTarget(path.join(options.dest, path.basename(options.artifact)), false);
+  let parent: fs.Stats;
+  try {
+    parent = fs.lstatSync(path.dirname(target));
+  } catch {
+    throw new AgentError('INVALID_REQUEST', `artifact destination parent ${path.dirname(target)} does not exist`);
+  }
+  if (!parent.isDirectory() || parent.isSymbolicLink()) {
+    throw new AgentError('PATH_UNSAFE', `artifact destination parent ${path.dirname(target)} is not a real directory`);
+  }
   if (options.expectedTarget !== undefined && target !== options.expectedTarget) {
     throw new AgentError('PATH_UNSAFE', `artifact target changed after permission check: expected ${options.expectedTarget}, got ${target}`);
   }

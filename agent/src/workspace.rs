@@ -281,6 +281,10 @@ pub fn state_root() -> PathBuf {
 /// reads the generation and journal under the lease rather than a stale cache.
 pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
     let _lock = registry_lock()?;
+    reload_workspace_unlocked(workspace)
+}
+
+pub(crate) fn reload_workspace_unlocked(workspace: &mut Workspace) -> Result<(), String> {
     let state_file = workspace.state.join("state.json");
     let manifest_file = workspace.state.join("manifest.json");
     let value: WorkspaceState =
