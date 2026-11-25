@@ -179,8 +179,8 @@ there is no per-run switch in the UI.
 - The agent is a Rust binary; the release publishes Linux x86_64/aarch64 builds. On macOS, build it
   from source with `cargo install --path agent` (or `cargo install --git
   https://github.com/fleischerdesign/openchamber-fleet fleet-agent`).
-- Linux and macOS are covered by the flake gate; Windows is unsupported. Release binaries are
-  published for Linux, so macOS builds the agent from source.
+- Linux is covered by the flake gate. macOS is not covered by CI; it uses Unix APIs only and needs
+  a source build of the agent. Release binaries are published for Linux. Windows is unsupported.
 - SSH key authentication, host keys verified (`StrictHostKeyChecking=yes`).
 
 ## Status
