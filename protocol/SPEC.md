@@ -109,7 +109,7 @@ The result:
 
 ```json
 {"protocol":{"major":1,"minor":1},
- "agent":{"version":"0.11.4","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
+ "agent":{"version":"0.11.5","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
  "capabilities":{"workspace.sync":1,"workspace.probe":1,"workspace.preview":1,"exec":1,"artifact":1,"transfer":1},
  "limits":{"maxFrame":16777216,"maxChunk":1048576,"maxControl":1048576,"maxStreams":32,
            "maxManifestEntries":500000,"defaultLeaseMs":300000}}
@@ -165,7 +165,7 @@ correlation metadata and MUST NOT be used as the lease identity. `recovery:true`
 while a journal exists.
 
 - The node is the authority: a second lease attempt while one is held returns `WORKSPACE_BUSY`
-  with the holder's `operationId` and remaining TTL.
+  with the holder's `operationId`.
 - A lease is owned by its connection. `ttlMs` and `expiresAt` are advisory metadata; the agent does
   not revoke a lease while accepted work is using it. The kernel `flock` is released by an explicit
   release, connection close or process death, which is the effective lifetime.
@@ -282,7 +282,8 @@ specification therefore promises:
 
 - after a crash, the workspace is either at the previous generation or `RECOVERY`;
 - no partial file is ever visible under a final name;
-- a recovery pass re-applies or rolls back the journal before any new mutation.
+- a recovery pass completes an interrupted apply forward before any new mutation; abort is only
+  available before apply starts.
 
 It does not promise that 200 000 files change in one instant. Callers that need a snapshot use the
 generation precondition.
@@ -357,9 +358,9 @@ Codes: `INVALID_FRAME`, `INVALID_REQUEST`, `NOT_INITIALIZED`, `UNSUPPORTED_PROTO
 
 ## 11. Idempotency and unknown outcomes
 
-- `operationId` identifies a mutation attempt. Repeating a request with the same `operationId` and
-  identical parameters returns the recorded result; different parameters return `INVALID_REQUEST`.
-- Operation records live in the state directory and expire after 24 h.
+- `operationId` correlates a lease request with its holder; it is not a mutation idempotency key.
+- Repeating a mutation while its transaction or job is still present is refused as
+  `WORKSPACE_BUSY`; this version does not keep a general operation-result cache.
 - No exactly-once guarantee exists for process execution: there is a window between spawn and the
   persisted job record. The protocol exposes `unknown` rather than guessing.
 - A controller MUST inspect before replaying an operation whose outcome is unknown.

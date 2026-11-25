@@ -48,8 +48,8 @@ BEGIN ──entries──▶ PLANNING ──plan──▶ PLANNED ──blobs─
                        commit (all blobs present, planDigest ok) ─┴──▶ COMMITTED
 ```
 
-- `BEGIN` records the journal header with `baseGeneration` and `operationId` **before** any file is
-  touched.
+- `BEGIN` records the journal header with `baseGeneration` and the owning `leaseId` **before** any
+  file is touched.
 - `PLANNING` refuses a second `sync.begin` for the same workspace.
 - `TRANSFERRING` accepts blobs in any order; duplicates are idempotent.
 - `commit` requires the owning lease and the exact `planDigest`; a mismatch is `PLAN_MISMATCH` and
