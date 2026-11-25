@@ -6,6 +6,7 @@ Fleet keeps machine definitions and project settings separate:
 $XDG_CONFIG_HOME/openchamber-fleet/
   hosts.json                 # SSH targets, shared by projects
   workspaces/<project-id>.json   # project name, selected aliases, excludes
+  defaults.json              # optional: project used by projectless chats
 ```
 
 `XDG_CONFIG_HOME` defaults to `~/.config`. `FLEET_CONFIG_DIR` or `--config-dir` can override the
@@ -75,12 +76,39 @@ The project file is keyed by the repository's `remote.origin.url`, so clones and
 same local project settings. Without a git remote, the canonical workspace path is used. Moving a
 non-git directory therefore creates a new project identity.
 
+## Default workspace for projectless chats
+
+OpenChamber can open a chat without a project. Its location is then an internal chat-data
+directory, not a repository. Fleet uses `defaults.json` for that case:
+
+```json
+{
+  "version": 1,
+  "directory": "/home/philipp/dev/nixfiles"
+}
+```
+
+```bash
+fleet default /home/philipp/dev/nixfiles   # set it
+fleet default                              # show it
+fleet default --clear                      # remove it
+```
+
+The default is a real project directory; Fleet loads that project's normal split configuration. It
+is consulted **only** for OpenChamber internal chat directories. A real project without Fleet
+configuration still fails with `config-missing`; it never silently borrows another project.
+`fleet_hosts` and `fleet_jobs` also work in a projectless chat without a default.
+
+`fleet.json` is not part of this. It remains a legacy fallback for old checkouts and is never
+written by `fleet init`.
+
 ## Resolution order
 
 1. `--config <file>` (legacy full configuration)
 2. `FLEET_CONFIG` (legacy full configuration)
 3. the split project configuration above
 4. `fleet.json` in the workspace (legacy full configuration, until a split project config exists)
+5. for an OpenChamber internal chat directory only: the default project from `defaults.json`
 
 The legacy shape is accepted for migration:
 
