@@ -7,7 +7,6 @@ import { readRuntimePointer, resolveStateRoot } from '../jobs/paths.js';
 import {
   DEFAULT_POLL_MS,
   RECONCILE_GRACE_MS,
-  START_TIMEOUT_MS,
   isTerminal,
   jobKey,
   newJobId,
@@ -25,6 +24,7 @@ export interface SupervisedJobOptions {
   readonly pollMs?: number;
   readonly graceMs?: number;
   readonly startupWaitMs?: number;
+  readonly startTimeoutMs?: number;
 }
 
 function delay(ms: number): Promise<void> {
@@ -50,6 +50,7 @@ export class SupervisedJobRegistry {
   private readonly pollMs: number;
   private readonly graceMs: number;
   private readonly startupWaitMs: number;
+  private readonly startTimeoutMs: number;
   private readonly watching = new Set<string>();
   private readonly unhealthySince = new Map<string, number>();
   private readonly backoffUntil = new Map<string, number>();
@@ -67,6 +68,7 @@ export class SupervisedJobRegistry {
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
     this.graceMs = options.graceMs ?? RECONCILE_GRACE_MS;
     this.startupWaitMs = options.startupWaitMs ?? 6000;
+    this.startTimeoutMs = options.startTimeoutMs ?? 20_000;
   }
 
   /** Wait briefly for a supervisor; the service starts one at OpenChamber startup. */
@@ -118,24 +120,31 @@ export class SupervisedJobRegistry {
       return null;
     }
 
-    const deadline = this.now() + START_TIMEOUT_MS;
+    const deadline = this.now() + this.startTimeoutMs;
     for (;;) {
       const record = this.store.readJob(jobId);
       if (record) {
-        const stored = this.stored(record);
         if (isTerminal(record.state)) {
+          const stored = this.stored(record);
           // The tool result carries this failure; do not wake the session a second time.
           await markNotified(this.ctx, stored);
-        } else if (record.state === 'running') {
-          this.watch(jobId);
+          return stored;
         }
-        return stored;
+        // Watch even while queued or starting: the supervisor may finish before the next poll.
+        this.watch(jobId);
+        if (record.state === 'running') return this.stored(record);
       }
       if (input.startupSignal?.aborted) {
         if (this.store.abortRequest(jobId)) throw new AgentError('CANCELLED', 'operation cancelled');
       }
       if (this.now() >= deadline) break;
       await delay(100);
+    }
+
+    const current = this.store.readJob(jobId);
+    if (current) {
+      this.watch(jobId);
+      return this.stored(current);
     }
 
     if (this.store.abortRequest(jobId)) {

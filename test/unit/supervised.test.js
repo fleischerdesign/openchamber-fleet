@@ -210,6 +210,43 @@ describe('supervised Fleet jobs', () => {
     }
   });
 
+  test('watches a job that is still starting when the tool returns', async () => {
+    const store = new JobStore(root());
+    store.ensure();
+    discovery(store);
+    const { ctx, notifications } = harness(store);
+    let jobId = null;
+    const watcher = setInterval(() => {
+      for (const id of store.listRequestIds()) {
+        const claim = store.claimRequest(id);
+        if (!claim.claimed) continue;
+        jobId = id;
+        store.writeJob(record(id, { state: 'starting', startedAt: Date.now(), updatedAt: Date.now() }));
+        store.deleteClaimed(id);
+      }
+    }, 10);
+    const registry = new SupervisedJobRegistry(ctx, {
+      store,
+      pollMs: 10,
+      graceMs: 20,
+      startupWaitMs: 100,
+      startTimeoutMs: 150,
+    });
+    try {
+      const started = await registry.start(startInput(config()));
+      assert.equal(started.state, 'starting');
+      assert.ok(jobId);
+      store.writeJob(record(jobId, { state: 'succeeded', exitCode: 0, endedAt: Date.now(), stdoutTail: 'late' }));
+      await wait(100);
+      assert.equal(notifications.length, 1);
+      assert.equal(notifications[0].metadata.state, 'succeeded');
+      assert.equal(notifications[0].resume, true);
+    } finally {
+      clearInterval(watcher);
+      registry.cleanup();
+    }
+  });
+
   test('cancels a job whose session no longer exists', async () => {
     const store = new JobStore(root());
     store.ensure();

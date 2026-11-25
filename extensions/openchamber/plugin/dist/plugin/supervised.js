@@ -2,7 +2,7 @@
 import { JobStore } from '../jobs/store.js';
 import { readHealthySupervisor } from '../jobs/health.js';
 import { readRuntimePointer, resolveStateRoot } from '../jobs/paths.js';
-import { DEFAULT_POLL_MS, RECONCILE_GRACE_MS, START_TIMEOUT_MS, isTerminal, jobKey, newJobId, } from '../jobs/protocol.js';
+import { DEFAULT_POLL_MS, RECONCILE_GRACE_MS, isTerminal, jobKey, newJobId, } from '../jobs/protocol.js';
 import { AgentError } from '../v1/errors.js';
 import { isStoredJob, markNotified, notificationID, notifyJob, storageKey } from './notify.js';
 function delay(ms) {
@@ -25,6 +25,7 @@ export class SupervisedJobRegistry {
     pollMs;
     graceMs;
     startupWaitMs;
+    startTimeoutMs;
     watching = new Set();
     unhealthySince = new Map();
     backoffUntil = new Map();
@@ -39,6 +40,7 @@ export class SupervisedJobRegistry {
         this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
         this.graceMs = options.graceMs ?? RECONCILE_GRACE_MS;
         this.startupWaitMs = options.startupWaitMs ?? 6000;
+        this.startTimeoutMs = options.startTimeoutMs ?? 20_000;
     }
     /** Wait briefly for a supervisor; the service starts one at OpenChamber startup. */
     async available(waitMs = 0) {
@@ -94,19 +96,20 @@ export class SupervisedJobRegistry {
             // A broken spool is a reason to use the runtime-bound path, not to fail the job.
             return null;
         }
-        const deadline = this.now() + START_TIMEOUT_MS;
+        const deadline = this.now() + this.startTimeoutMs;
         for (;;) {
             const record = this.store.readJob(jobId);
             if (record) {
-                const stored = this.stored(record);
                 if (isTerminal(record.state)) {
+                    const stored = this.stored(record);
                     // The tool result carries this failure; do not wake the session a second time.
                     await markNotified(this.ctx, stored);
+                    return stored;
                 }
-                else if (record.state === 'running') {
-                    this.watch(jobId);
-                }
-                return stored;
+                // Watch even while queued or starting: the supervisor may finish before the next poll.
+                this.watch(jobId);
+                if (record.state === 'running')
+                    return this.stored(record);
             }
             if (input.startupSignal?.aborted) {
                 if (this.store.abortRequest(jobId))
@@ -115,6 +118,11 @@ export class SupervisedJobRegistry {
             if (this.now() >= deadline)
                 break;
             await delay(100);
+        }
+        const current = this.store.readJob(jobId);
+        if (current) {
+            this.watch(jobId);
+            return this.stored(current);
         }
         if (this.store.abortRequest(jobId)) {
             // The request never reached a supervisor; the caller can still run it in-process.
