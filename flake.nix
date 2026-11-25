@@ -41,7 +41,7 @@
           pname = "openchamber-fleet";
           version = packageVersion;
           src = self;
-          npmDepsHash = "sha256-f8OVn697Qhxmp8aix4g3XuqiNPMzslAeUbT2YzCNQPM=";
+          npmDepsHash = "sha256-NdQ29t0ShXXKlWphVt4nQpFc++uQMzUOKXKa8TVpwXk=";
           buildPhase = ''
             npm run build
           '';
@@ -89,7 +89,7 @@
           version = packageVersion;
           src = self;
           doCheck = true;
-          npmDepsHash = "sha256-f8OVn697Qhxmp8aix4g3XuqiNPMzslAeUbT2YzCNQPM=";
+          npmDepsHash = "sha256-NdQ29t0ShXXKlWphVt4nQpFc++uQMzUOKXKa8TVpwXk=";
           nativeBuildInputs = with pkgs; [
             openssh
             git
