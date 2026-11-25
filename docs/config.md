@@ -4,8 +4,8 @@ Fleet keeps machine definitions and project settings separate:
 
 ```text
 $XDG_CONFIG_HOME/openchamber-fleet/
-  hosts.json                 # SSH targets, shared by projects
-  workspaces/<project-id>.json   # project name, selected aliases, excludes
+  hosts.json                 # machines: SSH targets and tags, shared by projects
+  workspaces/<project-id>.json   # project requirements, roots and excludes
   defaults.json              # optional: project used by projectless chats
 ```
 
@@ -41,14 +41,14 @@ The registry must define at least one host. Unknown keys are an error. File mode
 
 ## Project configuration
 
-A project selects aliases from the registry and owns its excludes and optional replica-root
-overrides.
+Machines belong to the host registry, not to a project. A project describes what it needs and owns
+its excludes and optional replica-root overrides.
 
 ```json
 {
   "version": 1,
   "name": "my-project",
-  "hosts": ["workstation", "notebook"],
+  "requires": ["linux"],
   "roots": {
     "notebook": "/home/philipp/replicas/my-project"
   },
@@ -61,14 +61,36 @@ overrides.
 | Key | Type | Meaning |
 |---|---|---|
 | `name` | `^[a-z0-9][a-z0-9._-]*$` | workspace identity; also the default replica directory name |
-| `hosts` | string[] | selected host aliases, at least one |
+| `hosts` | string[] | optional allowlist; omitted means every host in the registry |
+| `requires` | string[] | optional capabilities; a host must carry every listed tag |
 | `roots` | object | optional per-host replica-root overrides |
 | `excludes` | string[] | baseline rsync-compatible patterns |
 | `env` | object | environment variables passed to remote commands |
 | `shell` | string | `bash`, `sh`, `dash` or `zsh` |
 
-Unknown keys are an error. A project must select at least one alias, and every selected alias must
-exist in the registry.
+Host selection is the intersection of the two optional filters:
+
+1. Start with `hosts` when present, otherwise with every registry host.
+2. Keep only hosts that carry every tag in `requires`.
+3. At least one host must remain.
+
+`hosts` is an escape hatch, not the normal way to describe a project. It is useful when a project
+must run on one specific machine. An explicit alias must exist in the registry and must satisfy
+`requires`; an empty array is an error (omit the key to use every host). `roots` may only name a
+host that survives the selection. `requires` is the preferred restriction: it says what the work
+needs, so a machine added later with the same tags becomes eligible without editing the project.
+
+`fleet init` registers the machine globally and writes no `hosts` allowlist for a new project, so
+the project follows the registry. Migrating a legacy `fleet.json` preserves its explicit host list,
+and `fleet init` in a project that already has an allowlist adds the named machine to it.
+
+Adding a host to the registry extends every project without an allowlist; a project with one is
+unchanged. Removing a host is refused while another project names it in `hosts` or `roots`;
+implicit projects simply follow the remaining registry. Changing a tag is a global capability
+change: a project whose `requires` no longer matches any host fails with an error naming the
+missing tags.
+
+Unknown keys are an error.
 
 ## Project identity
 
@@ -135,7 +157,9 @@ explicit opt-in for the legacy file and writes it at the workspace root.
 The OpenChamber panel saves the split format locally and never writes to the repository. It loads
 both documents independently, so a new project keeps the existing host registry and a project with a
 missing host remains editable. A save carries the revision it loaded; a stale save is refused instead
-of overwriting a concurrent change. Removing a host that another project still selects is refused.
+of overwriting a concurrent change. Removing a host that another project names in `hosts` or `roots`
+is refused. The host list shows whether a project follows the whole registry or an allowlist, which
+hosts are eligible for its `requires`, and which explicit entries need attention.
 
 ## Excludes
 

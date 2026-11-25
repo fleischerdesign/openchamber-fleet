@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import {
   compileExcludes,
   isOpenChamberInternalDirectory,
-  loadConfig,
   loadConfigDocuments,
+  loadDefaults,
   loadSessionConfig,
   saveConfigDocuments,
 } from '../../../src/config.js';
@@ -121,6 +121,22 @@ function directoryOfQuery(value: string | null): string {
   return value;
 }
 
+/** The project whose configuration the panel edits; projectless chats edit the default project. */
+function configDirectoryOf(directory: string): string {
+  try {
+    return loadSessionConfig(directory).config.dir;
+  } catch (error) {
+    if (!(error instanceof FleetError)) throw error;
+    if (isOpenChamberInternalDirectory(directory)) {
+      const defaults = loadDefaults();
+      if (defaults.directory) return defaults.directory;
+      throw error;
+    }
+    if (error.code === 'config-missing' || error.code === 'config-invalid') return directory;
+    throw error;
+  }
+}
+
 function hostOf(config: WorkspaceConfig, value: Record<string, unknown>): HostConfig {
   const alias = value.host;
   if (typeof alias !== 'string' || !config.hosts[alias]) {
@@ -227,7 +243,7 @@ const server = http.createServer(async (request, response) => {
       try {
         return reply(response, 200, {
           ok: true,
-          result: loadConfigDocuments(directoryOfQuery(url.searchParams.get('directory'))),
+          result: loadConfigDocuments(configDirectoryOf(directoryOfQuery(url.searchParams.get('directory')))),
         });
       } catch (error) {
         const fields = errorFields(error);
@@ -243,14 +259,14 @@ const server = http.createServer(async (request, response) => {
     lastDirectory = directory;
 
     if (url.pathname === '/config') {
-      const result = saveConfigDocuments(directory, body.hosts, body.project, {
+      const result = saveConfigDocuments(configDirectoryOf(directory), body.hosts, body.project, {
         ...(typeof body.revision === 'string' ? { expectedRevision: body.revision } : {}),
       });
       cache.delete(directory);
       return reply(response, 200, { ok: true, result });
     }
 
-    const config = loadConfig(directory);
+    const config = loadSessionConfig(directory).config;
     const host = hostOf(config, body);
 
     if (url.pathname === '/status') {

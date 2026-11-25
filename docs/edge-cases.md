@@ -70,6 +70,20 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | CTL-03 | SSH argv is fixed and the agent path is validated | planned (unit) |
 | CTL-04 | Sync, exec and fetch work against the real agent | `test/v1/protocol.test.js` |
 
+## Host selection
+
+| ID | Statement | Test |
+|---|---|---|
+| SEL-01 | A project without `hosts` uses every host in the global registry | `test/unit/config.test.js` |
+| SEL-02 | A present `hosts` allowlist restricts the registry | `test/unit/config.test.js` |
+| SEL-03 | `requires` keeps only hosts carrying every tag | `test/unit/config.test.js` |
+| SEL-04 | An explicit host that lacks a required tag is refused | `test/unit/config.test.js` |
+| SEL-05 | An empty allowlist, duplicate alias or duplicate requirement is refused, and an empty allowlist stays repairable in the panel | `test/unit/config.test.js` |
+| SEL-06 | A replica root must target a selected host | `test/unit/config.test.js` |
+| SEL-07 | Removing a registry host is refused while another project names it in `hosts` or `roots`; implicit projects follow the registry | `test/unit/config.test.js` |
+| SEL-08 | A new project registered by `fleet init` omits the allowlist and uses the registry | `test/unit/config.test.js` |
+| SEL-09 | Panel read and save routes use the default project for a projectless chat | `test/unit/service.test.js` |
+
 ## Default workspace
 
 | ID | Statement | Test |

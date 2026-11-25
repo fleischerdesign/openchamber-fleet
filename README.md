@@ -55,7 +55,7 @@ folder install runs from OpenChamber's writable extension catalog and needs no N
 # release tarball; or: npm ci && npm run build && npm link
 npm install -g ./openchamber-fleet-<version>.tgz
 
-# in the project: writes local host registry + project selection,
+# in the project: writes the local host registry + project configuration,
 # never a file in the repository
 fleet init --host workstation --ssh philipp@10.10.100.20
 
@@ -91,9 +91,10 @@ The repository builds three artifacts from one controller core:
 The extension contributes native tool cards/tables, a project configuration panel, a read-only Work
 Status section and the OpenCode plugin. It is a normal runtime extension: install it from Settings →
 Extensions and approve the declared service and plugin permissions. The panel edits the same local
-XDG configuration as the CLI: hosts are machine-level, projects only select aliases and own excludes.
-Nothing is written to the repository. It uses only public OpenChamber SDK and OpenCode plugin APIs;
-Nix is an optional packaging path, not a runtime requirement.
+XDG configuration as the CLI: hosts are machine-level, projects only state requirements and own
+excludes; an allowlist is optional. Nothing is written to the repository. It uses only public
+OpenChamber SDK and OpenCode plugin APIs; Nix is an optional packaging path, not a runtime
+requirement.
 
 A chat without a project uses OpenChamber's internal chat-data directory. Fleet then falls back to a
 configured **default workspace** (`fleet default /path/to/project`); the status section names it and
