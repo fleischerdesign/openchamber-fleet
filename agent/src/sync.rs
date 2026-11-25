@@ -118,6 +118,39 @@ pub fn add_entries(
     Ok(())
 }
 
+fn validate_actual_target(root: &Path, entry: &Entry) -> Result<(), String> {
+    // The manifest is not the filesystem. A local directory that Fleet never
+    // recorded must not be replaced recursively by a file/symlink.
+    let actual = root.join(&entry.path);
+    match fs::symlink_metadata(&actual) {
+        Ok(metadata) => {
+            let actual_dir = metadata.is_dir() && !metadata.file_type().is_symlink();
+            if !entry.is_dir() && actual_dir {
+                return Err(format!(
+                    "UNSUPPORTED_METADATA {} would replace a real directory that is not in the managed manifest",
+                    entry.path
+                ));
+            }
+            if entry.is_dir() && (!metadata.is_dir() || metadata.file_type().is_symlink()) {
+                return Err(format!(
+                    "UNSUPPORTED_METADATA {} changes to a directory over an existing non-directory",
+                    entry.path
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_message(error)),
+    }
+}
+
+fn validate_actual_targets(record: &TxnRecord, ws: &Workspace) -> Result<(), String> {
+    for entry in &record.entries {
+        validate_actual_target(&ws.root, entry)?;
+    }
+    Ok(())
+}
+
 pub struct PlanResult {
     pub plan_digest: String,
     pub changes: Vec<Change>,
@@ -155,28 +188,7 @@ pub fn compute(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, Str
         if policy.is_excluded(&entry.path, entry.is_dir()) {
             continue;
         }
-        // The manifest is not the filesystem. A local directory that Fleet
-        // never recorded must not be replaced recursively by a file/symlink.
-        let actual = ws.root.join(&entry.path);
-        match fs::symlink_metadata(&actual) {
-            Ok(metadata) => {
-                let actual_dir = metadata.is_dir() && !metadata.file_type().is_symlink();
-                if !entry.is_dir() && actual_dir {
-                    return Err(format!(
-                        "UNSUPPORTED_METADATA {} would replace a real directory that is not in the managed manifest",
-                        entry.path
-                    ));
-                }
-                if entry.is_dir() && (!metadata.is_dir() || metadata.file_type().is_symlink()) {
-                    return Err(format!(
-                        "UNSUPPORTED_METADATA {} changes to a directory over an existing non-directory",
-                        entry.path
-                    ));
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_message(error)),
-        }
+        validate_actual_target(&ws.root, entry)?;
         seen.insert(entry.path.as_str());
         match old.get(entry.path.as_str()) {
             None => {
@@ -310,6 +322,7 @@ pub fn commit(
         return Err("PLAN_MISMATCH planDigest does not match".into());
     }
     ensure_blobs(record, ws)?;
+    validate_actual_targets(record, ws)?;
     let desired = Manifest::from_entries(record.entries.clone())?;
     let policy = record.policy.compile()?;
 
