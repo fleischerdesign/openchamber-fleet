@@ -492,6 +492,9 @@ export async function startExecCommand(client, options) {
     let start;
     try {
         throwIfAborted(options.signal);
+        if (options.assertOwnership !== undefined && !options.assertOwnership()) {
+            throw new AgentError('CANCELLED', 'the owner lost its lock before the remote start');
+        }
         start = (await client.request('exec.start', {
             workspaceId: options.workspaceId,
             leaseId: lease,

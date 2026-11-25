@@ -666,6 +666,8 @@ export interface ExecOptions {
   readonly timeoutMs?: number;
   /** Generation the caller synchronized against; the agent refuses another one. */
   readonly expectedGeneration?: number;
+  /** A caller that owns a local lifecycle can refuse the final remote start. */
+  readonly assertOwnership?: () => boolean;
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: ExecProgress) => void | Promise<void>;
 }
@@ -727,6 +729,9 @@ export async function startExecCommand(client: AgentClient, options: ExecOptions
   let start: { jobId: string; stdoutStream: number; stderrStream: number };
   try {
     throwIfAborted(options.signal);
+    if (options.assertOwnership !== undefined && !options.assertOwnership()) {
+      throw new AgentError('CANCELLED', 'the owner lost its lock before the remote start');
+    }
     start = (await client.request('exec.start', {
       workspaceId: options.workspaceId,
       leaseId: lease,

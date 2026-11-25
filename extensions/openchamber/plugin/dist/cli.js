@@ -12,7 +12,7 @@ const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'a
 export async function main(argv) {
     try {
         const parsed = parse(argv);
-        if (parsed.command === '' || parsed.command === 'help' || parsed.flags.has('help')) {
+        if (parsed.command === '' || parsed.command === 'help' || flagSet(parsed.flags, 'help')) {
             printHelp();
             return;
         }
@@ -47,6 +47,9 @@ export async function main(argv) {
             process.exitCode = 6;
         }
     }
+}
+function flagSet(flags, name) {
+    return flags.get(name) === true;
 }
 function parse(argv) {
     const positional = [];
@@ -123,7 +126,7 @@ function configOf(flags, hostsOnly = false) {
 }
 /** Project config by default; `--scratch` gives a remote-only session space. */
 function executionConfigOf(flags) {
-    if (!flags.has('scratch'))
+    if (!flagSet(flags, 'scratch'))
         return configOf(flags);
     const configDir = flags.get('config-dir');
     return scratchConfig({
@@ -135,9 +138,9 @@ function executionConfigOf(flags) {
 function cmdDefault(parsed) {
     const configDir = parsed.flags.get('config-dir');
     const options = typeof configDir === 'string' ? { configDir } : {};
-    if (parsed.flags.has('clear')) {
+    if (flagSet(parsed.flags, 'clear')) {
         const value = saveDefaults(null, options);
-        if (parsed.flags.has('json'))
+        if (flagSet(parsed.flags, 'json'))
             process.stdout.write(`${JSON.stringify(value)}\n`);
         else
             process.stdout.write('default workspace cleared\n');
@@ -146,14 +149,14 @@ function cmdDefault(parsed) {
     const directory = parsed.positional[0];
     if (directory === undefined) {
         const value = loadDefaults(options);
-        if (parsed.flags.has('json'))
+        if (flagSet(parsed.flags, 'json'))
             process.stdout.write(`${JSON.stringify(value)}\n`);
         else if (value.directory)
             process.stdout.write(`${value.directory}\n`);
         return;
     }
     const value = saveDefaults(directory, options);
-    if (parsed.flags.has('json'))
+    if (flagSet(parsed.flags, 'json'))
         process.stdout.write(`${JSON.stringify(value)}\n`);
     else
         process.stdout.write(`default workspace ${value.directory}\n`);
@@ -196,9 +199,9 @@ function cmdInit(parsed) {
         throw new FleetError('usage', '--scope must be name or checkout');
     }
     const tags = tagsOf(parsed.flags);
-    if (parsed.flags.has('workspace-file')) {
+    if (flagSet(parsed.flags, 'workspace-file')) {
         const file = path.join(configPaths(process.cwd()).workspaceRoot, 'fleet.json');
-        if (fs.existsSync(file) && !parsed.flags.has('force')) {
+        if (fs.existsSync(file) && !flagSet(parsed.flags, 'force')) {
             throw new FleetError('config-invalid', 'fleet.json already exists', { hint: 'pass --force to replace it' });
         }
         const workspaceName = typeof name === 'string' ? name : defaultWorkspaceName(process.cwd());
@@ -223,7 +226,7 @@ function cmdInit(parsed) {
         ...(tags.length > 0 ? { tags } : {}),
         ...(typeof configDir === 'string' ? { configDir } : {}),
         ...(scopeValue === 'name' || scopeValue === 'checkout' ? { scope: scopeValue } : {}),
-        force: parsed.flags.has('force'),
+        force: flagSet(parsed.flags, 'force'),
     });
     process.stdout.write(`wrote ${documents.hostsFile}\n`);
     process.stdout.write(`wrote ${documents.projectFile}\n`);
@@ -250,11 +253,11 @@ async function cmdDoctor(parsed) {
 }
 async function cmdStatus(parsed) {
     const config = executionConfigOf(parsed.flags);
-    const host = hostOf(config, parsed.flags, parsed.flags.has('scratch') ? 'scratch' : 'workspace');
+    const host = hostOf(config, parsed.flags, flagSet(parsed.flags, 'scratch') ? 'scratch' : 'workspace');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
         const info = await status(client, config.name, host.root);
-        if (parsed.flags.has('json')) {
+        if (flagSet(parsed.flags, 'json')) {
             process.stdout.write(JSON.stringify(info, null, 2) + '\n');
         }
         else {
@@ -270,8 +273,8 @@ async function cmdRecover(parsed) {
     const host = hostOf(config, parsed.flags, 'workspace');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
-        const result = await recoverWorkspace(client, config.name, host.root, parsed.flags.has('abort') ? 'abort' : 'recover');
-        if (parsed.flags.has('json')) {
+        const result = await recoverWorkspace(client, config.name, host.root, flagSet(parsed.flags, 'abort') ? 'abort' : 'recover');
+        if (flagSet(parsed.flags, 'json')) {
             process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
             return;
         }
@@ -310,7 +313,7 @@ async function cmdSync(parsed) {
     if (plan && tokenFlag !== undefined) {
         throw new FleetError('usage', '--plan-token is only valid with sync --apply');
     }
-    if (plan && parsed.flags.has('adopt')) {
+    if (plan && flagSet(parsed.flags, 'adopt')) {
         throw new FleetError('usage', '--adopt is only valid with sync --apply');
     }
     if (parsed.flags.has('sync')) {
@@ -332,7 +335,7 @@ async function cmdSync(parsed) {
             hostIdentity: `${host.ssh}:${host.port}`,
             excludes,
             mode: plan ? 'plan' : 'apply',
-            adopt: parsed.flags.has('adopt'),
+            adopt: flagSet(parsed.flags, 'adopt'),
             ...(typeof tokenFlag === 'string' ? { planToken: tokenFlag } : {}),
         });
         process.stdout.write(`plan ${result.changes.length} change(s) ${result.planDigest}\n`);
@@ -388,7 +391,7 @@ async function cmdRun(parsed) {
     const host = selectHost(config, {
         ...(typeof parsed.flags.get('host') === 'string' ? { host: String(parsed.flags.get('host')) } : {}),
         tags: tagsOf(parsed.flags),
-        operation: parsed.flags.has('scratch') ? 'scratch' : 'workspace',
+        operation: flagSet(parsed.flags, 'scratch') ? 'scratch' : 'workspace',
     });
     const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
     if (argv.length === 0)
@@ -400,18 +403,18 @@ async function cmdRun(parsed) {
             : applyFlag === true
                 ? 'apply'
                 : 'auto';
-    if (parsed.flags.has('scratch') && (sync === 'plan' || sync === 'apply')) {
+    if (flagSet(parsed.flags, 'scratch') && (sync === 'plan' || sync === 'apply')) {
         throw new FleetError('usage', '--scratch has no source tree; sync=plan/apply requires a project workspace');
     }
-    if (parsed.flags.has('adopt')) {
+    if (flagSet(parsed.flags, 'adopt')) {
         throw new FleetError('usage', '--adopt is only valid for fleet sync --apply');
     }
-    const additions = parsed.flags.has('scratch')
+    const additions = flagSet(parsed.flags, 'scratch')
         ? []
         : excludesOf(config, parsed.flags).filter((pattern) => !config.excludes.includes(pattern));
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
-        const result = parsed.flags.has('scratch')
+        const result = flagSet(parsed.flags, 'scratch')
             ? await execCommand(client, {
                 workspaceId: config.name,
                 root: host.root,
@@ -428,7 +431,7 @@ async function cmdRun(parsed) {
                 sync,
                 excludes: additions,
             });
-        if (parsed.flags.has('json')) {
+        if (flagSet(parsed.flags, 'json')) {
             process.stdout.write(`${JSON.stringify({
                 host: host.alias,
                 state: result.state,
@@ -462,7 +465,7 @@ async function cmdRun(parsed) {
     }
 }
 function cmdHosts(parsed) {
-    const config = parsed.flags.has('scratch') ? executionConfigOf(parsed.flags) : configOf(parsed.flags, true);
+    const config = flagSet(parsed.flags, 'scratch') ? executionConfigOf(parsed.flags) : configOf(parsed.flags, true);
     const tags = tagsOf(parsed.flags);
     const views = hostViews(config);
     let selected = null;
@@ -470,14 +473,14 @@ function cmdHosts(parsed) {
         try {
             selected = selectHost(config, {
                 tags,
-                operation: parsed.flags.has('scratch') ? 'scratch' : 'workspace',
+                operation: flagSet(parsed.flags, 'scratch') ? 'scratch' : 'workspace',
             }).alias;
         }
         catch {
             selected = null;
         }
     }
-    if (parsed.flags.has('json')) {
+    if (flagSet(parsed.flags, 'json')) {
         process.stdout.write(`${JSON.stringify({ workspace: workspaceLabel(config), hosts: views, selected }, null, 2)}\n`);
         return;
     }
@@ -491,7 +494,7 @@ function cmdHosts(parsed) {
 }
 async function cmdExec(parsed) {
     const config = executionConfigOf(parsed.flags);
-    const host = hostOf(config, parsed.flags, parsed.flags.has('scratch') ? 'scratch' : 'workspace');
+    const host = hostOf(config, parsed.flags, flagSet(parsed.flags, 'scratch') ? 'scratch' : 'workspace');
     const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
     if (argv.length === 0)
         throw new FleetError('usage', 'exec needs a command after --');
@@ -510,7 +513,7 @@ async function cmdExec(parsed) {
         });
         process.stdout.write(result.stdout);
         process.stderr.write(result.stderr);
-        if (parsed.flags.has('json')) {
+        if (flagSet(parsed.flags, 'json')) {
             process.stdout.write(JSON.stringify({ jobId: result.jobId, state: result.state, exitCode: result.exitCode }, null, 2) + '\n');
         }
         process.exitCode = result.exitCode ?? 1;
@@ -535,7 +538,7 @@ async function cmdFetch(parsed) {
             root: host.root,
             path: artifact,
             dest: path.join(dest, path.basename(artifact)),
-            overwrite: parsed.flags.has('overwrite'),
+            overwrite: flagSet(parsed.flags, 'overwrite'),
         });
         process.stdout.write(`fetched ${result.file} (${result.bytes} bytes) ${result.digest}\n`);
     }
@@ -564,7 +567,7 @@ async function cmdUpload(parsed) {
             root: host.root,
             path: remote,
             source: path.resolve(source),
-            overwrite: parsed.flags.has('overwrite'),
+            overwrite: flagSet(parsed.flags, 'overwrite'),
         });
         process.stdout.write(`uploaded ${source} -> ${remote} (${result.bytes} bytes) ${result.digest}\n`);
     }
@@ -587,7 +590,7 @@ async function cmdDownload(parsed) {
             root: host.root,
             path: remote,
             dest: path.resolve(dest),
-            overwrite: parsed.flags.has('overwrite'),
+            overwrite: flagSet(parsed.flags, 'overwrite'),
         });
         process.stdout.write(`downloaded ${remote} -> ${result.file} (${result.bytes} bytes) ${result.digest}\n`);
     }

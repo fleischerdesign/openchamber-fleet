@@ -227,6 +227,10 @@ export class SupervisorCore {
       return;
     }
     for (const jobId of this.store.listRequestIds()) {
+      if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+        this.stopping = true;
+        return;
+      }
       if (this.active.has(jobId) || this.starting.has(jobId) || this.pending.has(jobId) || this.store.readJob(jobId)) {
         this.store.deleteRequest(jobId);
         continue;
