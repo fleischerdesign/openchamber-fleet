@@ -84,6 +84,20 @@ export async function status(client, workspaceId, root, signal) {
     }
     return { generation: 0, manifestDigest: '', recovery: false };
 }
+/** Bind an apply to host/root, source, generation, policy and the exact plan. */
+export function syncPlanToken(input) {
+    const value = JSON.stringify({
+        workspaceId: input.workspaceId,
+        source: path.resolve(input.source),
+        root: input.root,
+        generation: input.generation,
+        excludes: [...new Set(input.excludes)].sort(),
+        planDigest: input.planDigest,
+        changes: input.changes.map((change) => `${change.action}\0${change.path}`),
+        needed: [...input.needed].sort(),
+    });
+    return `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
+}
 async function fetchPlanPages(client, txnId, kind, signal) {
     const items = [];
     let offset = 0;
@@ -203,10 +217,24 @@ export async function syncWorkspace(client, matcher, options) {
             needed: needed.length,
             digest: plan.planDigest,
         });
+        const planToken = syncPlanToken({
+            workspaceId: options.workspaceId,
+            source: options.source,
+            root: options.root,
+            generation: leaseInfo.generation,
+            excludes: options.excludes,
+            planDigest: plan.planDigest,
+            changes,
+            needed,
+        });
         if (options.mode === 'plan') {
             await client.request('sync.abort', { txnId });
             await report(options.onProgress, { phase: 'done', changes: changes.length, digest: plan.planDigest });
-            return { planDigest: plan.planDigest, changes, needed };
+            return { planDigest: plan.planDigest, planToken, changes, needed };
+        }
+        if (options.planToken !== undefined && options.planToken !== planToken) {
+            await client.request('sync.abort', { txnId });
+            throw new AgentError('PLAN_STALE', 'the replica or plan changed since it was approved; plan again');
         }
         let uploaded = 0;
         for (const digest of needed) {
@@ -236,7 +264,14 @@ export async function syncWorkspace(client, matcher, options) {
             bytes: uploaded,
             digest: committed.manifestDigest,
         });
-        return { planDigest: plan.planDigest, changes, needed, generation: committed.generation, manifestDigest: committed.manifestDigest };
+        return {
+            planDigest: plan.planDigest,
+            planToken,
+            changes,
+            needed,
+            generation: committed.generation,
+            manifestDigest: committed.manifestDigest,
+        };
     }
     finally {
         options.signal?.removeEventListener('abort', onAbort);

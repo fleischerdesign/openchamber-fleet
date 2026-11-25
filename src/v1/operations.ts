@@ -149,8 +149,34 @@ export interface SyncOptions {
   readonly excludes: string[];
   readonly mode: 'plan' | 'apply';
   readonly adopt?: boolean;
+  /** Token returned by a plan; an apply refuses to use a different plan. */
+  readonly planToken?: string;
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: SyncProgress) => void | Promise<void>;
+}
+
+/** Bind an apply to host/root, source, generation, policy and the exact plan. */
+export function syncPlanToken(input: {
+  workspaceId: string;
+  source: string;
+  root: string;
+  generation: number;
+  excludes: readonly string[];
+  planDigest: string;
+  changes: readonly { action: string; path: string }[];
+  needed: readonly string[];
+}): string {
+  const value = JSON.stringify({
+    workspaceId: input.workspaceId,
+    source: path.resolve(input.source),
+    root: input.root,
+    generation: input.generation,
+    excludes: [...new Set(input.excludes)].sort(),
+    planDigest: input.planDigest,
+    changes: input.changes.map((change) => `${change.action}\0${change.path}`),
+    needed: [...input.needed].sort(),
+  });
+  return `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
 }
 
 export interface SyncProgress {
@@ -164,6 +190,7 @@ export interface SyncProgress {
 
 export interface SyncSummary {
   readonly planDigest: string;
+  readonly planToken?: string;
   readonly changes: { action: string; path: string }[];
   readonly needed: string[];
   readonly generation?: number;
@@ -298,11 +325,25 @@ export async function syncWorkspace(
       needed: needed.length,
       digest: plan.planDigest,
     });
+    const planToken = syncPlanToken({
+      workspaceId: options.workspaceId,
+      source: options.source,
+      root: options.root,
+      generation: leaseInfo.generation,
+      excludes: options.excludes,
+      planDigest: plan.planDigest,
+      changes,
+      needed,
+    });
 
     if (options.mode === 'plan') {
       await client.request('sync.abort', { txnId });
       await report(options.onProgress, { phase: 'done', changes: changes.length, digest: plan.planDigest });
-      return { planDigest: plan.planDigest, changes, needed };
+      return { planDigest: plan.planDigest, planToken, changes, needed };
+    }
+    if (options.planToken !== undefined && options.planToken !== planToken) {
+      await client.request('sync.abort', { txnId });
+      throw new AgentError('PLAN_STALE', 'the replica or plan changed since it was approved; plan again');
     }
 
     let uploaded = 0;
@@ -336,7 +377,14 @@ export async function syncWorkspace(
       bytes: uploaded,
       digest: committed.manifestDigest,
     });
-    return { planDigest: plan.planDigest, changes, needed, generation: committed.generation, manifestDigest: committed.manifestDigest };
+    return {
+      planDigest: plan.planDigest,
+      planToken,
+      changes,
+      needed,
+      generation: committed.generation,
+      manifestDigest: committed.manifestDigest,
+    };
   } finally {
     options.signal?.removeEventListener('abort', onAbort);
     if (txnId) {
