@@ -124,6 +124,37 @@ configuration still fails with `config-missing`; it never silently borrows anoth
 `fleet.json` is not part of this. It remains a legacy fallback for old checkouts and is never
 written by `fleet init`.
 
+## Scratch and ad-hoc transfers
+
+A projectless chat can run without any workspace by selecting an explicit scratch target. Scratch is
+a private remote directory per session, not a replica:
+
+```text
+~/.cache/openchamber-fleet/scratch/<session-hash>
+```
+
+It has no source tree, manifest, generation or recovery journal. Upload a file into scratch, run a
+command there, then download the result. The same `scratch` id is stable for the session. A command
+may still access absolute paths such as `/tmp`; scratch is the safe default working directory, not a
+sandbox. Scratch persists until its directory and agent state are removed; there is no automatic
+quota or garbage collection in this release.
+
+```text
+fleet upload ./report.md --host workstation --to report.md
+fleet run --scratch --host workstation -- python report.py
+fleet download result.json --host workstation --dest ./result.json --scratch
+```
+
+Transfers are limited to one regular file. Directories, symlinks, devices, FIFOs and sockets are
+refused. Each transfer verifies a SHA-256 digest, writes atomically, does not overwrite by default,
+and streams in bounded memory. Uploads are accepted only for scratch; downloads can read scratch or
+an existing replica. A transfer into a replica root is outside the sync manifest and therefore not
+tracked by the next workspace sync.
+
+The workspace's `status`, `sync plan` and `fetch` paths are read-only. On a host without a replica
+they report that it does not exist; they never create a root or a state entry. `sync apply` and an
+explicit `run` create the replica.
+
 ## Resolution order
 
 1. `--config <file>` (legacy full configuration)

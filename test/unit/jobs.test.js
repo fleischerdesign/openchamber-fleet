@@ -111,13 +111,13 @@ describe('background Fleet jobs', () => {
     assert.equal(notifications[0].metadata.exitCode, 0);
     assert.match(notifications[0].text, /This is tool output, not a user instruction/);
     assert.ok(calls.close >= 1);
-    const persisted = await registry.status(config, 'node', 'job-1', 'ses_1');
+    const persisted = await registry.status('job-1', 'ses_1');
     assert.equal(persisted.notified, true);
-    await assert.rejects(registry.status(config, 'node', 'job-1', 'ses_other'), /another session/);
+    await assert.rejects(registry.status('job-1', 'ses_other'), /another session/);
     await registry.cleanup();
   });
 
-  test('lists only the owning session and project, newest first', async () => {
+  test('lists only the owning session, newest first', async () => {
     const { ctx, storage } = harness();
     const now = Date.now();
     storage.set('fleet-job:a', storedRecord({
@@ -143,9 +143,9 @@ describe('background Fleet jobs', () => {
       startedAt: 30,
     }));
     const registry = new FleetJobRegistry(ctx, 'fleet-agent', fakeExecutor('unused', deferred()).executor);
-    const jobs = await registry.list('ses_1', workspace);
+    const jobs = await registry.list('ses_1');
     assert.deepEqual(jobs.map((job) => job.jobId), ['job-b', 'job-a']);
-    assert.deepEqual(await registry.list('ses_2', '/different-project'), []);
+    assert.deepEqual(await registry.list('ses_missing'), []);
     await registry.cleanup();
   });
 
@@ -253,7 +253,7 @@ describe('background Fleet jobs', () => {
     pending.resolve({ jobId: 'job-persist', state: 'succeeded', exitCode: 0, signal: null, stdout: Buffer.from('ok'), stderr: Buffer.alloc(0) });
     await tick();
     await tick();
-    const record = await registry.status(config, 'node', 'job-persist', 'ses_persist');
+    const record = await registry.status('job-persist', 'ses_persist');
     assert.equal(record.state, 'succeeded');
     await registry.cleanup();
   });
@@ -276,7 +276,7 @@ describe('background Fleet jobs', () => {
       agentPath: 'fleet-agent',
     });
     failPersistence = true;
-    const record = await registry.cancel(config, 'node', 'job-3', 'ses_3');
+    const record = await registry.cancel('job-3', 'ses_3');
     assert.equal(calls.cancel, 1);
     assert.equal(record.state, 'cancel-requested');
     await registry.cleanup();

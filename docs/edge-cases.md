@@ -70,6 +70,22 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | CTL-03 | SSH argv is fixed and the agent path is validated | planned (unit) |
 | CTL-04 | Sync, exec and fetch work against the real agent | `test/v1/protocol.test.js` |
 
+## Context, transfers and read-only operations
+
+| ID | Statement | Test |
+|---|---|---|
+| CTX-01 | Status and probe never create a replica root or state entry | `test/v1/protocol.test.js`, `test/unit/operations.test.js` |
+| CTX-02 | `sync plan` is read-only and refuses an absent replica | `test/unit/operations.test.js` |
+| CTX-03 | A lease is bound to the workspace that acquired it | `test/v1/protocol.test.js` |
+| CTX-04 | `sync=plan` never executes a command | `test/unit/run.test.js` |
+| CTX-05 | `cwd` stays relative to the root and rejects symlink or parent escapes | `test/v1/protocol.test.js` |
+| CTX-06 | A scratch target is explicit and has no source or sync | `test/unit/scratch.test.js`, `test/unit/plugin.test.js` |
+| XFR-01 | A regular file round-trips through scratch with size and digest verification | `test/v1/protocol.test.js` |
+| XFR-02 | Symlinks, path traversal and non-regular files are refused | `test/v1/protocol.test.js` |
+| XFR-03 | An existing destination is not overwritten by default | `test/v1/protocol.test.js` |
+| XFR-04 | Jobs are addressed by id and owning session, not by the current workspace | `test/unit/jobs.test.js`, `test/unit/supervised.test.js` |
+| XFR-05 | A background exec carries the synchronized generation | `test/unit/supervised.test.js` |
+
 ## Host selection
 
 | ID | Statement | Test |

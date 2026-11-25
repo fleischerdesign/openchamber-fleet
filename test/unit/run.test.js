@@ -115,7 +115,7 @@ describe('agent-first run', () => {
     assert.equal(result.sync?.mode, 'plan');
   });
 
-  test('sync=plan runs when the replica is current', async () => {
+  test('sync=plan never executes, even when the replica is current', async () => {
     let executed = false;
     const result = await runWorkspace(null, workspace(), workspace().hosts.a, {
       argv: ['true'],
@@ -124,8 +124,9 @@ describe('agent-first run', () => {
       sync: async () => syncSummary(0),
       exec: async () => { executed = true; return execResult(); },
     });
-    assert.equal(result.state, 'succeeded');
-    assert.equal(executed, true);
+    assert.equal(result.state, 'sync-planned');
+    assert.equal(result.exec, null);
+    assert.equal(executed, false);
   });
 
   test('retries a busy workspace with backoff', async () => {

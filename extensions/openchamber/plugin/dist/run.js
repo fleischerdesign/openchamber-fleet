@@ -90,6 +90,9 @@ export async function runWorkspace(client, config, host, options, operations = d
     const { sync, required } = await syncForRun(client, config, host, options, operations);
     if (required)
         return { state: 'sync-required', sync, exec: null };
+    if ((options.sync ?? 'auto') === 'plan') {
+        return { state: 'sync-planned', sync, exec: null };
+    }
     await options.beforeExec?.();
     const execOptions = {
         workspaceId: config.name,
@@ -98,6 +101,7 @@ export async function runWorkspace(client, config, host, options, operations = d
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         ...(options.env === undefined ? {} : { env: options.env }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(sync?.generation === null || sync?.generation === undefined ? {} : { expectedGeneration: sync.generation }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.onExecProgress === undefined ? {} : { onProgress: options.onExecProgress }),
     };

@@ -83,6 +83,7 @@ export class SupervisedJobRegistry {
             ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
             env: input.env ?? {},
             ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+            ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
             agentPath: input.agentPath,
             ...(process.env.FLEET_SSH_PATH ? { sshPath: process.env.FLEET_SSH_PATH } : {}),
             ...(Object.keys(sshEnv).length === 0 ? {} : { sshEnv }),
@@ -140,11 +141,9 @@ export class SupervisedJobRegistry {
         }
         throw new AgentError('SUPERVISOR_UNAVAILABLE', 'the detached supervisor claimed the job but wrote no record');
     }
-    async status(config, host, jobId, sessionID) {
+    async status(jobId, sessionID) {
         const record = this.store.readJob(jobId);
         if (!record)
-            return null;
-        if (record.workspace !== config.name || record.host.alias !== host)
             return null;
         if (record.sessionID !== sessionID)
             throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
@@ -152,7 +151,7 @@ export class SupervisedJobRegistry {
             this.watch(jobId);
         return this.stored(record);
     }
-    async list(sessionID, directory) {
+    async list(sessionID) {
         let jobs;
         try {
             jobs = this.store.listJobs();
@@ -161,13 +160,13 @@ export class SupervisedJobRegistry {
             return [];
         }
         return jobs
-            .filter((record) => record.sessionID === sessionID && (!directory || record.directory === directory))
+            .filter((record) => record.sessionID === sessionID)
             .map((record) => this.stored(record))
             .slice(0, 50);
     }
-    async cancel(config, host, jobId, sessionID) {
+    async cancel(jobId, sessionID) {
         const record = this.store.readJob(jobId);
-        if (!record || record.workspace !== config.name || record.host.alias !== host)
+        if (!record)
             return null;
         if (record.sessionID !== sessionID)
             throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');

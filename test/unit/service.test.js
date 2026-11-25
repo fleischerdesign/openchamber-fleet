@@ -103,7 +103,7 @@ describe('Fleet service configuration route', () => {
       const view = await request(service, 'GET', `/status-view?directory=${encodeURIComponent(chat)}`);
       assert.equal(view.status, 200);
       assert.equal(view.body.rows[0].id, 'default');
-      assert.match(view.body.rows[0].text, /using the default workspace defaulted/);
+      assert.match(view.body.rows[0].text, /Default workspace: defaulted/);
       assert.ok(view.body.rows.some((row) => row.id === 'mob'));
     } finally {
       service.child.kill();

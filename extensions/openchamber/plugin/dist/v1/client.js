@@ -1,4 +1,5 @@
 /** Protocol client: requests, notifications, credit-controlled streams. */
+import fs from 'node:fs';
 import { FLEET_VERSION } from '../version.js';
 import { DATA_HEADER_BYTES, FrameDecoder, MAX_DATA_BYTES, decodeData, encodeControl, encodeData } from './frame.js';
 import { AgentError } from './errors.js';
@@ -83,6 +84,7 @@ export class AgentClient {
                 bytes: 0,
                 nextSeq: 0n,
                 onData: options.onData,
+                ...(options.sink === undefined ? {} : { sink: options.sink }),
                 resolve: (value) => { clearTimeout(timer); resolve(value); },
                 reject: (error) => { clearTimeout(timer); reject(error); },
             });
@@ -100,10 +102,58 @@ export class AgentClient {
         let seq = 0n;
         for (let offset = 0; offset < data.length; offset += chunkSize) {
             const chunk = data.subarray(offset, offset + chunkSize);
-            this.transport.stdin.write(encodeData(streamId, seq, chunk));
+            await this.writeData(streamId, seq, chunk);
             seq += 1n;
         }
         return this.request('stream.end', { streamId });
+    }
+    /** Upload a file in bounded chunks, then end the stream. */
+    async uploadFile(streamId, file) {
+        const chunkSize = Math.min(MAX_DATA_BYTES, this.info.limits.maxData - DATA_HEADER_BYTES);
+        if (chunkSize < 1)
+            throw new AgentError('UNSUPPORTED_CAPABILITY', 'agent maxData cannot carry a stream payload');
+        let seq = 0n;
+        for await (const value of fs.createReadStream(file, { highWaterMark: chunkSize })) {
+            const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+            await this.writeData(streamId, seq, chunk);
+            seq += 1n;
+        }
+        return this.request('stream.end', { streamId });
+    }
+    /** Receive a stream into a file without retaining it in memory. */
+    async collectToFile(streamId, file, options = {}) {
+        const fd = fs.openSync(file, 'wx', 0o600);
+        try {
+            return await this.collect(streamId, {
+                ...options,
+                sink: (chunk) => {
+                    let offset = 0;
+                    while (offset < chunk.length) {
+                        offset += fs.writeSync(fd, chunk, offset);
+                    }
+                },
+            });
+        }
+        finally {
+            fs.closeSync(fd);
+        }
+    }
+    async writeData(streamId, seq, chunk) {
+        const accepted = this.transport.stdin.write(encodeData(streamId, seq, chunk));
+        if (accepted)
+            return;
+        await new Promise((resolve, reject) => {
+            const onDrain = () => {
+                this.transport.stdin.removeListener('error', onError);
+                resolve();
+            };
+            const onError = (error) => {
+                this.transport.stdin.removeListener('drain', onDrain);
+                reject(error);
+            };
+            this.transport.stdin.once('drain', onDrain);
+            this.transport.stdin.once('error', onError);
+        });
     }
     close() {
         if (this.closed)
@@ -189,7 +239,19 @@ export class AgentClient {
             return;
         }
         stream.nextSeq += 1n;
-        stream.chunks.push(header.bytes);
+        if (stream.sink) {
+            try {
+                stream.sink(header.bytes);
+            }
+            catch (error) {
+                this.streams.delete(header.streamId);
+                stream.reject(error instanceof Error ? error : new Error(String(error)));
+                return;
+            }
+        }
+        else {
+            stream.chunks.push(header.bytes);
+        }
         stream.bytes += header.bytes.length;
         try {
             stream.onData?.(header.bytes);

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -31,16 +32,20 @@ pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug)]
 pub struct Capabilities {
     pub workspace_sync: bool,
+    pub workspace_probe: bool,
     pub exec: bool,
     pub artifact: bool,
+    pub transfer: bool,
 }
 
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
             workspace_sync: true,
+            workspace_probe: true,
             exec: true,
             artifact: true,
+            transfer: true,
         }
     }
 }
@@ -51,11 +56,17 @@ impl Capabilities {
         if self.workspace_sync {
             map.insert("workspace.sync".into(), json!(1));
         }
+        if self.workspace_probe {
+            map.insert("workspace.probe".into(), json!(1));
+        }
         if self.exec {
             map.insert("exec".into(), json!(1));
         }
         if self.artifact {
             map.insert("artifact".into(), json!(1));
+        }
+        if self.transfer {
+            map.insert("transfer".into(), json!(1));
         }
         Value::Object(map)
     }
@@ -63,15 +74,22 @@ impl Capabilities {
     pub fn supports(&self, name: &str) -> bool {
         match name {
             "workspace.sync" => self.workspace_sync,
+            "workspace.probe" => self.workspace_probe,
             "exec" => self.exec,
             "artifact" => self.artifact,
+            "transfer" => self.transfer,
             _ => false,
         }
     }
 }
 
+enum UploadKind {
+    SyncBlob { txn_id: String },
+    Transfer,
+}
+
 struct Upload {
-    txn_id: String,
+    kind: UploadKind,
     digest: String,
     size: u64,
     received: u64,
@@ -80,6 +98,13 @@ struct Upload {
     temporary: PathBuf,
     target: PathBuf,
     file: File,
+    overwrite: bool,
+    result_path: String,
+}
+
+struct LeaseBinding {
+    workspace_id: String,
+    handle: LeaseHandle,
 }
 
 pub struct Session {
@@ -87,7 +112,7 @@ pub struct Session {
     installation: String,
     capabilities: Capabilities,
     registry: Registry,
-    leases: HashMap<String, LeaseHandle>,
+    leases: HashMap<String, LeaseBinding>,
     transactions: HashMap<String, TxnRecord>,
     uploads: HashMap<u32, Upload>,
     jobs: HashMap<String, Arc<Job>>,
@@ -158,6 +183,7 @@ impl Session {
             )),
             "workspace.open" => self.workspace_open(&request),
             "workspace.status" => self.workspace_status(&request),
+            "workspace.probe" => self.workspace_probe(&request),
             "workspace.lease" => self.workspace_lease(&request),
             "workspace.release" => self.workspace_release(&request),
             "sync.begin" => self.sync_begin(&request),
@@ -169,6 +195,8 @@ impl Session {
             "sync.recover" => self.sync_recover(&request),
             "sync.inspect" => self.sync_inspect(&request),
             "blob.put" => self.blob_put(&request),
+            "transfer.put" => self.transfer_put(&request),
+            "transfer.get" => self.transfer_get(&request),
             "stream.end" => self.stream_end(&request),
             "stream.credit" => self.stream_credit(&request),
             "exec.start" => self.exec_start(&request),
@@ -326,12 +354,36 @@ impl Session {
         }
         match workspace::acquire_lease(&workspace.state, operation, &self.installation, ttl) {
             Ok(handle) => {
+                let generation = match self.registry.get_mut(id) {
+                    Some(current) => match workspace::reload_workspace(current) {
+                        Ok(()) => current.generation,
+                        Err(error) => {
+                            handle.release();
+                            return Action::Reply(error_response(&request.id, &error));
+                        }
+                    },
+                    None => {
+                        handle.release();
+                        return Action::Reply(rpc::error(
+                            &request.id,
+                            "WORKSPACE_UNKNOWN",
+                            id,
+                            false,
+                        ));
+                    }
+                };
                 let result = json!({
                     "leaseId": operation,
-                    "generation": workspace.generation,
+                    "generation": generation,
                     "expiresAt": handle.meta.expires_at,
                 });
-                self.leases.insert(operation.to_string(), handle);
+                self.leases.insert(
+                    operation.to_string(),
+                    LeaseBinding {
+                        workspace_id: id.to_string(),
+                        handle,
+                    },
+                );
                 Action::Reply(rpc::response(&request.id, result))
             }
             Err(error) => Action::Reply(error_response(&request.id, &error)),
@@ -343,11 +395,27 @@ impl Session {
             return usage_error(request, "leaseId is required");
         };
         match self.leases.remove(lease) {
-            Some(handle) => {
-                handle.release();
+            Some(binding) => {
+                binding.handle.release();
                 Action::Reply(rpc::response(&request.id, json!({"ok": true})))
             }
             None => Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false)),
+        }
+    }
+
+    fn workspace_probe(&mut self, request: &Request) -> Action {
+        let Some(id) = request.params.get("workspaceId").and_then(Value::as_str) else {
+            return usage_error(request, "workspaceId is required");
+        };
+        let Some(root) = request.params.get("root").and_then(Value::as_str) else {
+            return usage_error(request, "root is required");
+        };
+        match workspace::probe_workspace(id, root) {
+            Ok(probe) => Action::Reply(rpc::response(
+                &request.id,
+                serde_json::to_value(probe).unwrap_or_else(|_| json!({"state": "UNKNOWN"})),
+            )),
+            Err(error) => Action::Reply(error_response(&request.id, &error)),
         }
     }
 
@@ -358,8 +426,16 @@ impl Session {
         let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
             return usage_error(request, "leaseId is required");
         };
-        if !self.leases.contains_key(lease) {
+        let Some(binding) = self.leases.get(lease) else {
             return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        };
+        if binding.workspace_id != workspace_id {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "LEASE_MISMATCH",
+                "lease belongs to another workspace",
+                false,
+            ));
         }
         let base = request
             .params
@@ -575,7 +651,9 @@ impl Session {
         self.uploads.insert(
             stream,
             Upload {
-                txn_id: txn_id.to_string(),
+                kind: UploadKind::SyncBlob {
+                    txn_id: txn_id.to_string(),
+                },
                 digest: digest.to_string(),
                 size,
                 received: 0,
@@ -584,9 +662,199 @@ impl Session {
                 temporary,
                 target,
                 file,
+                overwrite: true,
+                result_path: String::new(),
             },
         );
         Action::Reply(rpc::response(&request.id, json!({"streamId": stream})))
+    }
+
+    fn transfer_put(&mut self, request: &Request) -> Action {
+        let Some(workspace_id) = request.params.get("workspaceId").and_then(Value::as_str) else {
+            return usage_error(request, "workspaceId is required");
+        };
+        let Some(path) = request.params.get("path").and_then(Value::as_str) else {
+            return usage_error(request, "path is required");
+        };
+        let Some(digest) = request.params.get("digest").and_then(Value::as_str) else {
+            return usage_error(request, "digest is required");
+        };
+        if !crate::model::is_digest(digest) {
+            return usage_error(request, "digest must be sha256:<hex>");
+        }
+        let size = request
+            .params
+            .get("size")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let overwrite = request
+            .params
+            .get("overwrite")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let Some(workspace) = self.registry.get(workspace_id) else {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_UNKNOWN",
+                workspace_id,
+                false,
+            ));
+        };
+        let target = match workspace::safe_join(&workspace.root, path, true) {
+            Ok(path) => path,
+            Err(error) => {
+                return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", &error, false))
+            }
+        };
+        if target.exists() && !overwrite {
+            return Action::Reply(rpc::error(&request.id, "DEST_EXISTS", path, false));
+        }
+        let parent = match target.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", path, false)),
+        };
+        let stream = self.next_stream;
+        self.next_stream += 1;
+        let temporary = parent.join(format!(".fleet-upload-{stream}-{}", std::process::id()));
+        let file = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "INTERNAL",
+                    &error.to_string(),
+                    false,
+                ))
+            }
+        };
+        self.uploads.insert(
+            stream,
+            Upload {
+                kind: UploadKind::Transfer,
+                digest: digest.to_string(),
+                size,
+                received: 0,
+                next_seq: 0,
+                hasher: Sha256::new(),
+                temporary,
+                target,
+                file,
+                overwrite,
+                result_path: path.to_string(),
+            },
+        );
+        Action::Reply(rpc::response(&request.id, json!({"streamId": stream})))
+    }
+
+    fn transfer_get(&mut self, request: &Request) -> Action {
+        let Some(workspace_id) = request.params.get("workspaceId").and_then(Value::as_str) else {
+            return usage_error(request, "workspaceId is required");
+        };
+        let Some(path) = request.params.get("path").and_then(Value::as_str) else {
+            return usage_error(request, "path is required");
+        };
+        let Some(workspace) = self.registry.get(workspace_id) else {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_UNKNOWN",
+                workspace_id,
+                false,
+            ));
+        };
+        let target = match workspace::safe_join(&workspace.root, path, false) {
+            Ok(path) => path,
+            Err(error) => {
+                return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", &error, false))
+            }
+        };
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(_) => return Action::Reply(rpc::error(&request.id, "NOT_FOUND", path, false)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "PATH_UNSAFE",
+                "not a regular file",
+                false,
+            ));
+        }
+        let file = match File::open(&target) {
+            Ok(file) => file,
+            Err(error) => {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "INTERNAL",
+                    &error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let mut reader = BufReader::new(file);
+        let mut hasher = Sha256::new();
+        let mut total = 0u64;
+        let mut chunk = [0u8; 65536];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    hasher.update(&chunk[..count]);
+                    total += count as u64;
+                }
+                Err(error) => {
+                    return Action::Reply(rpc::error(
+                        &request.id,
+                        "INTERNAL",
+                        &error.to_string(),
+                        false,
+                    ))
+                }
+            }
+        }
+        let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let file = match File::open(&target) {
+            Ok(file) => file,
+            Err(error) => {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "INTERNAL",
+                    &error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let stream = self.next_stream;
+        self.next_stream += 1;
+        let buffer = Buffer::new();
+        self.out_streams.insert(
+            stream,
+            OutStream {
+                buffer: buffer.clone(),
+                credit: 0,
+                seq: 0,
+            },
+        );
+        thread::spawn(move || {
+            let mut reader = BufReader::new(file);
+            let mut chunk = [0u8; 65536];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => buffer.push(&chunk[..count]),
+                    Err(_) => break,
+                }
+            }
+            buffer.end();
+        });
+        Action::Reply(rpc::response(
+            &request.id,
+            json!({"streamId": stream, "size": total, "digest": digest, "path": path}),
+        ))
     }
 
     fn stream_end(&mut self, request: &Request) -> Action {
@@ -616,18 +884,70 @@ impl Session {
             return Action::Reply(rpc::error(&request.id, "BLOB_CORRUPT", &digest, false));
         }
         drop(upload.file);
-        if let Err(error) = fs::rename(&upload.temporary, &upload.target) {
-            return Action::Reply(rpc::error(
-                &request.id,
-                "INTERNAL",
-                &error.to_string(),
-                false,
-            ));
+        match upload.kind {
+            UploadKind::SyncBlob { txn_id } => {
+                if let Err(error) = fs::rename(&upload.temporary, &upload.target) {
+                    return Action::Reply(rpc::error(
+                        &request.id,
+                        "INTERNAL",
+                        &error.to_string(),
+                        false,
+                    ));
+                }
+                Action::Reply(rpc::response(
+                    &request.id,
+                    json!({"digest": digest, "txnId": txn_id}),
+                ))
+            }
+            UploadKind::Transfer => {
+                if !upload.overwrite && upload.target.exists() {
+                    let _ = fs::remove_file(&upload.temporary);
+                    return Action::Reply(rpc::error(
+                        &request.id,
+                        "DEST_EXISTS",
+                        upload.result_path.as_str(),
+                        false,
+                    ));
+                }
+                if upload.overwrite {
+                    if let Err(error) = fs::rename(&upload.temporary, &upload.target) {
+                        return Action::Reply(rpc::error(
+                            &request.id,
+                            "INTERNAL",
+                            &error.to_string(),
+                            false,
+                        ));
+                    }
+                } else {
+                    // hard_link is the atomic no-clobber publish. The temporary
+                    // file is in the target directory, so both names share a
+                    // filesystem and the link cannot cross a device boundary.
+                    if let Err(error) = fs::hard_link(&upload.temporary, &upload.target) {
+                        let _ = fs::remove_file(&upload.temporary);
+                        let code = if error.kind() == io::ErrorKind::AlreadyExists {
+                            "DEST_EXISTS"
+                        } else {
+                            "INTERNAL"
+                        };
+                        return Action::Reply(rpc::error(
+                            &request.id,
+                            code,
+                            &error.to_string(),
+                            false,
+                        ));
+                    }
+                    let _ = fs::remove_file(&upload.temporary);
+                }
+                Action::Reply(rpc::response(
+                    &request.id,
+                    json!({
+                        "digest": digest,
+                        "size": upload.size,
+                        "path": upload.result_path,
+                    }),
+                ))
+            }
         }
-        Action::Reply(rpc::response(
-            &request.id,
-            json!({"digest": digest, "txnId": upload.txn_id}),
-        ))
     }
 
     fn sync_commit(&mut self, request: &Request) -> Action {
@@ -878,8 +1198,16 @@ impl Session {
         let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
             return usage_error(request, "leaseId is required");
         };
-        if !self.leases.contains_key(lease) {
+        let Some(binding) = self.leases.get(lease) else {
             return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        };
+        if binding.workspace_id != workspace_id {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "LEASE_MISMATCH",
+                "lease belongs to another workspace",
+                false,
+            ));
         }
         let Some(argv) = request.params.get("argv").and_then(Value::as_array) else {
             return usage_error(request, "argv is required");
@@ -921,6 +1249,19 @@ impl Session {
                 false,
             ));
         };
+        if workspace.recovery.is_some() {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "RECOVERY_REQUIRED",
+                "workspace has an unfinished transaction",
+                true,
+            ));
+        }
+        if let Some(value) = cwd.as_deref() {
+            if let Err(error) = workspace::safe_directory(&workspace.root, value) {
+                return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", &error, false));
+            }
+        }
         if expected != u64::MAX && workspace.generation != expected {
             return Action::Reply(rpc::error(
                 &request.id,
@@ -1032,10 +1373,12 @@ impl Session {
                 false,
             ));
         };
-        if let Err(error) = crate::model::validate_path(path) {
-            return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", &error, false));
-        }
-        let target = workspace.root.join(path);
+        let target = match workspace::safe_join(&workspace.root, path, false) {
+            Ok(path) => path,
+            Err(error) => {
+                return Action::Reply(rpc::error(&request.id, "PATH_UNSAFE", &error, false))
+            }
+        };
         let metadata = match fs::symlink_metadata(&target) {
             Ok(metadata) => metadata,
             Err(_) => {
@@ -1047,6 +1390,14 @@ impl Session {
                 &request.id,
                 "PATH_UNSAFE",
                 "not a regular file",
+                false,
+            ));
+        }
+        if metadata.len() > 64 * 1024 * 1024 {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "RESOURCE_EXHAUSTED",
+                "artifact exceeds the 64 MiB legacy limit; use transfer.get",
                 false,
             ));
         }
@@ -1136,8 +1487,11 @@ fn error_response(id: &Value, message: &str) -> String {
         "RECOVERY_REQUIRED",
         "GENERATION_MISMATCH",
         "LEASE_UNKNOWN",
+        "LEASE_MISMATCH",
         "LEASE_EXPIRED",
         "PATH_UNSAFE",
+        "DEST_EXISTS",
+        "NOT_FOUND",
         "UNSUPPORTED_METADATA",
         "PLAN_MISMATCH",
         "BLOB_MISSING",

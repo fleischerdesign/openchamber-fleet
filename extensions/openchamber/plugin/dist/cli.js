@@ -5,9 +5,10 @@ import { compileExcludes, configPaths, defaultWorkspaceName, initProjectConfig, 
 import { FleetError, friendlyErrorMessage } from './errors.js';
 import { hostViews, selectHost } from './hosts.js';
 import { runWorkspace } from './run.js';
+import { scratchConfig } from './scratch.js';
 import { AgentError, exitCodeFor } from './v1/errors.js';
-import { connectSsh, execCommand, fetchArtifact, recoverWorkspace, status, syncWorkspace, } from './v1/operations.js';
-const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file', 'clear']);
+import { connectSsh, downloadFile, execCommand, recoverWorkspace, status, syncWorkspace, uploadFile, } from './v1/operations.js';
+const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file', 'clear', 'scratch']);
 export async function main(argv) {
     const parsed = parse(argv);
     if (parsed.command === '' || parsed.command === 'help' || parsed.flags.has('help')) {
@@ -25,6 +26,8 @@ export async function main(argv) {
             case 'run': return await cmdRun(parsed);
             case 'exec': return await cmdExec(parsed);
             case 'fetch': return await cmdFetch(parsed);
+            case 'upload': return await cmdUpload(parsed);
+            case 'download': return await cmdDownload(parsed);
             case 'hosts': return cmdHosts(parsed);
             default: throw new FleetError('usage', `unknown command ${parsed.command}`);
         }
@@ -101,6 +104,12 @@ function configOf(flags, hostsOnly = false) {
         }
         throw error;
     }
+}
+/** Project config by default; `--scratch` gives a remote-only session space. */
+function executionConfigOf(flags) {
+    if (!flags.has('scratch'))
+        return configOf(flags);
+    return scratchConfig({ seed: process.cwd(), directory: process.cwd() });
 }
 function cmdDefault(parsed) {
     const configDir = parsed.flags.get('config-dir');
@@ -211,7 +220,7 @@ async function cmdDoctor(parsed) {
     }
 }
 async function cmdStatus(parsed) {
-    const config = configOf(parsed.flags);
+    const config = executionConfigOf(parsed.flags);
     const host = hostOf(config, parsed.flags);
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
@@ -298,7 +307,7 @@ function timeoutMsOf(flags) {
     return typeof timeout === 'string' ? Number(timeout) * 1000 : undefined;
 }
 async function cmdRun(parsed) {
-    const config = configOf(parsed.flags);
+    const config = executionConfigOf(parsed.flags);
     const host = selectHost(config, {
         ...(typeof parsed.flags.get('host') === 'string' ? { host: String(parsed.flags.get('host')) } : {}),
         tags: tagsOf(parsed.flags),
@@ -314,21 +323,35 @@ async function cmdRun(parsed) {
             : parsed.flags.has('apply')
                 ? 'apply'
                 : 'auto';
+    if (parsed.flags.has('scratch') && (sync === 'plan' || sync === 'apply')) {
+        throw new FleetError('usage', '--scratch has no source tree; sync=plan/apply requires a project workspace');
+    }
     if (parsed.flags.has('adopt') && sync !== 'auto' && sync !== 'apply') {
         throw new FleetError('usage', '--adopt is only valid with --sync auto or --sync apply');
     }
-    const additions = excludesOf(config, parsed.flags).filter((pattern) => !config.excludes.includes(pattern));
+    const additions = parsed.flags.has('scratch')
+        ? []
+        : excludesOf(config, parsed.flags).filter((pattern) => !config.excludes.includes(pattern));
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
-        const result = await runWorkspace(client, config, host, {
-            argv,
-            cwd: typeof parsed.flags.get('cwd') === 'string' ? String(parsed.flags.get('cwd')) : undefined,
-            env: envOf(parsed.flags),
-            timeoutMs: timeoutMsOf(parsed.flags),
-            sync,
-            excludes: additions,
-            adopt: parsed.flags.has('adopt'),
-        });
+        const result = parsed.flags.has('scratch')
+            ? await execCommand(client, {
+                workspaceId: config.name,
+                root: host.root,
+                argv,
+                cwd: typeof parsed.flags.get('cwd') === 'string' ? String(parsed.flags.get('cwd')) : undefined,
+                env: envOf(parsed.flags),
+                timeoutMs: timeoutMsOf(parsed.flags),
+            }).then((exec) => ({ state: exec.state, sync: null, exec }))
+            : await runWorkspace(client, config, host, {
+                argv,
+                cwd: typeof parsed.flags.get('cwd') === 'string' ? String(parsed.flags.get('cwd')) : undefined,
+                env: envOf(parsed.flags),
+                timeoutMs: timeoutMsOf(parsed.flags),
+                sync,
+                excludes: additions,
+                adopt: parsed.flags.has('adopt'),
+            });
         if (parsed.flags.has('json')) {
             process.stdout.write(`${JSON.stringify({
                 host: host.alias,
@@ -361,7 +384,7 @@ async function cmdRun(parsed) {
     }
 }
 function cmdHosts(parsed) {
-    const config = configOf(parsed.flags, true);
+    const config = parsed.flags.has('scratch') ? executionConfigOf(parsed.flags) : configOf(parsed.flags, true);
     const tags = tagsOf(parsed.flags);
     const views = hostViews(config);
     let selected = null;
@@ -386,7 +409,7 @@ function cmdHosts(parsed) {
         process.exitCode = 2;
 }
 async function cmdExec(parsed) {
-    const config = configOf(parsed.flags);
+    const config = executionConfigOf(parsed.flags);
     const host = hostOf(config, parsed.flags);
     const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
     if (argv.length === 0)
@@ -416,7 +439,7 @@ async function cmdExec(parsed) {
     }
 }
 async function cmdFetch(parsed) {
-    const config = configOf(parsed.flags);
+    const config = executionConfigOf(parsed.flags);
     const host = hostOf(config, parsed.flags);
     const dest = parsed.flags.get('dest');
     if (typeof dest !== 'string')
@@ -426,14 +449,61 @@ async function cmdFetch(parsed) {
         throw new FleetError('usage', 'fetch needs an artifact path');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
-        const result = await fetchArtifact(client, {
+        const result = await downloadFile(client, {
             workspaceId: config.name,
             root: host.root,
-            artifact,
-            dest,
+            path: artifact,
+            dest: path.join(dest, path.basename(artifact)),
             overwrite: parsed.flags.has('overwrite'),
         });
         process.stdout.write(`fetched ${result.file} (${result.bytes} bytes) ${result.digest}\n`);
+    }
+    finally {
+        client.close();
+    }
+}
+async function cmdUpload(parsed) {
+    const source = parsed.positional[0] ?? parsed.rest[0];
+    const remote = parsed.flags.get('to');
+    if (!source || typeof remote !== 'string') {
+        throw new FleetError('usage', 'upload needs <local-path> and --to <remote-path>');
+    }
+    // Uploads always land in the private scratch space, never in a replica root.
+    const config = scratchConfig({ seed: process.cwd(), directory: process.cwd() });
+    const host = hostOf(config, parsed.flags);
+    const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
+    try {
+        const result = await uploadFile(client, {
+            workspaceId: config.name,
+            root: host.root,
+            path: remote,
+            source: path.resolve(source),
+            overwrite: parsed.flags.has('overwrite'),
+        });
+        process.stdout.write(`uploaded ${source} -> ${remote} (${result.bytes} bytes) ${result.digest}\n`);
+    }
+    finally {
+        client.close();
+    }
+}
+async function cmdDownload(parsed) {
+    const remote = parsed.positional[0] ?? parsed.rest[0];
+    const dest = parsed.flags.get('dest');
+    if (!remote || typeof dest !== 'string') {
+        throw new FleetError('usage', 'download needs <remote-path> and --dest <local-path>');
+    }
+    const config = executionConfigOf(parsed.flags);
+    const host = hostOf(config, parsed.flags);
+    const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
+    try {
+        const result = await downloadFile(client, {
+            workspaceId: config.name,
+            root: host.root,
+            path: remote,
+            dest: path.resolve(dest),
+            overwrite: parsed.flags.has('overwrite'),
+        });
+        process.stdout.write(`downloaded ${remote} -> ${result.file} (${result.bytes} bytes) ${result.digest}\n`);
     }
     finally {
         client.close();
@@ -454,10 +524,12 @@ function printHelp() {
         '  fleet recover --host <alias> [--abort] [--json]',
         '  fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]',
         '  fleet run [--host <alias|auto>] [--tag a,b] [--cwd P] [--env K=V,...] [--timeout SEC]',
-        '            [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--json] -- <command…>',
-        '  fleet exec --host <alias> [--cwd P] [--env K=V,...] [--timeout SEC] [--json] -- <command…>',
-        '  fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>',
-        '  all commands accept --config-dir <dir>',
+        '            [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--scratch] [--json] -- <command…>',
+        '  fleet exec --host <alias> [--cwd P] [--env K=V,...] [--timeout SEC] [--scratch] [--json] -- <command…>',
+        '  fleet fetch --host <alias> --dest <dir> [--overwrite] [--scratch] -- <path>',
+        '  fleet upload <local-path> --host <alias> --to <remote-path> [--scratch] [--overwrite]',
+        '  fleet download <remote-path> --host <alias> --dest <local-path> [--scratch] [--overwrite]',
+        '  all commands accept --config-dir <dir>; --scratch uses a private remote-only session space',
         '',
     ].join('\n'));
 }

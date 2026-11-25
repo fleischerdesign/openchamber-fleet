@@ -57,6 +57,16 @@ pub struct Workspace {
     pub recovery: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceProbe {
+    pub state: &'static str,
+    pub root: String,
+    pub generation: u64,
+    #[serde(rename = "manifestDigest")]
+    pub manifest_digest: String,
+    pub recovery: bool,
+}
+
 #[derive(Default)]
 pub struct Registry {
     workspaces: HashMap<String, Workspace>,
@@ -135,6 +145,122 @@ pub fn state_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".local/state/fleet-agent/workspaces")
+}
+
+/// Refresh a workspace from disk after its lease was acquired, so the caller
+/// reads the generation and journal under the lease rather than a stale cache.
+pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
+    let state_file = workspace.state.join("state.json");
+    let manifest_file = workspace.state.join("manifest.json");
+    let value: WorkspaceState =
+        serde_json::from_str(&fs::read_to_string(&state_file).map_err(io_message)?)
+            .map_err(|error| format!("workspace state is corrupt: {error}"))?;
+    if Path::new(&value.root) != workspace.root {
+        return Err(format!(
+            "workspace {} is registered at {} not {}",
+            workspace.id,
+            value.root,
+            workspace.root.display()
+        ));
+    }
+    workspace.generation = value.generation;
+    workspace.manifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_file).map_err(io_message)?)
+            .map_err(|error| format!("workspace manifest is corrupt: {error}"))?;
+    workspace.recovery = if workspace.state.join("journal.json").exists() {
+        Some("applying".into())
+    } else {
+        None
+    };
+    Ok(())
+}
+
+/// Inspect a workspace without creating its root, state directory or manifest.
+pub fn probe_workspace(id: &str, root_input: &str) -> Result<WorkspaceProbe, String> {
+    validate_workspace_id(id)?;
+    let root = resolve_root(root_input)?;
+    let state = state_root().join(id);
+    let state_file = state.join("state.json");
+    let manifest_file = state.join("manifest.json");
+    let journal_file = state.join("journal.json");
+
+    if !state_file.exists() {
+        return Ok(WorkspaceProbe {
+            state: if root.exists() { "UNMANAGED" } else { "ABSENT" },
+            root: root.to_string_lossy().to_string(),
+            generation: 0,
+            manifest_digest: Manifest::empty().digest,
+            recovery: false,
+        });
+    }
+
+    let value: WorkspaceState =
+        serde_json::from_str(&fs::read_to_string(&state_file).map_err(io_message)?)
+            .map_err(|error| format!("workspace state is corrupt: {error}"))?;
+    if Path::new(&value.root) != root {
+        return Err(format!(
+            "workspace {id} is registered at {} not {}",
+            value.root,
+            root.display()
+        ));
+    }
+    let manifest: Manifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_file).map_err(io_message)?)
+            .map_err(|error| format!("workspace manifest is corrupt: {error}"))?;
+    Ok(WorkspaceProbe {
+        state: if journal_file.exists() {
+            "RECOVERY"
+        } else {
+            "READY"
+        },
+        root: root.to_string_lossy().to_string(),
+        generation: value.generation,
+        manifest_digest: manifest.digest,
+        recovery: journal_file.exists(),
+    })
+}
+
+/// Resolve a relative path below a root without following symlinks.
+///
+/// `allow_missing_leaf` is for a file that will be created; every parent must
+/// already exist as a real directory. The final component may be absent.
+pub fn safe_join(root: &Path, relative: &str, allow_missing_leaf: bool) -> Result<PathBuf, String> {
+    crate::model::validate_path(relative)?;
+    let segments: Vec<&str> = relative.split('/').collect();
+    let mut current = root.to_path_buf();
+    for (index, segment) in segments.iter().enumerate() {
+        current.push(segment);
+        let is_leaf = index + 1 == segments.len();
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(format!("path {relative:?} contains a symlink"));
+                }
+                if !is_leaf && !metadata.is_dir() {
+                    return Err(format!("path {relative:?} has a non-directory parent"));
+                }
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && is_leaf && allow_missing_leaf => {}
+            Err(error) => {
+                return Err(format!(
+                    "path {relative:?} is not accessible below the root: {error}"
+                ))
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Resolve an existing directory below a root and reject symlinks.
+pub fn safe_directory(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let path = safe_join(root, relative, false)?;
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("path {relative:?} is not accessible: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("path {relative:?} is not a directory"));
+    }
+    Ok(path)
 }
 
 pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspace, String> {

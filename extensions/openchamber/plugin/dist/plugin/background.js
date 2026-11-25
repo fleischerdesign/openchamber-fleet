@@ -18,34 +18,34 @@ export class BackgroundJobs {
             return detached;
         return this.inProcess.start(input);
     }
-    async status(config, host, jobId, sessionID) {
-        const detached = await this.supervised.status(config, host, jobId, sessionID);
+    async status(jobId, sessionID) {
+        const detached = await this.supervised.status(jobId, sessionID);
         if (detached)
             return detached;
-        return this.inProcess.status(config, host, jobId, sessionID);
+        return this.inProcess.status(jobId, sessionID).catch((error) => {
+            if (error instanceof AgentError && error.code === 'OPERATION_UNKNOWN')
+                return null;
+            throw error;
+        });
     }
-    async list(sessionID, directory) {
+    async list(sessionID) {
         const [detached, inProcess] = await Promise.all([
-            this.supervised.list(sessionID, directory),
-            this.inProcess.list(sessionID, directory),
+            this.supervised.list(sessionID),
+            this.inProcess.list(sessionID),
         ]);
         const merged = new Map();
         for (const record of [...inProcess, ...detached])
             merged.set(record.key, record);
         return [...merged.values()].sort((left, right) => right.startedAt - left.startedAt).slice(0, 50);
     }
-    async cancel(config, host, jobId, sessionID) {
-        const detached = await this.supervised.status(config, host, jobId, sessionID).catch((error) => {
-            if (error instanceof AgentError && error.code === 'OPERATION_UNKNOWN')
-                return null;
-            throw error;
-        });
+    async cancel(jobId, sessionID) {
+        const detached = await this.supervised.status(jobId, sessionID);
         if (detached?.supervised === true) {
-            const cancelled = await this.supervised.cancel(config, host, jobId, sessionID);
+            const cancelled = await this.supervised.cancel(jobId, sessionID);
             if (cancelled)
                 return cancelled;
         }
-        return this.inProcess.cancel(config, host, jobId, sessionID);
+        return this.inProcess.cancel(jobId, sessionID);
     }
     async cancelSession(sessionID) {
         await this.supervised.cancelSession(sessionID);

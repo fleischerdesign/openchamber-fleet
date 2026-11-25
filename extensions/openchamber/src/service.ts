@@ -166,7 +166,7 @@ async function refresh(directory: string): Promise<GuestStatusView> {
       ? `The configured Fleet default workspace is unusable: ${fields.message}`
       : missing
         ? internal
-          ? 'No project selected. Fleet is available in a configured project workspace.'
+          ? 'No project selected. Remote-only tools work with target="scratch"; set a default workspace for sync.'
           : 'Fleet is not configured for this project. Use the Fleet panel or run `fleet init`; a legacy fleet.json is not required.'
         : `${fields.code}: ${fields.message}`;
     const view: GuestStatusView = {
@@ -187,7 +187,7 @@ async function refresh(directory: string): Promise<GuestStatusView> {
     }
   }));
   const rows: GuestStatusRow[] = fallback
-    ? [{ kind: 'note', id: 'default', text: `No project selected; using the default workspace ${config.name}.`, tone: 'muted' }]
+    ? [{ kind: 'note', id: 'default', text: `Default workspace: ${config.name} (no project selected).`, tone: 'muted' }]
     : [];
   results.forEach((result, index) => {
     const alias = aliases[index]!;

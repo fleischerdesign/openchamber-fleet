@@ -239,6 +239,7 @@ export class SupervisorCore {
                 ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
                 env: request.env,
                 ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+                ...(request.expectedGeneration === undefined ? {} : { expectedGeneration: request.expectedGeneration }),
                 onProgress: progress,
             });
             const current = this.store.readJob(record.jobId) ?? record;

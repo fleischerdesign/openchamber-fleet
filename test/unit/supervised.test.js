@@ -102,7 +102,7 @@ function startInput(configValue) {
 }
 
 function fakeExecutor(jobId, pending) {
-  const calls = { cancel: 0, close: 0 };
+  const calls = { cancel: 0, close: 0, start: null };
   const handle = {
     jobId,
     result: pending.promise,
@@ -113,7 +113,7 @@ function fakeExecutor(jobId, pending) {
     calls,
     executor: {
       connect: async () => ({ close: () => {} }),
-      start: async () => handle,
+      start: async (_client, options) => { calls.start = options; return handle; },
     },
   };
 }
@@ -186,17 +186,17 @@ describe('supervised Fleet jobs', () => {
     const { ctx, notifications } = harness(store);
     const registry = new SupervisedJobRegistry(ctx, { store, pollMs: 10, graceMs: 20, startupWaitMs: 100 });
     try {
-      const started = await registry.start(startInput(configValue));
+      const started = await registry.start({ ...startInput(configValue), expectedGeneration: 7 });
       assert.equal(started.supervised, true);
       assert.equal(started.state, 'running');
-      assert.equal((await registry.status(configValue, 'node', started.jobId, 'ses_test')).state, 'running');
+      assert.equal(calls.start.expectedGeneration, 7);
+      assert.equal((await registry.status(started.jobId, 'ses_test')).state, 'running');
       await assert.rejects(
-        registry.status(configValue, 'node', started.jobId, 'ses_other'),
+        registry.status(started.jobId, 'ses_other'),
         /another session/,
       );
-      assert.equal(await registry.status(configValue, 'other', started.jobId, 'ses_test'), null);
 
-      const cancelled = await registry.cancel(configValue, 'node', started.jobId, 'ses_test');
+      const cancelled = await registry.cancel(started.jobId, 'ses_test');
       assert.equal(cancelled.state, 'cancel-requested');
       assert.equal(calls.cancel, 1);
       pending.resolve({ jobId: 'remote-1', state: 'cancelled', exitCode: null, signal: 15, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
@@ -271,7 +271,7 @@ describe('supervised Fleet jobs', () => {
     registry.cleanup();
   });
 
-  test('lists only the owning session and project', async () => {
+  test('lists only the owning session', async () => {
     const store = new JobStore(root());
     store.ensure();
     store.writeJob(record('job-dddddddddddddddddddddddd', { sessionID: 'ses_test' }));
@@ -279,8 +279,11 @@ describe('supervised Fleet jobs', () => {
     store.writeJob(record('job-ffffffffffffffffffffffff', { sessionID: 'ses_test', directory: '/tmp/other' }));
     const { ctx } = harness(store);
     const registry = new SupervisedJobRegistry(ctx, { store });
-    assert.deepEqual((await registry.list('ses_test', '/tmp/project')).map((job) => job.jobId), ['job-dddddddddddddddddddddddd']);
-    assert.deepEqual((await registry.list('ses_other', '/tmp/project')).map((job) => job.jobId), ['job-eeeeeeeeeeeeeeeeeeeeeeee']);
+    assert.deepEqual((await registry.list('ses_test')).map((job) => job.jobId).sort(), [
+      'job-dddddddddddddddddddddddd',
+      'job-ffffffffffffffffffffffff',
+    ]);
+    assert.deepEqual((await registry.list('ses_other')).map((job) => job.jobId), ['job-eeeeeeeeeeeeeeeeeeeeeeee']);
     registry.cleanup();
   });
 });
