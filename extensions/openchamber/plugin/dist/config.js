@@ -15,7 +15,7 @@ const LEGACY_KEYS = new Set(['name', 'hosts', 'excludes', 'env', 'shell']);
 const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root', 'tags']);
 const HOST_REGISTRY_KEYS = new Set(['version', 'hosts']);
 const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags']);
-const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'roots', 'excludes', 'env', 'shell']);
+const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'requires', 'roots', 'excludes', 'env', 'shell']);
 const DEFAULTS_KEYS = new Set(['version', 'directory']);
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh']);
 const CONFIG_VERSION = 1;
@@ -329,15 +329,18 @@ export function initProjectConfig(cwd, options) {
     if (!sameTarget || options.force || tags !== undefined)
         registryHosts[alias] = requested;
     const hosts = { version: CONFIG_VERSION, hosts: registryHosts };
-    const selected = new Set(project.hosts);
-    selected.add(alias);
+    // Keep an existing allowlist explicit and extend it; a project that follows
+    // the whole registry stays implicit. A legacy migration keeps its host list.
+    const explicit = project.hosts !== undefined && project.hosts.length > 0 ? new Set(project.hosts) : null;
+    explicit?.add(alias);
+    const { hosts: _previousHosts, ...projectBase } = project;
     const roots = { ...project.roots };
     if (root !== undefined)
         roots[alias] = root;
     const projectConfig = {
-        ...project,
+        ...projectBase,
         name: options.name === undefined ? project.name || name : name,
-        hosts: [...selected],
+        ...(explicit === null ? {} : { hosts: [...explicit] }),
         roots,
         excludes: [...project.excludes],
         env: { ...project.env },
@@ -403,13 +406,16 @@ function assertNoCrossProjectRemoval(paths, next) {
             continue;
         try {
             const other = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
-            if (!Array.isArray(other.hosts))
-                continue;
-            const selected = other.hosts;
-            const used = removed.find((alias) => selected.includes(alias));
+            // An implicit allowlist follows the registry by design; only an explicit
+            // alias or a root override is a reference that removal would break.
+            const selected = Array.isArray(other.hosts) ? other.hosts : [];
+            const roots = other.roots !== null && typeof other.roots === 'object' && !Array.isArray(other.roots)
+                ? Object.keys(other.roots)
+                : [];
+            const used = removed.find((alias) => selected.includes(alias) || roots.includes(alias));
             if (used) {
-                throw new FleetError('config-invalid', `host ${JSON.stringify(used)} is still selected by another project`, {
-                    hint: 'remove the alias from that project before deleting it from the shared registry',
+                throw new FleetError('config-invalid', `host ${JSON.stringify(used)} is still referenced by another project`, {
+                    hint: 'remove the alias and its root override from that project before deleting it from the shared registry',
                 });
             }
         }
@@ -426,12 +432,22 @@ export function loadHostRegistry(file) {
 export function loadProjectConfig(file, nameFallback = 'workspace') {
     return readProjectConfig(file, false, nameFallback);
 }
+function selectedAliases(project, registry) {
+    const candidates = project.hosts ?? Object.keys(registry.hosts);
+    const requires = project.requires ?? [];
+    return candidates.filter((alias) => {
+        const entry = registry.hosts[alias];
+        if (!entry)
+            return false;
+        return requires.every((tag) => (entry.tags ?? []).includes(tag));
+    });
+}
 function loadSplitConfig(paths) {
     const registry = readHostRegistry(paths.hostsFile, false);
     const project = readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot));
     validateProjectSelection(project, registry, paths);
     const hosts = {};
-    for (const alias of project.hosts) {
+    for (const alias of selectedAliases(project, registry)) {
         const entry = registry.hosts[alias];
         const root = project.roots[alias] ?? defaultRemoteRoot(project.name);
         hosts[alias] = { alias, ssh: entry.ssh, port: entry.port ?? 22, root, tags: entry.tags ?? [] };
@@ -545,10 +561,15 @@ function parseProjectConfig(value, file, nameFallback) {
         ? nameFallback
         : assertWorkspaceName(requireString(top, 'name', 'project'));
     const hosts = top.hosts === undefined
-        ? []
+        ? undefined
         : requireStringArray(top.hosts, 'project.hosts');
-    for (const alias of hosts)
+    for (const alias of hosts ?? [])
         assertAlias(alias);
+    const requires = top.requires === undefined
+        ? []
+        : requireStringArray(top.requires, 'project.requires');
+    for (const tag of requires)
+        assertTag(tag);
     const roots = {};
     if (top.roots !== undefined) {
         const raw = asRecord(top.roots, 'project.roots');
@@ -557,14 +578,11 @@ function parseProjectConfig(value, file, nameFallback) {
             roots[alias] = assertRemoteRoot(requireString({ root }, 'root', 'project.roots'));
         }
     }
-    const unknownRoots = Object.keys(roots).filter((alias) => !hosts.includes(alias));
-    if (unknownRoots.length > 0) {
-        throw new FleetError('config-invalid', `${file} has roots for unselected host(s): ${unknownRoots.join(', ')}`);
-    }
     return {
         version,
         name,
-        hosts,
+        ...(hosts === undefined ? {} : { hosts }),
+        ...(requires.length === 0 ? {} : { requires }),
         roots,
         excludes: readExcludes(top),
         env: readEnv(top),
@@ -572,17 +590,68 @@ function parseProjectConfig(value, file, nameFallback) {
     };
 }
 function validateProjectSelection(project, registry, paths) {
-    if (project.hosts.length === 0) {
-        throw new FleetError('config-invalid', 'the project must select at least one host', {
+    const requires = project.requires ?? [];
+    const explicit = project.hosts;
+    if (explicit !== undefined && explicit.length === 0) {
+        throw new FleetError('config-invalid', 'project.hosts is an empty allowlist', {
             file: paths.projectFile,
-            hint: 'add a host alias to project.hosts and define it in the host registry',
+            hint: 'omit project.hosts to use every host in the global registry',
         });
     }
-    const missing = project.hosts.filter((alias) => !registry.hosts[alias]);
+    if (explicit !== undefined && new Set(explicit).size !== explicit.length) {
+        throw new FleetError('config-invalid', 'project.hosts contains duplicate aliases', {
+            file: paths.projectFile,
+        });
+    }
+    if (new Set(requires).size !== requires.length) {
+        throw new FleetError('config-invalid', 'project.requires contains duplicate tags', {
+            file: paths.projectFile,
+        });
+    }
+    const missing = (explicit ?? []).filter((alias) => !registry.hosts[alias]);
     if (missing.length > 0) {
         throw new FleetError('config-invalid', `unknown host alias(es): ${missing.join(', ')}`, {
             file: paths.hostsFile,
             hint: 'define the host in the global registry or remove it from the project',
+        });
+    }
+    const mismatched = (explicit ?? []).flatMap((alias) => {
+        const tags = registry.hosts[alias]?.tags ?? [];
+        const unsatisfied = requires.filter((tag) => !tags.includes(tag));
+        return unsatisfied.length === 0 ? [] : [{ alias, unsatisfied }];
+    });
+    if (mismatched.length > 0) {
+        const detail = mismatched
+            .map(({ alias, unsatisfied }) => `${alias} lacks ${unsatisfied.join(', ')}`)
+            .join('; ');
+        throw new FleetError('config-invalid', `selected host(s) do not satisfy project.requires: ${detail}`, {
+            file: paths.hostsFile,
+            hint: 'fix the host tags or remove the host from project.hosts',
+        });
+    }
+    const unknownRoots = Object.keys(project.roots).filter((alias) => !registry.hosts[alias]);
+    if (unknownRoots.length > 0) {
+        throw new FleetError('config-invalid', `project.roots names unknown host(s): ${unknownRoots.join(', ')}`, {
+            file: paths.hostsFile,
+            hint: 'remove the root override or define the host in the global registry',
+        });
+    }
+    const selected = selectedAliases(project, registry);
+    const extraRoots = Object.keys(project.roots).filter((alias) => !selected.includes(alias));
+    if (extraRoots.length > 0) {
+        throw new FleetError('config-invalid', `roots for unselected host(s): ${extraRoots.join(', ')}`, {
+            file: paths.projectFile,
+            hint: 'remove the root override or select the host explicitly',
+        });
+    }
+    if (selected.length === 0) {
+        throw new FleetError('config-invalid', requires.length > 0
+            ? `no configured host satisfies requires: ${requires.join(', ')}`
+            : 'the host registry has no selectable hosts', {
+            file: paths.hostsFile,
+            hint: requires.length > 0
+                ? 'add a host with these tags or relax project.requires'
+                : 'add a host to the global registry',
         });
     }
 }
@@ -621,7 +690,6 @@ function defaultProjectConfig(name) {
     return {
         version: CONFIG_VERSION,
         name,
-        hosts: [],
         roots: {},
         excludes: [],
         env: {},

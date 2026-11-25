@@ -15,7 +15,8 @@ interface HostsFile {
 interface ProjectFile {
   version?: number;
   name: string;
-  hosts: string[];
+  hosts?: string[];
+  requires?: string[];
   roots?: Record<string, string>;
   excludes?: string[];
   env?: Record<string, string>;
@@ -107,23 +108,61 @@ function parseHosts(text: string): HostsFile {
 
 function parseProject(text: string): ProjectFile {
   const value = parseObject(text, 'Project configuration');
-  if (typeof value.name !== 'string' || !value.name || !Array.isArray(value.hosts)) {
-    throw new Error('Project configuration needs a name and a hosts array.');
+  if (typeof value.name !== 'string' || !value.name) {
+    throw new Error('Project configuration needs a name.');
+  }
+  if (value.hosts !== undefined && !Array.isArray(value.hosts)) {
+    throw new Error('Project hosts must be an array when present; omit it to use every host.');
+  }
+  if (value.requires !== undefined && !Array.isArray(value.requires)) {
+    throw new Error('Project requires must be an array of host tags when present.');
   }
   return value as unknown as ProjectFile;
 }
 
+function eligibleHosts(documents: ConfigDocuments): string[] {
+  const all = Object.keys(documents.hosts.hosts ?? {});
+  const candidates = documents.project.hosts ?? all;
+  const requires = documents.project.requires ?? [];
+  return candidates.filter((alias) => {
+    const tags = documents.hosts.hosts?.[alias]?.tags ?? [];
+    return requires.every((tag) => tags.includes(tag));
+  });
+}
+
+function displayedHosts(documents: ConfigDocuments): string[] {
+  return documents.project.hosts ?? eligibleHosts(documents);
+}
+
+function hostProblem(documents: ConfigDocuments, alias: string): string | null {
+  const entry = documents.hosts.hosts?.[alias];
+  if (!entry) return 'missing from host registry';
+  const requires = documents.project.requires ?? [];
+  const missing = requires.filter((tag) => !(entry.tags ?? []).includes(tag));
+  return missing.length > 0 ? `does not satisfy requires: ${missing.join(', ')}` : null;
+}
+
 function renderHosts(documents: ConfigDocuments): void {
   hostsView.replaceChildren();
-  const selected = documents.project.hosts ?? [];
-  if (selected.length === 0) {
+  const all = Object.keys(documents.hosts.hosts ?? {});
+  if (all.length === 0) {
     const note = document.createElement('p');
-    note.textContent = 'No hosts selected for this project yet.';
+    note.textContent = 'No hosts in the global registry yet.';
     hostsView.append(note);
     return;
   }
-  for (const alias of selected) {
+  const displayed = displayedHosts(documents);
+  if (displayed.length === 0) {
+    const note = document.createElement('p');
+    note.textContent = documents.project.hosts !== undefined
+      ? 'project.hosts is an empty allowlist. Omit it to use every registry host.'
+      : `No host matches project.requires: ${(documents.project.requires ?? []).join(', ') || '(none)'}.`;
+    hostsView.append(note);
+    return;
+  }
+  for (const alias of displayed) {
     const entry = documents.hosts.hosts?.[alias];
+    const problem = hostProblem(documents, alias);
     const row = document.createElement('div');
     row.className = 'host';
     const title = document.createElement('div');
@@ -132,8 +171,8 @@ function renderHosts(documents: ConfigDocuments): void {
     name.textContent = alias;
     const ssh = document.createElement('small');
     ssh.textContent = entry
-      ? `${entry.ssh}${entry.tags && entry.tags.length > 0 ? ` · ${entry.tags.join(', ')}` : ''}`
-      : 'missing from host registry';
+      ? `${entry.ssh}${entry.tags && entry.tags.length > 0 ? ` · ${entry.tags.join(', ')}` : ''}${problem ? ` · ${problem}` : ''}`
+      : problem ?? 'missing from host registry';
     title.append(name, ssh);
     const actions = document.createElement('div');
     actions.className = 'row';
@@ -159,9 +198,22 @@ function fill(documents: ConfigDocuments, directory: string): void {
   projectConfig.value = draft?.project ?? `${JSON.stringify(documents.project, null, 2)}\n`;
   renderHosts(documents);
   const count = Object.keys(documents.hosts.hosts ?? {}).length;
-  const selected = documents.project.hosts?.length ?? 0;
+  const explicit = documents.project.hosts;
+  const requires = documents.project.requires ?? [];
+  const eligible = eligibleHosts(documents).length;
+  const problems = (explicit ?? []).filter((alias) => hostProblem(documents, alias) !== null).length;
+  const scope = explicit === undefined
+    ? `all configured hosts (${eligible} eligible)`
+    : `${eligible} of ${explicit.length} selected`;
+  const requirement = requires.length > 0 ? ` · requires ${requires.join(', ')}` : '';
+  const attention = explicit !== undefined && explicit.length === 0
+    ? ' · hosts is empty'
+    : problems > 0
+      ? ` · ${problems} need attention`
+      : '';
   const legacy = documents.legacy ? ' Legacy fleet.json detected; saving migrates it to local configuration.' : '';
-  showNotice(`${count} host(s), ${selected} selected for this project.${legacy}`, 'success');
+  const warning = explicit !== undefined && (explicit.length === 0 || problems > 0);
+  showNotice(`${count} host(s), ${scope}${requirement}${attention}.${legacy}`, warning ? 'warning' : 'success');
 }
 
 async function load(): Promise<void> {

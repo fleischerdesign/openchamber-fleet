@@ -25,6 +25,22 @@ function writeConfig(value) {
   return dir;
 }
 
+function projectDraft(overrides = {}) {
+  return {
+    version: 1,
+    name: 'project',
+    roots: {},
+    excludes: [],
+    env: {},
+    shell: 'bash',
+    ...overrides,
+  };
+}
+
+function aliasesOf(workspace, configDir) {
+  return Object.keys(loadConfig(workspace, { configDir }).hosts).sort();
+}
+
 describe('fleet.json validation (CFG-01…CFG-08)', () => {
   test('rejects a missing file', () => {
     assert.throws(() => loadConfig(tmp), (error) => error.code === 'config-missing');
@@ -128,6 +144,174 @@ describe('split host registry and project configuration', () => {
     assert.deepEqual(secondConfig.excludes, ['target/']);
   });
 
+  test('an implicit project uses every registry host', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'implicit-all-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'implicit-all-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'implicit-all-config-'));
+    initProjectConfig(first, { alias: 'mob', ssh: 'u@mob', name: 'first', configDir });
+    initProjectConfig(second, { alias: 'work', ssh: 'u@work', name: 'second', configDir });
+
+    assert.deepEqual(aliasesOf(first, configDir), ['mob', 'work']);
+    assert.deepEqual(aliasesOf(second, configDir), ['mob', 'work']);
+  });
+
+  test('init keeps an implicit project implicit and extends an explicit allowlist', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'init-allowlist-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'init-allowlist-config-'));
+    initProjectConfig(workspace, { alias: 'mob', ssh: 'u@mob', configDir });
+    const implicit = initProjectConfig(workspace, { alias: 'work', ssh: 'u@work', configDir });
+    assert.equal(implicit.project.hosts, undefined);
+
+    saveConfigDocuments(workspace, implicit.hosts, projectDraft({ hosts: ['mob'] }), { configDir });
+    const explicit = initProjectConfig(workspace, { alias: 'work', ssh: 'u@work', configDir });
+    assert.deepEqual(explicit.project.hosts, ['mob', 'work']);
+    assert.deepEqual(aliasesOf(workspace, configDir), ['mob', 'work']);
+  });
+
+  test('an explicit hosts allowlist restricts the registry', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'allowlist-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'allowlist-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'allowlist-config-'));
+    initProjectConfig(first, { alias: 'mob', ssh: 'u@mob', name: 'first', configDir });
+    const documents = initProjectConfig(second, {
+      alias: 'work',
+      ssh: 'u@work',
+      name: 'second',
+      configDir,
+    });
+    saveConfigDocuments(second, documents.hosts, projectDraft({
+      name: 'second',
+      hosts: ['mob'],
+    }), { configDir });
+
+    assert.deepEqual(aliasesOf(second, configDir), ['mob']);
+    assert.deepEqual(aliasesOf(first, configDir), ['mob', 'work']);
+  });
+
+  test('requires filters hosts by every tag', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'requires-workspace-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'requires-config-'));
+    initProjectConfig(workspace, { alias: 'gpu', ssh: 'u@gpu', tags: ['linux', 'gpu'], configDir });
+    const documents = initProjectConfig(workspace, { alias: 'cpu', ssh: 'u@cpu', tags: ['linux'], configDir });
+    assert.deepEqual(aliasesOf(workspace, configDir), ['cpu', 'gpu']);
+
+    const linuxOnly = saveConfigDocuments(workspace, documents.hosts, projectDraft({
+      name: 'linux-only',
+      requires: ['linux'],
+    }), { configDir });
+    assert.deepEqual(aliasesOf(workspace, configDir), ['cpu', 'gpu']);
+
+    saveConfigDocuments(workspace, linuxOnly.hosts, projectDraft({
+      name: 'linux-gpu',
+      requires: ['linux', 'gpu'],
+    }), { configDir });
+    assert.deepEqual(aliasesOf(workspace, configDir), ['gpu']);
+  });
+
+  test('a selected host must satisfy requires', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'requires-selected-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'requires-selected-config-'));
+    initProjectConfig(workspace, { alias: 'linux', ssh: 'u@linux', tags: ['linux'], configDir });
+    const documents = initProjectConfig(workspace, {
+      alias: 'gpu',
+      ssh: 'u@gpu',
+      tags: ['gpu'],
+      configDir,
+    });
+
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({
+        hosts: ['linux', 'gpu'],
+        requires: ['linux'],
+      }), { configDir }),
+      /do not satisfy project\.requires: gpu lacks linux/,
+    );
+  });
+
+  test('an empty or duplicate allowlist is rejected', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'invalid-allowlist-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'invalid-allowlist-config-'));
+    initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    const documents = loadConfigDocuments(workspace, { configDir });
+
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({ hosts: [] }), { configDir }),
+      /project\.hosts is an empty allowlist/,
+    );
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({ hosts: ['mob', 'mob'] }), { configDir }),
+      /project\.hosts contains duplicate/,
+    );
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({
+        requires: ['linux', 'linux'],
+      }), { configDir }),
+      /project\.requires contains duplicate/,
+    );
+  });
+
+  test('an empty allowlist is repairable in the editor but refused when loading', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'repair-allowlist-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'repair-allowlist-config-'));
+    const documents = initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    fs.writeFileSync(documents.projectFile, JSON.stringify({
+      ...documents.project,
+      hosts: [],
+    }, null, 2));
+
+    const editable = loadConfigDocuments(workspace, { configDir });
+    assert.deepEqual(editable.project.hosts, []);
+    assert.throws(() => loadConfig(workspace, { configDir }), /empty allowlist/);
+
+    const repaired = saveConfigDocuments(workspace, editable.hosts, {
+      ...editable.project,
+      hosts: undefined,
+    }, { configDir });
+    assert.equal(repaired.project.hosts, undefined);
+    assert.deepEqual(aliasesOf(workspace, configDir), ['mob']);
+  });
+
+  test('no host satisfying requires is a configuration error', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'requires-none-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'requires-none-config-'));
+    initProjectConfig(workspace, { alias: 'cpu', ssh: 'u@cpu', tags: ['linux'], configDir });
+    const documents = loadConfigDocuments(workspace, { configDir });
+
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({
+        requires: ['gpu'],
+      }), { configDir }),
+      /no configured host satisfies requires: gpu/,
+    );
+  });
+
+  test('a replica root must target a selected host', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'root-selected-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'root-selected-config-'));
+    initProjectConfig(workspace, { alias: 'linux', ssh: 'u@linux', tags: ['linux'], configDir });
+    const documents = initProjectConfig(workspace, {
+      alias: 'gpu',
+      ssh: 'u@gpu',
+      tags: ['gpu'],
+      configDir,
+    });
+
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({
+        requires: ['linux'],
+        roots: { gpu: '/srv/gpu' },
+      }), { configDir }),
+      /roots for unselected host/,
+    );
+    assert.throws(
+      () => saveConfigDocuments(workspace, documents.hosts, projectDraft({
+        hosts: ['linux'],
+        roots: { gpu: '/srv/gpu' },
+      }), { configDir }),
+      /roots for unselected host/,
+    );
+  });
+
   test('rejects a project that selects an undefined host', () => {
     const workspace = fs.mkdtempSync(path.join(tmp, 'missing-host-'));
     const configDir = fs.mkdtempSync(path.join(tmp, 'missing-host-config-'));
@@ -222,7 +406,9 @@ describe('split host registry and project configuration', () => {
     initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
 
     const documents = initProjectConfig(second, { alias: 'mob', ssh: 'u@h', name: 'second', configDir });
-    assert.deepEqual(documents.project.hosts, ['mob']);
+    // A new project does not pin machines; it uses the global registry.
+    assert.equal(documents.project.hosts, undefined);
+    assert.equal(loadConfig(second, { configDir }).hosts.mob.ssh, 'u@h');
     assert.throws(
       () => initProjectConfig(third, { alias: 'mob', ssh: 'u@other', configDir }),
       /different SSH target/,
@@ -291,28 +477,78 @@ describe('split host registry and project configuration', () => {
     );
   });
 
-  test('save refuses to delete a host another project still selects', () => {
+  test('save refuses to delete a host another project selects explicitly', () => {
     const first = fs.mkdtempSync(path.join(tmp, 'shared-first-'));
     const second = fs.mkdtempSync(path.join(tmp, 'shared-second-'));
     const configDir = fs.mkdtempSync(path.join(tmp, 'shared-config-'));
     const firstDocuments = initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
-    saveConfigDocuments(second, firstDocuments.hosts, {
+    saveConfigDocuments(first, firstDocuments.hosts, {
       ...firstDocuments.project,
-      name: 'second',
       hosts: ['mob'],
     }, { configDir });
+    const secondDocuments = initProjectConfig(second, {
+      alias: 'mob',
+      ssh: 'u@h',
+      name: 'second',
+      configDir,
+    });
 
     assert.throws(
       () => saveConfigDocuments(second, {
         version: 1,
         hosts: { other: { ssh: 'u@h' } },
       }, {
-        ...firstDocuments.project,
-        name: 'second',
+        ...secondDocuments.project,
         hosts: ['other'],
       }, { configDir }),
-      /still selected by another project/,
+      /still referenced by another project/,
     );
+  });
+
+  test('save refuses to delete a host another project uses as a replica root', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'root-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'root-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'root-config-'));
+    const firstDocuments = initProjectConfig(first, { alias: 'mob', ssh: 'u@h', name: 'first', configDir });
+    saveConfigDocuments(first, firstDocuments.hosts, {
+      ...firstDocuments.project,
+      roots: { mob: '/srv/first' },
+    }, { configDir });
+    const secondDocuments = initProjectConfig(second, {
+      alias: 'mob',
+      ssh: 'u@h',
+      name: 'second',
+      configDir,
+    });
+
+    assert.throws(
+      () => saveConfigDocuments(second, {
+        version: 1,
+        hosts: { other: { ssh: 'u@h' } },
+      }, {
+        ...secondDocuments.project,
+        hosts: ['other'],
+      }, { configDir }),
+      /still referenced by another project/,
+    );
+  });
+
+  test('an implicit project follows host removal from the global registry', () => {
+    const first = fs.mkdtempSync(path.join(tmp, 'implicit-first-'));
+    const second = fs.mkdtempSync(path.join(tmp, 'implicit-second-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'implicit-config-'));
+    initProjectConfig(first, { alias: 'mob', ssh: 'u@mob', name: 'first', configDir });
+    initProjectConfig(second, { alias: 'work', ssh: 'u@work', name: 'second', configDir });
+
+    assert.deepEqual(Object.keys(loadConfig(first, { configDir }).hosts).sort(), ['mob', 'work']);
+
+    const documents = loadConfigDocuments(second, { configDir });
+    saveConfigDocuments(second, {
+      version: 1,
+      hosts: { work: { ssh: 'u@work' } },
+    }, documents.project, { configDir });
+
+    assert.deepEqual(Object.keys(loadConfig(first, { configDir }).hosts), ['work']);
   });
 
   test('an editor view keeps the host registry for a new project', () => {
@@ -323,18 +559,24 @@ describe('split host registry and project configuration', () => {
 
     const documents = loadConfigDocuments(second, { configDir });
     assert.deepEqual(Object.keys(documents.hosts.hosts), ['mob']);
-    assert.equal(documents.project.hosts.length, 0);
+    assert.equal(documents.project.hosts, undefined);
     assert.equal(documents.legacy, false);
   });
 
   test('an editor view still shows a project whose registry is missing', () => {
     const workspace = fs.mkdtempSync(path.join(tmp, 'editor-missing-registry-'));
     const configDir = fs.mkdtempSync(path.join(tmp, 'editor-missing-registry-config-'));
-    const documents = initProjectConfig(workspace, { alias: 'mob', ssh: 'u@h', configDir });
+    const documents = initProjectConfig(workspace, {
+      alias: 'mob',
+      ssh: 'u@h',
+      name: 'kept',
+      configDir,
+    });
     fs.rmSync(documents.hostsFile);
 
     const editable = loadConfigDocuments(workspace, { configDir });
-    assert.deepEqual(editable.project.hosts, ['mob']);
+    assert.equal(editable.project.name, 'kept');
+    assert.equal(editable.project.hosts, undefined);
     assert.deepEqual(editable.hosts.hosts, {});
   });
 
@@ -352,7 +594,7 @@ describe('split host registry and project configuration', () => {
     const workspace = fs.mkdtempSync(path.join(tmp, 'docs-'));
     const configDir = fs.mkdtempSync(path.join(tmp, 'docs-config-'));
     const empty = loadConfigDocuments(workspace, { configDir });
-    assert.equal(empty.project.hosts.length, 0);
+    assert.equal(empty.project.hosts, undefined);
     assert.equal(empty.hosts.hosts && Object.keys(empty.hosts.hosts).length, 0);
 
     const saved = saveConfigDocuments(workspace, {

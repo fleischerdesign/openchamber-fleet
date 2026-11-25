@@ -110,6 +110,46 @@ describe('Fleet service configuration route', () => {
     }
   });
 
+  test('panel routes edit the default project for a chat location', async () => {
+    const service = await startService();
+    const project = fs.mkdtempSync(path.join(tmp, 'default-panel-project-'));
+    const chat = path.join(tmp, '.config', 'openchamber', 'chats', 'session-panel-default');
+    fs.mkdirSync(chat, { recursive: true });
+    initProjectConfig(project, {
+      alias: 'mob',
+      ssh: 'test@127.0.0.1',
+      port: 1,
+      name: 'defaulted',
+      configDir: service.configDir,
+    });
+    saveDefaults(project, { configDir: service.configDir });
+    try {
+      const initial = await request(service, 'GET', `/config?directory=${encodeURIComponent(chat)}`);
+      assert.equal(initial.status, 200);
+      assert.equal(initial.body.result.project.name, 'defaulted');
+      assert.equal(initial.body.result.project.hosts, undefined);
+
+      const saved = await request(service, 'POST', '/config', {
+        directory: chat,
+        hosts: initial.body.result.hosts,
+        project: { ...initial.body.result.project, excludes: ['target/'] },
+        revision: initial.body.result.revision,
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.body.result.project.name, 'defaulted');
+      assert.deepEqual(saved.body.result.project.excludes, ['target/']);
+
+      // The chat directory is not a project: status must reach the default
+      // project's host and fail on the connection, never with config-missing.
+      const status = await request(service, 'POST', '/status', { directory: chat, host: 'mob' });
+      assert.equal(status.status, 400);
+      assert.notEqual(status.body.error.code, 'CONFIG_MISSING');
+      assert.doesNotMatch(status.body.error.message, /no Fleet (host registry|project configuration)/);
+    } finally {
+      service.child.kill();
+    }
+  });
+
   test('reads and saves the split documents outside the project', async () => {
     const service = await startService();
     const workspace = fs.mkdtempSync(path.join(tmp, 'workspace-'));
@@ -118,7 +158,7 @@ describe('Fleet service configuration route', () => {
       assert.equal(initial.status, 200);
       assert.equal(initial.body.ok, true);
       const documents = initial.body.result;
-      assert.equal(documents.project.hosts.length, 0);
+      assert.equal(documents.project.hosts, undefined);
 
       const project = {
         ...documents.project,

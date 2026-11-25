@@ -20,10 +20,12 @@ overrides the agent binary name. Every command accepts `--config-dir <dir>`; the
 `$XDG_CONFIG_HOME/openchamber-fleet`.
 
 `fleet init` writes the host registry and project configuration there, never into the repository.
-The host registry is reusable by every project. Selecting an alias that already exists keeps its SSH
-target; `--force` replaces it. An existing legacy `fleet.json` is migrated with its name, hosts,
-roots, excludes, environment and shell intact. Use `--workspace-file` only when a repository-local
-legacy file is explicitly wanted; it is written at the workspace root even from a subdirectory.
+The host registry is reusable by every project. A new project gets no `hosts` allowlist and
+therefore follows the whole registry; add `requires` or an explicit `hosts` list to the project file
+when it must be restricted. Selecting an alias that already exists keeps its SSH target; `--force`
+replaces it. An existing legacy `fleet.json` is migrated with its name, hosts, roots, excludes,
+environment and shell intact. Use `--workspace-file` only when a repository-local legacy file is
+explicitly wanted; it is written at the workspace root even from a subdirectory.
 `--tag` adds host capabilities such as `linux,gpu`; `fleet hosts` lists them and `fleet run` can
 select a host by tags.
 
