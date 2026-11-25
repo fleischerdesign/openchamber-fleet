@@ -49,6 +49,36 @@ describe('fleet init', () => {
     assert.equal(value.selected, 'mob');
   });
 
+  test('fleet default serves projectless chats and fleet hosts survives clearing it', () => {
+    const configDir = fs.mkdtempSync(path.join(tmp, 'default-config-'));
+    const project = fs.mkdtempSync(path.join(tmp, 'default-project-'));
+    execFileSync(process.execPath, [cli, 'init', '--host', 'mob', '--ssh', 'u@h', '--name', 'defaulted', '--config-dir', configDir], {
+      cwd: project,
+      stdio: 'pipe',
+    });
+    execFileSync(process.execPath, [cli, 'default', project, '--config-dir', configDir], { stdio: 'pipe' });
+
+    const shown = JSON.parse(execFileSync(process.execPath, [cli, 'default', '--json', '--config-dir', configDir], { encoding: 'utf8' }));
+    assert.equal(shown.directory, project);
+
+    const chat = path.join(tmp, '.config', 'openchamber', 'chats', 'session-cli');
+    fs.mkdirSync(chat, { recursive: true });
+    const selected = JSON.parse(execFileSync(process.execPath, [cli, 'hosts', '--json', '--config-dir', configDir], {
+      cwd: chat,
+      encoding: 'utf8',
+    }));
+    assert.equal(selected.workspace, 'defaulted');
+    assert.equal(selected.hosts[0].alias, 'mob');
+
+    execFileSync(process.execPath, [cli, 'default', '--clear', '--config-dir', configDir], { stdio: 'pipe' });
+    const global = JSON.parse(execFileSync(process.execPath, [cli, 'hosts', '--json', '--config-dir', configDir], {
+      cwd: chat,
+      encoding: 'utf8',
+    }));
+    assert.equal(global.workspace, 'no project');
+    assert.equal(global.hosts[0].alias, 'mob');
+  });
+
   test('--config-dir writes the split configuration outside the repository', () => {
     const { root } = repository();
     const configDir = fs.mkdtempSync(path.join(tmp, 'config-'));

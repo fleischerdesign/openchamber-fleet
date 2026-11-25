@@ -5,6 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
+import { initProjectConfig, saveDefaults } from '../../dist/config.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-service-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -86,6 +87,24 @@ describe('Fleet service configuration route', () => {
       assert.equal(projectView.body.rows[0].tone, 'warning');
       assert.match(projectView.body.rows[0].text, /Fleet is not configured/);
       assert.match(projectView.body.rows[0].text, /legacy fleet\.json is not required/);
+    } finally {
+      service.child.kill();
+    }
+  });
+
+  test('status view uses the default workspace in a chat location', async () => {
+    const service = await startService();
+    const project = fs.mkdtempSync(path.join(tmp, 'default-project-'));
+    const chat = path.join(tmp, '.config', 'openchamber', 'chats', 'session-default');
+    fs.mkdirSync(chat, { recursive: true });
+    initProjectConfig(project, { alias: 'mob', ssh: 'test@127.0.0.1', port: 1, name: 'defaulted', configDir: service.configDir });
+    saveDefaults(project, { configDir: service.configDir });
+    try {
+      const view = await request(service, 'GET', `/status-view?directory=${encodeURIComponent(chat)}`);
+      assert.equal(view.status, 200);
+      assert.equal(view.body.rows[0].id, 'default');
+      assert.match(view.body.rows[0].text, /using the default workspace defaulted/);
+      assert.ok(view.body.rows.some((row) => row.id === 'mob'));
     } finally {
       service.child.kill();
     }

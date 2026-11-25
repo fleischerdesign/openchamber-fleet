@@ -30,6 +30,7 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Config validation | — | `test/unit/config.test.js` |
 | Path validation | — | `test/unit/paths.test.js` |
 | Plugin surface | — | `test/unit/plugin.test.js` |
+| Default workspace for projectless chats | — | `test/unit/config.test.js`, `test/unit/cli.test.js`, `test/unit/service.test.js` |
 | Detached job store, locks, retention | — | `test/unit/job-store.test.js` |
 | Supervisor state machine, queue, recovery, shutdown | — | `test/unit/supervisor.test.js` |
 | Plugin half, notifications, cancel, fallback | — | `test/unit/supervised.test.js` |

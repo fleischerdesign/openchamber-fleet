@@ -95,6 +95,11 @@ XDG configuration as the CLI: hosts are machine-level, projects only select alia
 Nothing is written to the repository. It uses only public OpenChamber SDK and OpenCode plugin APIs;
 Nix is an optional packaging path, not a runtime requirement.
 
+A chat without a project uses OpenChamber's internal chat-data directory. Fleet then falls back to a
+configured **default workspace** (`fleet default /path/to/project`); the status section names it and
+the tools operate on that project. A real project without Fleet configuration still reports that it
+is unconfigured; it never silently borrows another project. No `fleet.json` is required.
+
 Without OpenChamber, install the npm package and add `openchamber-fleet/plugin` to OpenCode's plugin
 list. That path provides the ten tools and the CLI, but not the OpenChamber panel or status section.
 

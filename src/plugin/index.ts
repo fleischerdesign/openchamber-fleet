@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { compileExcludes, loadConfig } from '../config.js';
+import { compileExcludes, loadHostsOnlyConfig, loadSessionConfig } from '../config.js';
 import type { HostConfig, WorkspaceConfig } from '../config.js';
 import { FleetError, friendlyErrorMessage } from '../errors.js';
 import { hostViews, selectHost } from '../hosts.js';
@@ -57,7 +57,7 @@ function agentPath(): string {
   return process.env.FLEET_AGENT_PATH ?? 'fleet-agent';
 }
 
-async function workspaceOf(ctx: PluginContext, context?: ToolContext): Promise<WorkspaceConfig> {
+async function sessionDirectoryOf(ctx: PluginContext, context?: ToolContext): Promise<string> {
   let directory = ctx.location?.directory ?? process.cwd();
   const sessionID = context?.sessionID;
   if (sessionID && ctx.session) {
@@ -69,16 +69,42 @@ async function workspaceOf(ctx: PluginContext, context?: ToolContext): Promise<W
       // The location or server cwd remains a useful, explicit fallback.
     }
   }
+  return directory;
+}
+
+function configErrorOf(error: unknown): unknown {
+  if (error instanceof FleetError) {
+    return new AgentError(error.code === 'config-missing' ? 'CONFIG_MISSING' : 'CONFIG_INVALID', [
+      error.message,
+      error.details?.hint,
+    ].filter(Boolean).join(' '));
+  }
+  return error;
+}
+
+async function workspaceOf(ctx: PluginContext, context?: ToolContext): Promise<WorkspaceConfig> {
+  const directory = await sessionDirectoryOf(ctx, context);
   try {
-    return loadConfig(directory);
+    return loadSessionConfig(directory).config;
   } catch (error) {
-    if (error instanceof FleetError) {
-      throw new AgentError(error.code === 'config-missing' ? 'CONFIG_MISSING' : 'CONFIG_INVALID', [
-        error.message,
-        error.details?.hint,
-      ].filter(Boolean).join(' '));
+    throw configErrorOf(error);
+  }
+}
+
+/** `fleet_hosts` remains useful in a projectless chat without a default workspace. */
+async function hostsWorkspaceOf(ctx: PluginContext, context?: ToolContext): Promise<WorkspaceConfig> {
+  const directory = await sessionDirectoryOf(ctx, context);
+  try {
+    return loadSessionConfig(directory).config;
+  } catch (error) {
+    if (error instanceof FleetError && error.code === 'config-missing') {
+      try {
+        return loadHostsOnlyConfig(directory);
+      } catch {
+        // Fall through to the original missing-project message.
+      }
     }
-    throw error;
+    throw configErrorOf(error);
   }
 }
 
@@ -663,7 +689,7 @@ export default {
           selected: { type: ['string', 'null'] },
         }, ['workspace', 'hosts', 'items', 'selected']),
         async execute(input, context) {
-          const config = await workspaceOf(ctx, context);
+          const config = await hostsWorkspaceOf(ctx, context);
           const views = hostViews(config);
           let selected: string | null = null;
           if (Array.isArray(input.tags) && input.tags.length > 0) {

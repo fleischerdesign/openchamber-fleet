@@ -2,7 +2,16 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { compileExcludes, configPaths, defaultWorkspaceName, initProjectConfig, loadConfig } from './config.js';
+import {
+  compileExcludes,
+  configPaths,
+  defaultWorkspaceName,
+  initProjectConfig,
+  loadDefaults,
+  loadHostsOnlyConfig,
+  loadSessionConfig,
+  saveDefaults,
+} from './config.js';
 import type { HostConfig, WorkspaceConfig } from './config.js';
 import { FleetError, friendlyErrorMessage } from './errors.js';
 import { hostViews, selectHost } from './hosts.js';
@@ -25,7 +34,7 @@ interface Parsed {
   rest: string[];
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file']);
+const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file', 'clear']);
 
 export async function main(argv: readonly string[]): Promise<void> {
   const parsed = parse(argv);
@@ -36,6 +45,7 @@ export async function main(argv: readonly string[]): Promise<void> {
   try {
     switch (parsed.command) {
       case 'init': return cmdInit(parsed);
+      case 'default': return cmdDefault(parsed);
       case 'doctor': return await cmdDoctor(parsed);
       case 'status': return await cmdStatus(parsed);
       case 'recover': return await cmdRecover(parsed);
@@ -88,13 +98,46 @@ function parse(argv: readonly string[]): Parsed {
   return { command, positional, flags, rest };
 }
 
-function configOf(flags: Map<string, string | boolean>): WorkspaceConfig {
+function configOf(flags: Map<string, string | boolean>, hostsOnly = false): WorkspaceConfig {
   const config = flags.get('config');
   const configDir = flags.get('config-dir');
-  return loadConfig(process.cwd(), {
+  const options = {
     ...(typeof config === 'string' ? { config } : {}),
     ...(typeof configDir === 'string' ? { configDir } : {}),
-  });
+  };
+  try {
+    return loadSessionConfig(process.cwd(), options).config;
+  } catch (error) {
+    if (hostsOnly && error instanceof FleetError && error.code === 'config-missing') {
+      try {
+        return loadHostsOnlyConfig(process.cwd(), options);
+      } catch {
+        // Fall through to the original project message.
+      }
+    }
+    throw error;
+  }
+}
+
+function cmdDefault(parsed: Parsed): void {
+  const configDir = parsed.flags.get('config-dir');
+  const options = typeof configDir === 'string' ? { configDir } : {};
+  if (parsed.flags.has('clear')) {
+    const value = saveDefaults(null, options);
+    if (parsed.flags.has('json')) process.stdout.write(`${JSON.stringify(value)}\n`);
+    else process.stdout.write('default workspace cleared\n');
+    return;
+  }
+  const directory = parsed.positional[0];
+  if (directory === undefined) {
+    const value = loadDefaults(options);
+    if (parsed.flags.has('json')) process.stdout.write(`${JSON.stringify(value)}\n`);
+    else if (value.directory) process.stdout.write(`${value.directory}\n`);
+    return;
+  }
+  const value = saveDefaults(directory, options);
+  if (parsed.flags.has('json')) process.stdout.write(`${JSON.stringify(value)}\n`);
+  else process.stdout.write(`default workspace ${value.directory}\n`);
 }
 
 function hostOf(config: WorkspaceConfig, flags: Map<string, string | boolean>): HostConfig {
@@ -332,7 +375,7 @@ async function cmdRun(parsed: Parsed): Promise<void> {
 }
 
 function cmdHosts(parsed: Parsed): void {
-  const config = configOf(parsed.flags);
+  const config = configOf(parsed.flags, true);
   const tags = tagsOf(parsed.flags);
   const views = hostViews(config);
   let selected: string | null = null;
@@ -412,6 +455,8 @@ function printHelp(): void {
     'usage:',
     '  fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--tag a,b] [--force]',
     '               writes $XDG_CONFIG_HOME/openchamber-fleet/ (use --workspace-file for legacy fleet.json)',
+    '  fleet default [<project-dir>] [--clear] [--json]',
+    '               set/show the workspace used by projectless chats',
     '  fleet doctor [--host <alias>] [--agent-path PATH]',
     '  fleet hosts [--tag a,b] [--json]',
     '  fleet status --host <alias> [--json]',

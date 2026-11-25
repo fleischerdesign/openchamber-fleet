@@ -70,6 +70,15 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | CTL-03 | SSH argv is fixed and the agent path is validated | planned (unit) |
 | CTL-04 | Sync, exec and fetch work against the real agent | `test/v1/protocol.test.js` |
 
+## Default workspace
+
+| ID | Statement | Test |
+|---|---|---|
+| PROJ-01 | A projectless OpenChamber chat uses the configured default project | `test/unit/config.test.js`, `test/unit/service.test.js` |
+| PROJ-02 | A real project without Fleet configuration never borrows the default | `test/unit/config.test.js` |
+| PROJ-03 | `fleet_hosts` lists the global registry without a project or default | `test/unit/cli.test.js` |
+| PROJ-04 | `fleet default` sets, shows and clears the default | `test/unit/cli.test.js` |
+
 ## Detached jobs
 
 | ID | Statement | Test |

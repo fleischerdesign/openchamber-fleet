@@ -16,6 +16,7 @@ const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root', 'tags']);
 const HOST_REGISTRY_KEYS = new Set(['version', 'hosts']);
 const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags']);
 const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'roots', 'excludes', 'env', 'shell']);
+const DEFAULTS_KEYS = new Set(['version', 'directory']);
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh']);
 const CONFIG_VERSION = 1;
 export function defaultRemoteRoot(name) {
@@ -41,6 +42,115 @@ export function configPaths(cwd = process.cwd(), options = {}) {
         projectFile: path.join(configDir, 'workspaces', `${projectId}.json`),
         projectId,
         workspaceRoot: root,
+    };
+}
+export function defaultsPath(options = {}) {
+    return path.join(configDirOf(options), 'defaults.json');
+}
+export function loadDefaults(options = {}) {
+    const file = defaultsPath(options);
+    if (!fs.existsSync(file))
+        return { version: CONFIG_VERSION };
+    const top = asRecord(readJson(file), 'defaults.json');
+    rejectUnknown(top, DEFAULTS_KEYS, 'defaults.json');
+    const version = top.version === undefined ? CONFIG_VERSION : requireConfigVersion(top.version, 'defaults.json.version');
+    if (top.directory === undefined)
+        return { version };
+    const directory = requireString(top, 'directory', 'defaults.json');
+    if (directory.includes('\0') || !path.isAbsolute(directory)) {
+        throw new FleetError('config-invalid', 'defaults.json.directory must be an absolute directory', { file });
+    }
+    return { version, directory: path.resolve(directory) };
+}
+export function saveDefaults(directory, options = {}) {
+    const file = defaultsPath(options);
+    if (directory === null) {
+        fs.rmSync(file, { force: true });
+        return { version: CONFIG_VERSION };
+    }
+    if (directory.includes('\0'))
+        throw new FleetError('config-invalid', 'the default workspace must not contain NUL');
+    const resolved = path.resolve(directory);
+    let stat;
+    try {
+        stat = fs.statSync(resolved);
+    }
+    catch {
+        throw new FleetError('config-invalid', `default workspace ${resolved} does not exist`);
+    }
+    if (!stat.isDirectory())
+        throw new FleetError('config-invalid', `default workspace ${resolved} is not a directory`);
+    const defaults = { version: CONFIG_VERSION, directory: resolved };
+    writeJson(file, defaults);
+    return defaults;
+}
+/** OpenChamber uses its own chat-data directory as a session location without a project. */
+export function isOpenChamberInternalDirectory(directory) {
+    const parts = path.resolve(directory).split(path.sep);
+    for (let index = 0; index < parts.length - 1; index += 1) {
+        if (parts[index] === 'openchamber' && (parts[index + 1] === 'chats' || parts[index + 1] === 'guest-data')) {
+            return true;
+        }
+    }
+    return false;
+}
+/**
+ * Resolve the workspace for a session. A projectless OpenChamber chat falls back to the
+ * configured default project; an ordinary project without Fleet configuration still fails.
+ */
+export function loadSessionConfig(directory = process.cwd(), options = {}) {
+    try {
+        return { config: loadConfig(directory, options), fallback: false };
+    }
+    catch (error) {
+        if (!(error instanceof FleetError) || error.code !== 'config-missing')
+            throw error;
+        if (!isOpenChamberInternalDirectory(directory))
+            throw error;
+        const defaults = loadDefaults(options);
+        if (!defaults.directory) {
+            throw new FleetError('config-missing', 'no Fleet project is selected and no default workspace is configured', {
+                hint: 'run `fleet default <project-directory>` once, or open a project',
+            });
+        }
+        try {
+            return { config: loadConfig(defaults.directory, options), fallback: true };
+        }
+        catch (failure) {
+            if (failure instanceof FleetError) {
+                throw new FleetError(failure.code, `default workspace ${defaults.directory}: ${failure.message}`, {
+                    ...failure.details,
+                    default: true,
+                });
+            }
+            throw failure;
+        }
+    }
+}
+/** Host registry without a project; enough for `fleet_hosts` in a projectless chat. */
+export function loadHostsOnlyConfig(directory = process.cwd(), options = {}) {
+    const paths = configPaths(directory, options);
+    const registry = readHostRegistry(paths.hostsFile, false);
+    const hosts = {};
+    for (const [alias, entry] of Object.entries(registry.hosts)) {
+        hosts[alias] = {
+            alias,
+            ssh: entry.ssh,
+            port: entry.port ?? 22,
+            root: defaultRemoteRoot(alias),
+            tags: entry.tags ?? [],
+        };
+    }
+    return {
+        name: 'no project',
+        dir: paths.workspaceRoot,
+        file: paths.hostsFile,
+        hosts,
+        excludes: [],
+        env: {},
+        shell: 'bash',
+        excludeMatcher: compileExcludes([]),
+        projectId: paths.projectId,
     };
 }
 /** Resolve the project identity. A git remote makes the identity stable across clones

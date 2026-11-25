@@ -6,9 +6,14 @@ import { after, describe, test } from 'node:test';
 import {
   compileExcludes,
   initProjectConfig,
+  isOpenChamberInternalDirectory,
   loadConfig,
   loadConfigDocuments,
+  loadDefaults,
+  loadHostsOnlyConfig,
+  loadSessionConfig,
   saveConfigDocuments,
+  saveDefaults,
 } from '../../dist/config.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-config-'));
@@ -360,6 +365,39 @@ describe('split host registry and project configuration', () => {
     }, { configDir });
     assert.equal(saved.project.hosts[0], 'build');
     assert.equal(loadConfig(workspace, { configDir }).hosts.build.root, '~/.cache/openchamber-fleet/' + empty.project.name);
+  });
+});
+
+describe('projectless default workspace', () => {
+  test('falls back only for OpenChamber chat directories, never for a real project', () => {
+    const configDir = fs.mkdtempSync(path.join(tmp, 'defaults-'));
+    const project = fs.mkdtempSync(path.join(tmp, 'default-project-'));
+    initProjectConfig(project, { alias: 'mob', ssh: 'u@h', name: 'default-project', configDir });
+    const chat = path.join(tmp, '.config', 'openchamber', 'chats', 'session-1');
+    fs.mkdirSync(chat, { recursive: true });
+    const unconfigured = fs.mkdtempSync(path.join(tmp, 'unconfigured-'));
+
+    assert.equal(isOpenChamberInternalDirectory(chat), true);
+    assert.equal(isOpenChamberInternalDirectory(project), false);
+    assert.throws(() => loadSessionConfig(chat, { configDir }), (error) => error.code === 'config-missing');
+    assert.throws(() => loadSessionConfig(unconfigured, { configDir }), (error) => error.code === 'config-missing');
+
+    const saved = saveDefaults(project, { configDir });
+    assert.equal(saved.directory, fs.realpathSync(project));
+    assert.equal(loadDefaults({ configDir }).directory, fs.realpathSync(project));
+    const resolved = loadSessionConfig(chat, { configDir });
+    assert.equal(resolved.fallback, true);
+    assert.equal(resolved.config.name, 'default-project');
+    assert.equal(loadHostsOnlyConfig(chat, { configDir }).hosts.mob.ssh, 'u@h');
+    assert.throws(() => loadSessionConfig(unconfigured, { configDir }), (error) => error.code === 'config-missing');
+
+    saveDefaults(null, { configDir });
+    assert.throws(() => loadSessionConfig(chat, { configDir }), /no default workspace/);
+  });
+
+  test('rejects a default that is not an existing directory', () => {
+    const configDir = fs.mkdtempSync(path.join(tmp, 'defaults-invalid-'));
+    assert.throws(() => saveDefaults(path.join(tmp, 'missing-directory'), { configDir }), /does not exist/);
   });
 });
 

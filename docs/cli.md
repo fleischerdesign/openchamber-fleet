@@ -3,6 +3,7 @@
 ```
 fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--tag a,b] [--force]
 fleet init ... --workspace-file       # opt-in legacy fleet.json in the repository
+fleet default [<project-dir>] [--clear] [--json]
 fleet doctor [--host <alias>] [--agent-path PATH]
 fleet hosts [--tag a,b] [--json]
 fleet status --host <alias> [--json]
@@ -25,6 +26,11 @@ roots, excludes, environment and shell intact. Use `--workspace-file` only when 
 legacy file is explicitly wanted; it is written at the workspace root even from a subdirectory.
 `--tag` adds host capabilities such as `linux,gpu`; `fleet hosts` lists them and `fleet run` can
 select a host by tags.
+
+`fleet default <project-dir>` sets the project that Fleet uses when OpenChamber opens a chat without
+a project. The value lives in `defaults.json`; it is not written into the repository and is not a
+`fleet.json`. `fleet default` shows it, `fleet default --clear` removes it. `fleet_hosts` still lists
+the global registry when no default is set.
 
 ## Run
 
