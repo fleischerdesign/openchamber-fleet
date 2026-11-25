@@ -78,6 +78,25 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     assert.equal(noop.generation, result.generation, 'a no-op apply must not bump the generation');
   });
 
+  test('batches a manifest larger than one control frame', async () => {
+    const many = path.join(base, 'many-source');
+    const manyReplica = path.join(base, 'many-replica');
+    fs.mkdirSync(many, { recursive: true });
+    const prefix = 'x'.repeat(180);
+    for (let index = 0; index < 450; index += 1) {
+      fs.writeFileSync(path.join(many, `${prefix}-${String(index).padStart(4, '0')}.txt`), `${index}\n`);
+    }
+    const result = await syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-many',
+      source: many,
+      root: manyReplica,
+      excludes: [],
+      mode: 'apply',
+    });
+    assert.equal(result.changes.length, 450);
+    assert.equal(fs.existsSync(path.join(manyReplica, `${prefix}-0449.txt`)), true);
+  });
+
   test('plan previews an absent replica without creating root or state', async () => {
     const previewRoot = path.join(base, 'preview-replica');
     const result = await syncWorkspace(client, matcher, {

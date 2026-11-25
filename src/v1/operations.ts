@@ -22,6 +22,8 @@ export interface ConnectOptions {
 }
 
 const PAGE = 5000;
+const CHANGE_PAGE = 200;
+const MAX_ENTRY_BYTES = 700 * 1024;
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
 const DEFAULT_EXEC_WAIT_MS = 24 * 60 * 60 * 1000;
 
@@ -250,7 +252,12 @@ async function fetchPlanPages(
   let offset = 0;
   for (;;) {
     throwIfAborted(signal);
-    const page = (await client.request('sync.planPage', { txnId, kind, offset, limit: PAGE })) as {
+    const page = (await client.request('sync.planPage', {
+      txnId,
+      kind,
+      offset,
+      limit: kind === 'changes' ? CHANGE_PAGE : PAGE,
+    })) as {
       items: unknown[];
       more: boolean;
     };
@@ -271,7 +278,12 @@ async function fetchPreviewPages(
   let offset = 0;
   for (;;) {
     throwIfAborted(signal);
-    const page = (await client.request('sync.previewPage', { txnId, kind, offset, limit: PAGE })) as {
+    const page = (await client.request('sync.previewPage', {
+      txnId,
+      kind,
+      offset,
+      limit: kind === 'changes' ? CHANGE_PAGE : PAGE,
+    })) as {
       items: unknown[];
       total: number;
     };
@@ -280,6 +292,24 @@ async function fetchPreviewPages(
     offset += page.items.length;
   }
   return items;
+}
+
+function entryBatches(entries: readonly { path: string }[]): { entries: readonly { path: string }[]; bytes: number }[] {
+  const batches: { entries: { path: string }[]; bytes: number }[] = [];
+  let current: { path: string }[] = [];
+  let bytes = 0;
+  for (const entry of entries) {
+    const size = Buffer.byteLength(JSON.stringify(entry)) + 2;
+    if (current.length > 0 && bytes + size > MAX_ENTRY_BYTES) {
+      batches.push({ entries: current, bytes });
+      current = [];
+      bytes = 0;
+    }
+    current.push(entry);
+    bytes += size;
+  }
+  if (current.length > 0) batches.push({ entries: current, bytes });
+  return batches;
 }
 
 export async function syncWorkspace(
@@ -332,12 +362,13 @@ export async function syncWorkspace(
         manifestDigest: string;
       };
       txnId = begin.txnId;
-      for (let offset = 0; offset < scanned.entries.length; offset += PAGE) {
+      const batches = entryBatches(scanned.entries);
+      for (const [index, batch] of batches.entries()) {
         throwIfAborted(options.signal);
         await client.request('sync.previewEntries', {
           txnId,
-          entries: scanned.entries.slice(offset, offset + PAGE),
-          more: offset + PAGE < scanned.entries.length,
+          entries: batch.entries,
+          more: index + 1 < batches.length,
         });
       }
       const plan = (await client.request('sync.previewPlan', { txnId })) as {
@@ -467,17 +498,17 @@ export async function syncWorkspace(
     txnId = begin.txnId;
     throwIfAborted(options.signal);
 
-    for (let offset = 0; offset < scanned.entries.length; offset += PAGE) {
+    let sent = 0;
+    const batches = entryBatches(scanned.entries);
+    for (const [index, batch] of batches.entries()) {
       throwIfAborted(options.signal);
       await client.request('sync.entries', {
         txnId,
-        entries: scanned.entries.slice(offset, offset + PAGE),
-        more: offset + PAGE < scanned.entries.length,
+        entries: batch.entries,
+        more: index + 1 < batches.length,
       });
-      await report(options.onProgress, {
-        phase: 'planning',
-        entries: Math.min(offset + PAGE, scanned.entries.length),
-      });
+      sent += batch.entries.length;
+      await report(options.onProgress, { phase: 'planning', entries: sent });
     }
     const plan = (await client.request('sync.plan', { txnId })) as {
       planDigest: string;

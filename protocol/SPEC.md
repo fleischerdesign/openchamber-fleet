@@ -109,7 +109,7 @@ The result:
 
 ```json
 {"protocol":{"major":1,"minor":1},
- "agent":{"version":"0.11.1","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
+ "agent":{"version":"0.11.2","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
  "capabilities":{"workspace.sync":1,"workspace.probe":1,"workspace.preview":1,"exec":1,"artifact":1,"transfer":1},
  "limits":{"maxFrame":16777216,"maxChunk":1048576,"maxControl":1048576,"maxStreams":32,
            "maxManifestEntries":500000,"defaultLeaseMs":300000}}

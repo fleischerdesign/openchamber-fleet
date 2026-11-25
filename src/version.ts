@@ -5,4 +5,4 @@
  * keeps working when it is installed without the package root. The release
  * test compares it with package.json and the extension manifest.
  */
-export const FLEET_VERSION = '0.11.1';
+export const FLEET_VERSION = '0.11.2';

@@ -56,6 +56,7 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Service launcher, restart after supervisor death | — | `test/unit/service-supervisor.test.js` |
 | 200k benchmark | FAIL-04 | `bench/workspace.mjs`, see `docs/benchmarks.md` |
 | Large artifact (5 MiB, multi-frame) | — | `test/v1/protocol.test.js` |
+| Manifest larger than one control frame | SYNC-15 | `test/v1/protocol.test.js` |
 | Symlink apply, symlinked parent refused | SYNC-10 | `agent/src/sync.rs` symlink tests |
 
 ## Planned (the failure suite)
