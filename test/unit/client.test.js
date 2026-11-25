@@ -4,7 +4,7 @@ import { describe, test } from 'node:test';
 import { AgentClient } from '../../dist/v1/client.js';
 import { CONTROL, DATA, FrameDecoder, decodeData, encodeControl } from '../../dist/v1/frame.js';
 
-function fakeTransport(maxData) {
+function fakeTransport(maxData, minor = 1) {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -23,7 +23,7 @@ function fakeTransport(maxData) {
           jsonrpc: '2.0',
           id: message.id,
           result: {
-            protocol: { major: 1, minor: 1 },
+            protocol: { major: 1, minor },
             agent: { version: 'test', installationId: 'test', os: 'linux', arch: 'x64' },
             capabilities: {},
             limits: { maxControl: 1024 * 1024, maxData, maxStreams: 4 },
@@ -46,6 +46,17 @@ function fakeTransport(maxData) {
     },
   };
 }
+
+describe('protocol minor', () => {
+  test('refuses a 1.0 agent before any operation', async () => {
+    const transport = fakeTransport(4096, 0);
+    await assert.rejects(
+      AgentClient.connect(transport),
+      (error) => error.code === 'UNSUPPORTED_PROTOCOL',
+    );
+    transport.kill();
+  });
+});
 
 describe('negotiated data limit', () => {
   test('upload chunks at the smaller advertised maxData', async () => {
