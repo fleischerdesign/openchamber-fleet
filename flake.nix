@@ -26,7 +26,9 @@
             export FLEET_AGENT_STATE_DIR=$(mktemp -d)
           '';
         };
-      extensionVersion = (builtins.fromJSON (builtins.readFile ./extensions/openchamber/package.json)).version;
+      packageVersion = (builtins.fromJSON (builtins.readFile ./package.json)).version;
+      extensionVersion =
+        (builtins.fromJSON (builtins.readFile ./extensions/openchamber/package.json)).version;
       mkExtension =
         pkgs:
         pkgs.runCommand "openchamber-fleet-extension-${extensionVersion}" { } ''
@@ -37,9 +39,9 @@
         pkgs:
         pkgs.buildNpmPackage {
           pname = "openchamber-fleet";
-          version = "0.7.0";
+          version = packageVersion;
           src = self;
-          npmDepsHash = "sha256-oHT1wPb0D/KHxNFf4OpZrWxg02KHhuySdZGpxOkJYHg=";
+          npmDepsHash = "sha256-Dwzsm7KvEdXBFr46iyx3tm9rZRLHoUa4XZ6Z7By+FKc=";
           buildPhase = ''
             npm run build
           '';
@@ -84,10 +86,10 @@
         extension = mkExtension pkgs;
         build-and-test = pkgs.buildNpmPackage {
           pname = "openchamber-fleet-checks";
-          version = "0.7.0";
+          version = packageVersion;
           src = self;
           doCheck = true;
-          npmDepsHash = "sha256-oHT1wPb0D/KHxNFf4OpZrWxg02KHhuySdZGpxOkJYHg=";
+          npmDepsHash = "sha256-Dwzsm7KvEdXBFr46iyx3tm9rZRLHoUa4XZ6Z7By+FKc=";
           nativeBuildInputs = with pkgs; [
             openssh
             git

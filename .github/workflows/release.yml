@@ -79,8 +79,16 @@ jobs:
           path: dist/fleet-agent-${{ matrix.target }}
           if-no-files-found: error
 
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v32
+      - name: Build the Nix controller package
+        run: nix build .#controller --print-build-logs
+
   release:
-    needs: [extension, agent]
+    needs: [extension, agent, nix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

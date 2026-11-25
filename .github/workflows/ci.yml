@@ -33,3 +33,11 @@ jobs:
       - run: npm test
         env:
           FLEET_AGENT_BIN: agent/target/debug/fleet-agent
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v32
+      - name: Build the Nix controller package
+        run: nix build .#controller --print-build-logs
