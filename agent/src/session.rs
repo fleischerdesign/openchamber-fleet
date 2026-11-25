@@ -26,7 +26,7 @@ use crate::sync::{self, TxnRecord};
 use crate::workspace::{self, LeaseHandle, Registry};
 
 pub const PROTOCOL_MAJOR: u64 = 1;
-pub const PROTOCOL_MINOR: u64 = 0;
+pub const PROTOCOL_MINOR: u64 = 1;
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
@@ -110,7 +110,7 @@ struct Upload {
 
 struct LeaseBinding {
     workspace_id: String,
-    expires_at: u64,
+    operation_id: String,
     handle: LeaseHandle,
 }
 
@@ -242,11 +242,19 @@ impl Session {
             .and_then(|protocol| protocol.get("major"))
             .and_then(Value::as_u64)
             .unwrap_or(u64::MAX);
-        if major != PROTOCOL_MAJOR {
+        let minor = request
+            .params
+            .get("protocol")
+            .and_then(|protocol| protocol.get("minor"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if major != PROTOCOL_MAJOR || minor < PROTOCOL_MINOR {
             let response = rpc::error(
                 &request.id,
                 "UNSUPPORTED_PROTOCOL",
-                &format!("protocol major {major} is not {PROTOCOL_MAJOR}"),
+                &format!(
+                    "protocol {major}.{minor} is below the required {PROTOCOL_MAJOR}.{PROTOCOL_MINOR}"
+                ),
                 false,
             );
             return Action::Close(Some(response));
@@ -324,15 +332,35 @@ impl Session {
             .get("readOnly")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let expected_root = request.params.get("expectedRoot").and_then(Value::as_str);
+        let expected_manifest = request
+            .params
+            .get("expectedManifestDigest")
+            .and_then(Value::as_str);
+        let expected_state = request.params.get("expectedState").and_then(Value::as_str);
         let opened = if read_only {
             // A reader must never create a state directory, a root or a manifest.
             workspace::preview_workspace(id, root)
         } else {
-            workspace::open_workspace(id, root, adopt)
+            workspace::open_workspace(
+                id,
+                root,
+                adopt,
+                expected_root,
+                expected_manifest,
+                expected_state,
+            )
         };
         match opened {
             Ok(workspace) => {
                 let absent = !workspace.state.join("state.json").exists();
+                let state = if absent {
+                    "ABSENT"
+                } else if workspace.recovery.is_some() {
+                    "RECOVERY"
+                } else {
+                    "READY"
+                };
                 let result = json!({
                     "workspaceId": workspace.id,
                     "root": workspace.root.to_string_lossy(),
@@ -340,6 +368,7 @@ impl Session {
                     "manifestDigest": workspace.manifest.digest,
                     "recovery": workspace.recovery.is_some(),
                     "absent": absent,
+                    "state": state,
                 });
                 self.registry.insert(workspace);
                 Action::Reply(rpc::response(&request.id, result))
@@ -417,12 +446,11 @@ impl Session {
                     "generation": generation,
                     "expiresAt": handle.meta.expires_at,
                 });
-                let expires_at = handle.meta.expires_at;
                 self.leases.insert(
                     operation.to_string(),
                     LeaseBinding {
                         workspace_id: id.to_string(),
-                        expires_at,
+                        operation_id: operation.to_string(),
                         handle,
                     },
                 );
@@ -432,23 +460,10 @@ impl Session {
         }
     }
 
-    /// A lease that outlived its advertised TTL is released lazily instead of
-    /// blocking the workspace until the connection ends.
-    fn active_lease(&mut self, lease: &str) -> Option<&LeaseBinding> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_millis() as u64)
-            .unwrap_or(0);
-        let expired = self
-            .leases
-            .get(lease)
-            .map(|binding| now > binding.expires_at)
-            .unwrap_or(false);
-        if expired {
-            if let Some(binding) = self.leases.remove(lease) {
-                binding.handle.release();
-            }
-        }
+    /// The lease lives as long as its connection and is released explicitly or
+    /// by the kernel lock on disconnect. `ttlMs` is advisory metadata; it does
+    /// not revoke a lease while accepted work is still using it.
+    fn active_lease(&self, lease: &str) -> Option<&LeaseBinding> {
         self.leases.get(lease)
     }
 
@@ -537,7 +552,7 @@ impl Session {
             ));
         };
         let txn_id = format!("txn-{}", identity_fragment());
-        match sync::begin(workspace, policy, base, &txn_id) {
+        match sync::begin(workspace, policy, base, &txn_id, lease) {
             Ok(record) => {
                 self.transactions.insert(txn_id.clone(), record);
                 Action::Reply(rpc::response(&request.id, json!({"txnId": txn_id})))
@@ -625,6 +640,7 @@ impl Session {
             base_generation: workspace.generation,
             phase: "entries".into(),
             policy,
+            lease_id: String::new(),
             entries: Vec::new(),
             plan_digest: None,
             changes: Vec::new(),
@@ -635,11 +651,19 @@ impl Session {
                 .unwrap_or(0),
         };
         let generation = workspace.generation;
+        let workspace_root = workspace.root.to_string_lossy().to_string();
+        let manifest_digest = workspace.manifest.digest.clone();
         self.previews
             .insert(txn_id.clone(), PreviewTxn { record, workspace });
         Action::Reply(rpc::response(
             &request.id,
-            json!({"txnId": txn_id, "generation": generation, "state": state}),
+            json!({
+                "txnId": txn_id,
+                "generation": generation,
+                "state": state,
+                "root": workspace_root,
+                "manifestDigest": manifest_digest,
+            }),
         ))
     }
 
@@ -1212,16 +1236,31 @@ impl Session {
             return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
         };
         let lease_workspace = binding.workspace_id.clone();
+        let lease_operation = binding.operation_id.clone();
         let transaction_workspace = self
             .transactions
             .get(txn_id)
             .map(|record| record.workspace.clone());
+        let transaction_lease = self
+            .transactions
+            .get(txn_id)
+            .map(|record| record.lease_id.clone());
         if let Some(workspace_id) = transaction_workspace {
             if lease_workspace != workspace_id {
                 return Action::Reply(rpc::error(
                     &request.id,
                     "LEASE_MISMATCH",
                     "lease belongs to another workspace",
+                    false,
+                ));
+            }
+        }
+        if let Some(transaction_lease) = transaction_lease {
+            if !transaction_lease.is_empty() && transaction_lease != lease_operation {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "LEASE_MISMATCH",
+                    "transaction belongs to another lease",
                     false,
                 ));
             }
@@ -1291,6 +1330,21 @@ impl Session {
                 "lease belongs to another workspace",
                 false,
             ));
+        }
+        let lease_operation = binding.operation_id.clone();
+        let transaction_lease = self
+            .transactions
+            .get(txn_id)
+            .map(|record| record.lease_id.clone());
+        if let Some(transaction_lease) = transaction_lease {
+            if !transaction_lease.is_empty() && transaction_lease != lease_operation {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "LEASE_MISMATCH",
+                    "transaction belongs to another lease",
+                    false,
+                ));
+            }
         }
         self.transactions.remove(txn_id);
         let Some(mut workspace) = self.registry.get(&workspace_id).cloned() else {
@@ -1365,6 +1419,21 @@ impl Session {
                 "lease belongs to another workspace",
                 false,
             ));
+        }
+        let lease_operation = binding.operation_id.clone();
+        let transaction_lease = self
+            .transactions
+            .get(txn_id)
+            .map(|record| record.lease_id.clone());
+        if let Some(transaction_lease) = transaction_lease {
+            if !transaction_lease.is_empty() && transaction_lease != lease_operation {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "LEASE_MISMATCH",
+                    "transaction belongs to another lease",
+                    false,
+                ));
+            }
         }
         self.transactions.remove(txn_id);
         let Some(workspace) = self.registry.get(&workspace_id).cloned() else {
@@ -1559,7 +1628,17 @@ impl Session {
                 false,
             ));
         };
-        if workspace.recovery.is_some() {
+        let journal = {
+            let _state_lock = match workspace::registry_lock() {
+                Ok(lock) => lock,
+                Err(error) => return Action::Reply(error_response(&request.id, &error)),
+            };
+            match workspace::read_journal(&workspace.state) {
+                Ok(journal) => journal,
+                Err(error) => return Action::Reply(error_response(&request.id, &error)),
+            }
+        };
+        if workspace.recovery.is_some() || journal.is_some() {
             return Action::Reply(rpc::error(
                 &request.id,
                 "RECOVERY_REQUIRED",
@@ -1796,6 +1875,7 @@ fn error_response(id: &Value, message: &str) -> String {
         "WORKSPACE_BUSY",
         "WORKSPACE_ROOT_CONFLICT",
         "WORKSPACE_UNMANAGED",
+        "PLAN_STALE",
         "RECOVERY_REQUIRED",
         "GENERATION_MISMATCH",
         "LEASE_UNKNOWN",
@@ -1918,7 +1998,7 @@ mod tests {
     fn init(session: &mut Session) {
         let value = reply(
             session,
-            r#"{"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{"protocol":{"major":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{"protocol":{"major":1,"minor":1}}}"#,
         );
         assert!(value.get("result").is_some(), "{value}");
     }
@@ -1928,7 +2008,7 @@ mod tests {
         let mut session = Session::new().unwrap();
         let response = reply(
             &mut session,
-            r#"{"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{"protocol":{"major":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{"protocol":{"major":1,"minor":1}}}"#,
         );
         assert_eq!(response["result"]["protocol"]["major"], 1);
         assert_eq!(
@@ -1949,6 +2029,20 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"workspace.status","params":{}}"#,
         );
         assert_eq!(response["error"]["code"], "NOT_INITIALIZED");
+    }
+
+    #[test]
+    fn protocol_minor_mismatch_closes_before_mutation() {
+        let mut session = Session::new().unwrap();
+        match session.handle(
+            r#"{"jsonrpc":"2.0","id":2,"method":"session.initialize","params":{"protocol":{"major":1,"minor":0}}}"#,
+        ) {
+            Action::Close(Some(response)) => {
+                let value: Value = serde_json::from_str(&response).unwrap();
+                assert_eq!(value["error"]["code"], "UNSUPPORTED_PROTOCOL");
+            }
+            _ => panic!("expected close with error"),
+        }
     }
 
     #[test]
@@ -2163,7 +2257,7 @@ mod tests {
     #[test]
     fn run_loop_answers_over_a_byte_stream() {
         let mut request = Vec::new();
-        frame::write_control(&mut request, r#"{"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{"protocol":{"major":1}}}"#).unwrap();
+        frame::write_control(&mut request, r#"{"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{"protocol":{"major":1,"minor":1}}}"#).unwrap();
         frame::write_control(
             &mut request,
             r#"{"jsonrpc":"2.0","id":"2","method":"session.shutdown"}"#,

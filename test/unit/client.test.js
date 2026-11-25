@@ -23,7 +23,7 @@ function fakeTransport(maxData) {
           jsonrpc: '2.0',
           id: message.id,
           result: {
-            protocol: { major: 1, minor: 0 },
+            protocol: { major: 1, minor: 1 },
             agent: { version: 'test', installationId: 'test', os: 'linux', arch: 'x64' },
             capabilities: {},
             limits: { maxControl: 1024 * 1024, maxData, maxStreams: 4 },

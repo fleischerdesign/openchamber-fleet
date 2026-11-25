@@ -67,10 +67,18 @@ export class JobStore {
     ensurePrivateDir(this.claimedDir);
     ensurePrivateDir(this.abortedDir);
     ensurePrivateDir(this.cancelDir);
+    const staleBefore = Date.now() - 10 * 60 * 1000;
     for (const directory of [this.jobsDir, this.requestsDir, this.claimedDir, this.abortedDir, this.cancelDir]) {
       for (const entry of fs.readdirSync(directory)) {
         if (!entry.startsWith('.') || !entry.includes('.tmp-')) continue;
-        removeFile(path.join(directory, entry));
+        const file = path.join(directory, entry);
+        try {
+          // An active writer creates and renames its temp within milliseconds.
+          // Only reclaim clearly abandoned temp files; never delete a peer's.
+          if (fs.statSync(file).mtimeMs < staleBefore) removeFile(file);
+        } catch {
+          // A concurrent rename removed it; nothing to do.
+        }
       }
     }
     for (const entry of fs.readdirSync(this.abortedDir)) {
@@ -222,6 +230,15 @@ export class JobStore {
 
   deleteClaimed(jobId: string): void {
     removeFile(this.claimedPath(jobId));
+  }
+
+  restoreClaimed(jobId: string): boolean {
+    try {
+      fs.renameSync(this.claimedPath(jobId), this.requestPath(jobId));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private requestPath(jobId: string): string {

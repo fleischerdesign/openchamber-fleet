@@ -1,6 +1,6 @@
 {
   "name": "openchamber-fleet",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Replicate a workspace to a remote machine and run one command there — for OpenCode and OpenChamber agents.",
   "license": "MIT",
   "type": "module",

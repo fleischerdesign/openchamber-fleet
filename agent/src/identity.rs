@@ -1,7 +1,7 @@
 //! Installation identity and the agent state directory.
 
-use std::fs;
-use std::io::{self, Read};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 pub const DIR_MODE: u32 = 0o700;
@@ -31,20 +31,44 @@ pub fn ensure_state_root() -> io::Result<PathBuf> {
 pub fn installation_id() -> io::Result<String> {
     let root = ensure_state_root()?;
     let file = root.join("installation-id");
-    if let Ok(value) = fs::read_to_string(&file) {
-        let trimmed = value.trim();
-        if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Ok(trimmed.to_string());
-        }
+    if let Ok(value) = read_id(&file) {
+        return Ok(value);
     }
     let id = random_hex_16()?;
-    fs::write(&file, format!("{id}\n"))?;
+    let temporary = root.join(format!(".installation-id.tmp-{}", random_hex_16()?));
+    {
+        let mut handle = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        handle.write_all(format!("{id}\n").as_bytes())?;
+        handle.sync_all()?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
     }
-    Ok(id)
+    let published = fs::hard_link(&temporary, &file);
+    let _ = fs::remove_file(&temporary);
+    match published {
+        Ok(()) => Ok(id),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read_id(&file),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_id(file: &PathBuf) -> io::Result<String> {
+    let value = fs::read_to_string(file)?;
+    let trimmed = value.trim();
+    if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(trimmed.to_string())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid installation id",
+        ))
+    }
 }
 
 fn random_hex_16() -> io::Result<String> {

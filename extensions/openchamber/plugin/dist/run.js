@@ -36,6 +36,7 @@ function summaryOf(mode, result) {
     return {
         mode,
         planDigest: result.planDigest,
+        planToken: result.planToken ?? null,
         changes: result.changes.length,
         changesTruncated: result.changes.length > items.length,
         needed: result.needed.length,

@@ -99,7 +99,7 @@ The first control message MUST be `session.initialize`:
 
 ```json
 {"jsonrpc":"2.0","id":"1","method":"session.initialize","params":{
-  "protocol":{"major":1,"minor":0},
+  "protocol":{"major":1,"minor":1},
   "client":{"name":"fleet","version":"0.2.0","instance":"8d1f…"},
   "capabilities":["workspace.sync@1","exec@1","artifact@1"]
 }}
@@ -108,8 +108,8 @@ The first control message MUST be `session.initialize`:
 The result:
 
 ```json
-{"protocol":{"major":1,"minor":0},
- "agent":{"version":"0.11.0","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
+{"protocol":{"major":1,"minor":1},
+ "agent":{"version":"0.11.1","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
  "capabilities":{"workspace.sync":1,"workspace.probe":1,"workspace.preview":1,"exec":1,"artifact":1,"transfer":1},
  "limits":{"maxFrame":16777216,"maxChunk":1048576,"maxControl":1048576,"maxStreams":32,
            "maxManifestEntries":500000,"defaultLeaseMs":300000}}
@@ -117,7 +117,9 @@ The result:
 
 Rules:
 
-- A major mismatch is `UNSUPPORTED_PROTOCOL`; the agent closes after the error response.
+- A major mismatch or a controller minor below 1 is `UNSUPPORTED_PROTOCOL`; the agent closes after
+  the error response, before any workspace operation. A 1.1 controller refuses a 1.0 agent for the
+  same reason. Mixed versions therefore cannot stage a journal and fail later.
 - A capability the client requires but the agent lacks is `UNSUPPORTED_CAPABILITY`.
 - `installationId` is stable per agent installation (a file in the state directory). It identifies
   the node, not the connection.
@@ -128,7 +130,7 @@ Rules:
 
 ### 6.1 Registration
 
-`workspace.open {workspaceId, root, adopt?, readOnly?}`
+`workspace.open {workspaceId, root, adopt?, readOnly?, expectedRoot?, expectedManifestDigest?, expectedState?}`
 
 - `workspaceId` matches `^[a-z0-9][a-z0-9._-]*$`.
 - `root` MUST pass the root guard: not `/`, not a system directory, not the user's home, at least
@@ -138,7 +140,13 @@ Rules:
 - `workspace.open` on an unknown root creates it `0700`. On a root that exists but is not managed,
   it refuses unless `adopt: true` is passed. `readOnly: true` loads a snapshot and never creates a
   root, state directory or manifest; an absent workspace is returned with generation 0.
-- One real root MUST NOT be bound to two workspace ids; a conflict is `WORKSPACE_ROOT_CONFLICT`.
+- A process-wide registry lock serializes root reservation and state creation. One real root MUST
+  NOT be bound to two workspace ids or overlap a nested root; a conflict is
+  `WORKSPACE_ROOT_CONFLICT`. Corrupt existing state files fail the reservation instead of being
+  skipped.
+- `expectedRoot`, `expectedManifestDigest` and `expectedState` are checked under that lock before a
+  missing state directory is created. A mismatch is `PLAN_STALE`; this is how an approved plan is
+  bound to the actual resolved root and base manifest before provisioning.
 
 ### 6.2 Generation
 
@@ -154,9 +162,10 @@ One lease per workspace covers every mutation (`sync.*`, `exec.start`).
 
 - The node is the authority: a second lease attempt while one is held returns `WORKSPACE_BUSY`
   with the holder's `operationId` and remaining TTL.
-- A lease has an advertised `expiresAt`. The agent checks it lazily on every lease use; an expired
-  lease is released and the caller receives `LEASE_UNKNOWN`/`LEASE_EXPIRED`. A lease from a closed
-  connection is reclaimed immediately.
+- A lease is owned by its connection. `ttlMs` and `expiresAt` are advisory metadata; the agent does
+  not revoke a lease while accepted work is using it. The kernel `flock` is released by an explicit
+  release, connection close or process death, which is the effective lifetime.
+- A lease from a closed connection is reclaimed immediately.
 - `workspace.release {leaseId}`. A command with an unknown, expired or foreign lease returns
   `LEASE_UNKNOWN`/`LEASE_EXPIRED` and MUST NOT mutate anything. Release is refused with
   `WORKSPACE_BUSY` while a transaction or job of that workspace is still active.
@@ -216,7 +225,8 @@ Policy per transaction:
 ### 7.4 Transaction
 
 1. `sync.begin {workspaceId, leaseId, baseGeneration, policy}` → `{txnId}`.
-   `baseGeneration` must equal the current generation, else `GENERATION_MISMATCH`.
+   `baseGeneration` must equal the current generation, else `GENERATION_MISMATCH`. The journal
+   records the owning `leaseId`; commit, abort and in-memory recovery refuse a different lease.
 2. `sync.entries {txnId, entries, more}` — zero or more pages of at most 5000 entries.
 3. `sync.plan {txnId}` → `{planDigest, changes:<count>, needed:<count>}`. The agent computes
    the diff against the last committed manifest. Lists are paged (a 200k-file plan would not fit
@@ -232,7 +242,8 @@ Policy per transaction:
 
 #### Read-only preview
 
-`sync.previewBegin {workspaceId, root, policy}` → `{txnId, generation, state}` loads the current
+`sync.previewBegin {workspaceId, root, policy}` → `{txnId, generation, state, root, manifestDigest}`
+loads the current
 manifest without opening or creating the workspace. `sync.previewEntries` and `sync.previewPlan`
 mirror the transaction steps but keep the result in memory. `sync.previewEnd` discards it. No
 journal, blob, root or generation is written. A preview works for an absent replica; an unmanaged
@@ -356,7 +367,7 @@ Codes: `INVALID_FRAME`, `INVALID_REQUEST`, `NOT_INITIALIZED`, `UNSUPPORTED_PROTO
 | manifest entries | 500 000 | reject the transaction |
 | streams per session | 32 | reject |
 | spool per stream | 8 MiB | block or truncate per job policy |
-| lease TTL | 300 000 ms | lazy check on lease use |
+| lease TTL | 300 000 ms | advisory; lease lives with its connection |
 | operation record TTL | 24 h | prune |
 
 ## 13. Conformance

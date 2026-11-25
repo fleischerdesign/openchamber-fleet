@@ -435,7 +435,7 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
     if (legacy) {
       // Migrating rather than replacing: a legacy file keeps its name, hosts,
       // roots, excludes, environment and shell until the user changes them.
-      const legacyConfig = loadLegacyConfig(legacy);
+      const legacyConfig = loadLegacyConfig(legacy, options, options.force === true);
       project = {
         version: CONFIG_VERSION,
         name: legacyConfig.name,
@@ -688,7 +688,7 @@ function loadSplitConfig(paths: ConfigPaths): WorkspaceConfig {
   };
 }
 
-function loadLegacyConfig(file: string, options: LoadConfigOptions = {}): WorkspaceConfig {
+function loadLegacyConfig(file: string, options: LoadConfigOptions = {}, allowConflict = false): WorkspaceConfig {
   let raw: unknown;
   try {
     raw = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -724,7 +724,14 @@ function loadLegacyConfig(file: string, options: LoadConfigOptions = {}): Worksp
       ? defaultRemoteRoot(name)
       : assertRemoteRoot(requireString(entry, 'root', `hosts.${alias}`));
     const tags = readTags(entry.tags, `hosts.${alias}.tags`);
-    const allow = registry.hosts[alias]?.allow;
+    const registered = registry.hosts[alias];
+    if (registered && (registered.ssh !== ssh || (registered.port ?? 22) !== port) && !allowConflict) {
+      throw new FleetError('config-invalid', `legacy host ${JSON.stringify(alias)} conflicts with the shared registry target`, {
+        file,
+        hint: 'run `fleet init --force` to migrate the legacy target, or align the shared registry entry first',
+      });
+    }
+    const allow = registered?.allow;
     hosts[alias] = {
       alias,
       ssh,

@@ -188,8 +188,8 @@ export class SupervisorCore {
                 this.store.writeJob(record);
             }
             catch (error) {
-                this.store.deleteClaimed(jobId);
-                this.log(`could not persist request ${jobId}: ${messageOf(error)}`);
+                const restored = this.store.restoreClaimed(jobId);
+                this.log(`could not persist request ${jobId}: ${messageOf(error)}${restored ? '; restored for retry' : '; claim retained for recovery'}`);
                 continue;
             }
             this.store.deleteClaimed(jobId);

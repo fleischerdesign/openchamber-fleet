@@ -59,9 +59,16 @@ function delay(ms, signal) {
         signal?.addEventListener('abort', onAbort, { once: true });
     });
 }
-export async function openWorkspace(client, workspaceId, root, adopt = false, signal) {
+export async function openWorkspace(client, workspaceId, root, adopt = false, signal, expected) {
     throwIfAborted(signal);
-    const result = (await client.request('workspace.open', { workspaceId, root, adopt }));
+    const result = (await client.request('workspace.open', {
+        workspaceId,
+        root,
+        adopt,
+        ...(expected?.root === undefined ? {} : { expectedRoot: expected.root }),
+        ...(expected?.manifestDigest === undefined ? {} : { expectedManifestDigest: expected.manifestDigest }),
+        ...(expected?.state === undefined ? {} : { expectedState: expected.state }),
+    }));
     throwIfAborted(signal);
     return result;
 }
@@ -99,6 +106,9 @@ export function syncPlanToken(input) {
         source: path.resolve(input.source),
         sourceDigest: input.sourceDigest ?? '',
         root: input.root,
+        resolvedRoot: input.resolvedRoot ?? '',
+        baseManifestDigest: input.baseManifestDigest ?? '',
+        baseState: input.baseState ?? '',
         hostIdentity: input.hostIdentity ?? '',
         agentIdentity: input.agentIdentity ?? '',
         generation: input.generation,
@@ -187,8 +197,20 @@ export async function syncWorkspace(client, matcher, options) {
                 ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
                 agentIdentity,
                 sourceDigest: scanned.digest,
+                resolvedRoot: begin.root,
+                baseManifestDigest: begin.manifestDigest,
+                baseState: begin.state,
             });
-            return { generation: begin.generation, planDigest: plan.planDigest, planToken, changes, needed };
+            return {
+                generation: begin.generation,
+                planDigest: plan.planDigest,
+                planToken,
+                changes,
+                needed,
+                root: begin.root,
+                manifestDigest: begin.manifestDigest,
+                state: begin.state,
+            };
         }
         finally {
             if (txnId) {
@@ -215,14 +237,21 @@ export async function syncWorkspace(client, matcher, options) {
     }
     // A stale approval must be rejected before workspace.open can provision or
     // adopt anything. The post-plan check below closes the remaining race.
+    let approvedPreview;
     if (options.planToken !== undefined) {
-        const approved = await preview();
-        if (approved.planToken !== options.planToken) {
+        approvedPreview = await preview();
+        if (approvedPreview.planToken !== options.planToken) {
             throw new AgentError('PLAN_STALE', 'the replica or plan changed since it was approved; plan again');
         }
     }
     await report(options.onProgress, { phase: 'opening' });
-    const workspace = await openWorkspace(client, options.workspaceId, options.root, options.adopt === true, options.signal);
+    const workspace = await openWorkspace(client, options.workspaceId, options.root, options.adopt === true, options.signal, approvedPreview === undefined
+        ? undefined
+        : {
+            root: approvedPreview.root,
+            manifestDigest: approvedPreview.manifestDigest,
+            state: approvedPreview.state,
+        });
     if (workspace.recovery) {
         throw new AgentError('RECOVERY_REQUIRED', 'workspace has an unfinished transaction; inspect it with fleet recover', true);
     }
@@ -311,6 +340,9 @@ export async function syncWorkspace(client, matcher, options) {
             ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
             agentIdentity,
             sourceDigest: scanned.digest,
+            ...(workspace.root === undefined ? {} : { resolvedRoot: workspace.root }),
+            baseManifestDigest: workspace.manifestDigest,
+            ...(workspace.state === undefined ? {} : { baseState: workspace.state }),
         });
         if (options.planToken !== undefined && options.planToken !== planToken) {
             await client.request('sync.abort', { txnId, leaseId: lease });
@@ -594,6 +626,23 @@ export function canonicalTransferSource(file) {
     }
     return absolute;
 }
+/** Identity of the exact source object that was approved and will be opened. */
+export function transferSourceIdentity(file) {
+    const source = canonicalTransferSource(file);
+    const metadata = fs.lstatSync(source);
+    return { path: source, dev: metadata.dev, ino: metadata.ino };
+}
+/** Identity of the destination parent that was approved. */
+export function transferTargetIdentity(file) {
+    const target = canonicalTransferTarget(file, false);
+    try {
+        const metadata = fs.lstatSync(path.dirname(target));
+        return { path: target, dev: metadata.dev, ino: metadata.ino };
+    }
+    catch {
+        return { path: target, dev: null, ino: null };
+    }
+}
 /** Resolve a local write target without following any symlink component. */
 export function canonicalTransferTarget(file, createParent = true) {
     const absolute = path.resolve(file);
@@ -650,6 +699,12 @@ export async function uploadFile(client, options) {
         if (!metadata.isFile()) {
             throw new AgentError('PATH_UNSAFE', `local file ${source} must be a regular file`);
         }
+        if (options.expectedDev !== undefined && options.expectedDev !== metadata.dev) {
+            throw new AgentError('PATH_UNSAFE', `local file ${source} changed after permission check (device)`);
+        }
+        if (options.expectedIno !== undefined && options.expectedIno !== metadata.ino) {
+            throw new AgentError('PATH_UNSAFE', `local file ${source} changed after permission check (inode)`);
+        }
         const digest = await sha256Fd(fd);
         throwIfAborted(options.signal);
         await report(options.onProgress, { phase: 'opening', bytes: 0 });
@@ -686,11 +741,18 @@ export async function downloadFile(client, options) {
     if (fs.existsSync(target) && options.overwrite !== true) {
         throw new AgentError('DEST_EXISTS', `${target} exists; pass overwrite`);
     }
+    const parentIdentity = options.expectedParentDev === undefined
+        ? null
+        : fs.lstatSync(path.dirname(target));
     const probe = await probeWorkspace(client, options.workspaceId, options.root, options.signal);
     if (probe.state !== 'READY') {
         throw new AgentError('WORKSPACE_ABSENT', 'the source workspace does not exist on this host yet', false, {
             state: probe.state,
         });
+    }
+    if (parentIdentity !== null
+        && (parentIdentity.dev !== options.expectedParentDev || parentIdentity.ino !== options.expectedParentIno)) {
+        throw new AgentError('PATH_UNSAFE', `download parent changed after permission check: ${path.dirname(target)}`);
     }
     await openWorkspaceReadOnly(client, options.workspaceId, options.root, options.signal);
     const parent = path.dirname(target);
@@ -715,7 +777,13 @@ export async function downloadFile(client, options) {
             throw new AgentError('BLOB_CORRUPT', `download verification failed for ${options.path}`);
         }
         await report(options.onProgress, { phase: 'writing', bytes: size, digest });
-        // The approved path may not become a symlink while the bytes are in flight.
+        // The approved path and its parent may not change while the bytes are in flight.
+        if (options.expectedParentDev !== undefined) {
+            const parent = fs.lstatSync(path.dirname(target));
+            if (parent.dev !== options.expectedParentDev || parent.ino !== options.expectedParentIno) {
+                throw new AgentError('PATH_UNSAFE', `download parent changed while writing: ${path.dirname(target)}`);
+            }
+        }
         const finalTarget = canonicalTransferTarget(target, false);
         if (finalTarget !== target) {
             throw new AgentError('PATH_UNSAFE', `download target changed while writing: expected ${target}, got ${finalTarget}`);
@@ -779,49 +847,34 @@ export function canonicalArtifactTarget(dest, artifact) {
 }
 export async function fetchArtifact(client, options) {
     throwIfAborted(options.signal);
-    await report(options.onProgress, { phase: 'opening', bytes: 0 });
-    await openWorkspaceReadOnly(client, options.workspaceId, options.root, options.signal);
-    const opened = (await client.request('artifact.open', {
-        workspaceId: options.workspaceId,
-        path: options.artifact,
-    }));
-    throwIfAborted(options.signal);
-    let received = 0;
-    let lastProgress = 0;
-    const bytes = await client.collect(opened.streamId, {
-        initialCredit: 8 * 1024 * 1024,
-        timeoutMs: 1_800_000,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        onData: (chunk) => {
-            received += chunk.length;
-            const now = Date.now();
-            if (now - lastProgress < 200)
-                return;
-            lastProgress = now;
-            void report(options.onProgress, { phase: 'streaming', bytes: received, digest: opened.digest });
-        },
-    });
-    throwIfAborted(options.signal);
-    const digest = `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`;
-    if (digest !== opened.digest) {
-        throw new AgentError('BLOB_CORRUPT', `artifact digest mismatch: expected ${opened.digest} got ${digest}`);
-    }
-    const target = canonicalArtifactTarget(options.dest, options.artifact);
-    if (options.expectedTarget && target !== options.expectedTarget) {
+    const target = canonicalTransferTarget(path.join(options.dest, path.basename(options.artifact)));
+    if (options.expectedTarget !== undefined && target !== options.expectedTarget) {
         throw new AgentError('PATH_UNSAFE', `artifact target changed after permission check: expected ${options.expectedTarget}, got ${target}`);
     }
-    if (fs.existsSync(target) && options.overwrite !== true) {
-        throw new AgentError('INVALID_REQUEST', `${target} exists; pass overwrite`);
-    }
-    await report(options.onProgress, { phase: 'writing', bytes: bytes.length, digest });
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    const finalTarget = canonicalArtifactTarget(options.dest, options.artifact);
-    if (finalTarget !== target) {
-        throw new AgentError('PATH_UNSAFE', `artifact target changed while writing: expected ${target}, got ${finalTarget}`);
-    }
-    fs.writeFileSync(finalTarget, bytes);
-    await report(options.onProgress, { phase: 'done', bytes: bytes.length, digest });
-    return { file: finalTarget, bytes: bytes.length, digest };
+    const result = await downloadFile(client, {
+        workspaceId: options.workspaceId,
+        root: options.root,
+        path: options.artifact,
+        dest: target,
+        expectedTarget: target,
+        overwrite: options.overwrite === true,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.onProgress === undefined
+            ? {}
+            : {
+                onProgress: (progress) => {
+                    const phase = progress.phase === 'downloading' || progress.phase === 'uploading'
+                        ? 'streaming'
+                        : progress.phase;
+                    return options.onProgress?.({
+                        phase,
+                        bytes: progress.bytes,
+                        ...(progress.digest === undefined ? {} : { digest: progress.digest }),
+                    });
+                },
+            }),
+    });
+    return { file: result.file, bytes: result.bytes, digest: result.digest };
 }
 export async function localDigest(file) {
     return sha256File(file);

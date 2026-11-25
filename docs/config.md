@@ -218,7 +218,9 @@ The legacy shape is accepted for migration:
 configuration does, it migrates instead of replacing: the name, hosts, replica roots, excludes,
 environment and shell are preserved. Selecting an alias that already exists in the shared registry
 only adds it to the project; `--force` replaces its SSH target but preserves an existing
-`allow` list. A legacy alias also inherits the shared allowlist when one exists. `fleet init --workspace-file` is the
+`allow` list. A legacy alias also inherits the shared allowlist when one exists; if the legacy file
+names a different SSH target than the shared registry, loading refuses until `fleet init --force`
+migrates the conflict. `fleet init --workspace-file` is the
 explicit opt-in for the legacy file and writes it at the workspace root.
 
 The OpenChamber panel saves the split format locally and never writes to the repository. It loads

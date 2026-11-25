@@ -41,12 +41,12 @@ interface Parsed {
 const BOOLEAN_FLAGS = new Set(['json', 'plan', 'apply', 'overwrite', 'force', 'adopt', 'abort', 'help', 'workspace-file', 'clear', 'scratch']);
 
 export async function main(argv: readonly string[]): Promise<void> {
-  const parsed = parse(argv);
-  if (parsed.command === '' || parsed.command === 'help' || parsed.flags.has('help')) {
-    printHelp();
-    return;
-  }
   try {
+    const parsed = parse(argv);
+    if (parsed.command === '' || parsed.command === 'help' || parsed.flags.has('help')) {
+      printHelp();
+      return;
+    }
     switch (parsed.command) {
       case 'init': return cmdInit(parsed);
       case 'default': return cmdDefault(parsed);
@@ -92,7 +92,15 @@ function parse(argv: readonly string[]): Parsed {
       continue;
     }
     const [name, inline] = token.slice(2).split('=', 2) as [string, string | undefined];
-    if (inline !== undefined) { flags.set(name, inline); continue; }
+    if (inline !== undefined) {
+      if (BOOLEAN_FLAGS.has(name)) {
+        if (inline === 'true') flags.set(name, true);
+        else if (inline !== 'false') throw new FleetError('usage', `--${name} accepts only true or false`);
+      } else {
+        flags.set(name, inline);
+      }
+      continue;
+    }
     const next = argv[index + 1];
     if (next !== undefined && !next.startsWith('--') && !BOOLEAN_FLAGS.has(name)) {
       flags.set(name, next);
@@ -297,10 +305,22 @@ function excludesOf(config: WorkspaceConfig, flags: Map<string, string | boolean
 }
 
 async function cmdSync(parsed: Parsed): Promise<void> {
-  const plan = parsed.flags.has('plan');
-  const apply = parsed.flags.has('apply');
+  const planFlag = parsed.flags.get('plan');
+  const applyFlag = parsed.flags.get('apply');
+  if ((planFlag !== undefined && planFlag !== true) || (applyFlag !== undefined && applyFlag !== true)) {
+    throw new FleetError('usage', '--plan and --apply are boolean flags');
+  }
+  const plan = planFlag === true;
+  const apply = applyFlag === true;
   if (plan === apply) {
     throw new FleetError('usage', 'sync needs exactly one of --plan or --apply');
+  }
+  const tokenFlag = parsed.flags.get('plan-token');
+  if (tokenFlag !== undefined && (typeof tokenFlag !== 'string' || tokenFlag.length === 0)) {
+    throw new FleetError('usage', '--plan-token requires a token value');
+  }
+  if (plan && tokenFlag !== undefined) {
+    throw new FleetError('usage', '--plan-token is only valid with sync --apply');
   }
   if (plan && parsed.flags.has('adopt')) {
     throw new FleetError('usage', '--adopt is only valid with sync --apply');
@@ -319,7 +339,7 @@ async function cmdSync(parsed: Parsed): Promise<void> {
       excludes,
       mode: plan ? 'plan' : 'apply',
       adopt: parsed.flags.has('adopt'),
-      ...(typeof parsed.flags.get('plan-token') === 'string' ? { planToken: String(parsed.flags.get('plan-token')) } : {}),
+      ...(typeof tokenFlag === 'string' ? { planToken: tokenFlag } : {}),
     });
     process.stdout.write(`plan ${result.changes.length} change(s) ${result.planDigest}\n`);
     if (result.planToken) process.stdout.write(`plan-token ${result.planToken}\n`);
@@ -360,15 +380,26 @@ async function cmdRun(parsed: Parsed): Promise<void> {
   });
   const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
   if (argv.length === 0) throw new FleetError('usage', 'run needs a command after --');
+  const planFlag = parsed.flags.get('plan');
+  const applyFlag = parsed.flags.get('apply');
+  if ((planFlag !== undefined && planFlag !== true) || (applyFlag !== undefined && applyFlag !== true)) {
+    throw new FleetError('usage', '--plan and --apply are boolean flags');
+  }
+  if (planFlag && applyFlag) {
+    throw new FleetError('usage', '--plan and --apply are mutually exclusive');
+  }
   const syncFlag = parsed.flags.get('sync');
-  if (syncFlag !== undefined && syncFlag !== 'never' && syncFlag !== 'plan' && syncFlag !== 'apply') {
+  if (syncFlag !== undefined && syncFlag !== 'auto' && syncFlag !== 'never' && syncFlag !== 'plan' && syncFlag !== 'apply') {
     throw new FleetError('usage', '--sync must be one of auto, never, plan or apply');
+  }
+  if (syncFlag !== undefined && (planFlag === true || applyFlag === true)) {
+    throw new FleetError('usage', 'use either --sync or --plan/--apply, not both');
   }
   const sync: RunSyncMode = syncFlag === 'never' || syncFlag === 'plan' || syncFlag === 'apply'
     ? syncFlag
-    : parsed.flags.has('plan')
+    : planFlag === true
       ? 'plan'
-      : parsed.flags.has('apply')
+      : applyFlag === true
         ? 'apply'
         : 'auto';
   if (parsed.flags.has('scratch') && (sync === 'plan' || sync === 'apply')) {
@@ -408,8 +439,9 @@ async function cmdRun(parsed: Parsed): Promise<void> {
         exitCode: result.exec?.exitCode ?? null,
         signal: result.exec?.signal ?? null,
       }, null, 2)}\n`);
-    } else if (result.state === 'sync-required') {
-      process.stdout.write(`sync required: ${result.sync?.changes ?? 0} change(s)\n`);
+    } else if (result.state === 'sync-required' || result.state === 'sync-planned') {
+      process.stdout.write(`${result.state === 'sync-required' ? 'sync required' : 'plan'}: ${result.sync?.changes ?? 0} change(s)\n`);
+      if (result.sync?.planToken) process.stdout.write(`plan-token ${result.sync.planToken}\n`);
       for (const change of result.sync?.items.slice(0, 50) ?? []) {
         process.stdout.write(`  ${change.action.padEnd(7)} ${change.path}\n`);
       }
@@ -434,7 +466,10 @@ function cmdHosts(parsed: Parsed): void {
   let selected: string | null = null;
   if (tags.length > 0) {
     try {
-      selected = selectHost(config, { tags }).alias;
+      selected = selectHost(config, {
+        tags,
+        operation: parsed.flags.has('scratch') ? 'scratch' : 'workspace',
+      }).alias;
     } catch {
       selected = null;
     }

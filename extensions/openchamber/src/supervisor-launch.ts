@@ -99,6 +99,7 @@ async function ensure(options: EnsureSupervisorOptions): Promise<SupervisorState
   }
   deferredPid = null;
 
+  const previous = store.readSupervisor();
   const lock = store.readLock();
   const lockInstance = lock?.instance;
   if (lock && lockActive(lock)) {
@@ -108,8 +109,10 @@ async function ensure(options: EnsureSupervisorOptions): Promise<SupervisorState
     return 'unavailable';
   }
   if (lockInstance !== undefined) store.clearLock(lockInstance);
-  store.removeSupervisor();
-  store.clearDrain();
+  if (previous?.instance !== undefined) {
+    store.removeSupervisor(previous.instance);
+    store.clearDrain(previous.instance);
+  }
 
   const entry = options.entry ?? fileURLToPath(new URL('../supervisor/main.js', import.meta.url));
   if (!fs.existsSync(entry)) {

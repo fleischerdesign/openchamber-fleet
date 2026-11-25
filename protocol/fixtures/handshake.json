@@ -11,7 +11,7 @@
             "id": "1",
             "method": "session.initialize",
             "params": {
-              "protocol": { "major": 1, "minor": 0 },
+              "protocol": { "major": 1, "minor": 1 },
               "client": { "name": "fleet", "version": "0.2.0", "instance": "test" },
               "capabilities": ["workspace.sync@1", "exec@1", "artifact@1"]
             }
@@ -22,7 +22,7 @@
             "jsonrpc": "2.0",
             "id": "1",
             "result": {
-              "protocol": { "major": 1, "minor": 0 },
+              "protocol": { "major": 1, "minor": 1 },
               "agent": { "os": "string", "arch": "string", "installationId": "string", "version": "string" },
               "capabilities": { "workspace.sync": 1, "exec": 1, "artifact": 1 },
               "limits": { "maxControl": "number", "maxData": "number", "maxStreams": "number" }

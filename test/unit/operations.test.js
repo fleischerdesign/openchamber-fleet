@@ -97,6 +97,9 @@ describe('plan approval binding', () => {
     hostIdentity: 'u@host:22',
     agentIdentity: 'agent-1',
     sourceDigest: 'sha256:source',
+    resolvedRoot: '/srv/replica',
+    baseManifestDigest: 'sha256:base',
+    baseState: 'READY',
   };
 
   test('binds host, agent, source content and the plan', () => {
@@ -105,6 +108,9 @@ describe('plan approval binding', () => {
     assert.notEqual(syncPlanToken({ ...baseToken, agentIdentity: 'agent-2' }), token);
     assert.notEqual(syncPlanToken({ ...baseToken, sourceDigest: 'sha256:other' }), token);
     assert.notEqual(syncPlanToken({ ...baseToken, generation: 5 }), token);
+    assert.notEqual(syncPlanToken({ ...baseToken, resolvedRoot: '/srv/other' }), token);
+    assert.notEqual(syncPlanToken({ ...baseToken, baseManifestDigest: 'sha256:other-base' }), token);
+    assert.notEqual(syncPlanToken({ ...baseToken, baseState: 'ABSENT' }), token);
     assert.equal(syncPlanToken({ ...baseToken, needed: ['sha256:different-cache-state'] }), token);
   });
 });
@@ -146,6 +152,49 @@ describe('read-only planning', () => {
     ]);
     assert.equal(methods.includes('workspace.open'), false);
     assert.equal(methods.includes('sync.begin'), false);
+  });
+
+  test('a token from one resolved root is stale for another root', async () => {
+    const source = path.join(base, 'root-token-source');
+    fs.mkdirSync(source);
+    let resolved = '/replica-a';
+    let sequence = 0;
+    const calls = [];
+    const client = {
+      info: { capabilities: { 'workspace.probe': 1, 'workspace.preview': 1 }, agent: { installationId: 'test-agent' } },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === 'sync.previewBegin') {
+          sequence += 1;
+          return { txnId: `preview-${sequence}`, generation: 0, state: 'ABSENT', root: resolved, manifestDigest: 'sha256:base' };
+        }
+        if (method === 'sync.previewEntries') return { accepted: true };
+        if (method === 'sync.previewPlan') return { planDigest: 'sha256:plan', changes: 0, needed: 0 };
+        if (method === 'sync.previewPage') return { items: [], total: 0, offset: 0 };
+        if (method === 'sync.previewEnd') return { ok: true };
+        if (method === 'workspace.open') return { generation: 0, manifestDigest: 'sha256:base', recovery: false, root: resolved, state: 'ABSENT' };
+        throw new Error(`unexpected ${method}`);
+      },
+      close: () => {},
+    };
+    const planned = await syncWorkspace(client, { matches: () => false }, {
+      workspaceId: 'root-token',
+      source,
+      root: '/configured-root',
+      excludes: [],
+      mode: 'plan',
+    });
+    resolved = '/replica-b';
+    const before = calls.filter(([method]) => method === 'workspace.open').length;
+    await assert.rejects(syncWorkspace(client, { matches: () => false }, {
+      workspaceId: 'root-token',
+      source,
+      root: '/configured-root',
+      excludes: [],
+      mode: 'apply',
+      planToken: planned.planToken,
+    }), (error) => error.code === 'PLAN_STALE');
+    assert.equal(calls.filter(([method]) => method === 'workspace.open').length, before);
   });
 
   test('a stale apply is refused before workspace.open can provision', async () => {

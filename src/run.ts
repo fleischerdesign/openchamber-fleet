@@ -35,6 +35,7 @@ export interface RunOptions {
 export interface RunSyncSummary {
   readonly mode: 'plan' | 'apply';
   readonly planDigest: string;
+  readonly planToken: string | null;
   readonly changes: number;
   readonly changesTruncated: boolean;
   readonly needed: number;
@@ -96,6 +97,7 @@ function summaryOf(mode: 'plan' | 'apply', result: SyncSummary): RunSyncSummary 
   return {
     mode,
     planDigest: result.planDigest,
+    planToken: result.planToken ?? null,
     changes: result.changes.length,
     changesTruncated: result.changes.length > items.length,
     needed: result.needed.length,

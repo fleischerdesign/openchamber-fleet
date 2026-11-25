@@ -247,6 +247,36 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     }), /exists/i);
   });
 
+  test('serializes concurrent root reservations across agent processes', async () => {
+    const first = await connectProcess(binary);
+    const second = await connectProcess(binary);
+    const root = path.join(base, 'concurrent-root-replica');
+    try {
+      const results = await Promise.allSettled([
+        first.request('workspace.open', { workspaceId: 'concurrent-a', root, adopt: false }),
+        second.request('workspace.open', { workspaceId: 'concurrent-b', root, adopt: false }),
+      ]);
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const rejected = results.filter((result) => result.status === 'rejected');
+      assert.equal(fulfilled.length, 1);
+      assert.equal(rejected.length, 1);
+      assert.equal(rejected[0].reason.code, 'WORKSPACE_ROOT_CONFLICT');
+    } finally {
+      first.close();
+      second.close();
+    }
+  });
+
+  test('refuses a nested replica root beneath an existing workspace', async () => {
+    const parent = path.join(base, 'nested-root-replica');
+    const child = path.join(parent, 'child');
+    await client.request('workspace.open', { workspaceId: 'nested-parent', root: parent, adopt: false });
+    await assert.rejects(
+      client.request('workspace.open', { workspaceId: 'nested-child', root: child, adopt: false }),
+      (error) => error.code === 'WORKSPACE_ROOT_CONFLICT',
+    );
+  });
+
   test('refuses to bind one replica root to two workspace ids', async () => {
     const root = path.join(base, 'root-conflict-replica');
     await client.request('workspace.open', { workspaceId: 'root-conflict-a', root, adopt: false });
@@ -254,6 +284,22 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
       client.request('workspace.open', { workspaceId: 'root-conflict-b', root, adopt: false }),
       (error) => error.code === 'WORKSPACE_ROOT_CONFLICT',
     );
+  });
+
+  test('rejects a changed expected root before provisioning', async () => {
+    const root = path.join(base, 'expected-root-replica');
+    await assert.rejects(
+      client.request('workspace.open', {
+        workspaceId: 'expected-root',
+        root,
+        expectedRoot: path.join(base, 'different-root'),
+        expectedState: 'ABSENT',
+        expectedManifestDigest: 'sha256:' + '0'.repeat(64),
+      }),
+      (error) => error.code === 'PLAN_STALE',
+    );
+    assert.equal(fs.existsSync(root), false);
+    assert.equal(fs.existsSync(path.join(state, 'expected-root')), false);
   });
 
   test('read-only open never creates an absent workspace', async () => {

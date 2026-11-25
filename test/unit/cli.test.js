@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,42 @@ function repository() {
   fs.mkdirSync(sub);
   return { root, sub };
 }
+
+describe('fail-closed command flags', () => {
+  function configured() {
+    const { root } = repository();
+    const configDir = fs.mkdtempSync(path.join(tmp, 'flags-config-'));
+    execFileSync(process.execPath, [cli, 'init', '--host', 'mob', '--ssh', 'u@h', '--name', 'flags', '--config-dir', configDir], {
+      cwd: root,
+      stdio: 'pipe',
+    });
+    return { root, configDir };
+  }
+
+  test('a false apply flag is not an apply', () => {
+    const { root, configDir } = configured();
+    const result = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--apply=false', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /exactly one of --plan or --apply/);
+  });
+
+  test('a plan token without a value is refused before SSH', () => {
+    const { root, configDir } = configured();
+    const result = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--apply', '--plan-token', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /plan-token requires a token value/);
+  });
+
+  test('run rejects conflicting plan flags and adopt', () => {
+    const { root, configDir } = configured();
+    const conflict = spawnSync(process.execPath, [cli, 'run', '--host', 'mob', '--plan', '--sync', 'plan', '--config-dir', configDir, '--', 'true'], { cwd: root, encoding: 'utf8' });
+    assert.equal(conflict.status, 2);
+    assert.match(conflict.stderr, /either --sync or --plan/);
+    const adopt = spawnSync(process.execPath, [cli, 'run', '--host', 'mob', '--adopt', '--config-dir', configDir, '--', 'true'], { cwd: root, encoding: 'utf8' });
+    assert.equal(adopt.status, 2);
+    assert.match(adopt.stderr, /--adopt is only valid/);
+  });
+});
 
 describe('fleet init', () => {
   test('--workspace-file writes at the repository root, not the current subdirectory', () => {

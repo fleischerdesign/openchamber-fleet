@@ -274,7 +274,7 @@ const server = http.createServer(async (request, response) => {
       if (!Object.prototype.hasOwnProperty.call(body, 'directory')) {
         return reply(response, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'directory is required; send null to clear the default' } });
       }
-      if (body.directory !== null && (typeof body.directory !== 'string' || body.directory.length === 0)) {
+      if (body.directory !== null && (typeof body.directory !== 'string' || body.directory.length === 0 || !path.isAbsolute(body.directory))) {
         return reply(response, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'directory must be an absolute project path or null' } });
       }
       try {

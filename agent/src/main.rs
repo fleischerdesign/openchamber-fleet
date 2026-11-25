@@ -45,7 +45,7 @@ fn doctor() -> ExitCode {
         "jsonrpc": "2.0",
         "id": "init",
         "method": "session.initialize",
-        "params": { "protocol": { "major": 1, "minor": 0 } }
+        "params": { "protocol": { "major": 1, "minor": 1 } }
     });
     if let session::Action::Reply(reply) = session.handle(&initialize.to_string()) {
         let value: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
