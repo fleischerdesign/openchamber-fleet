@@ -64,21 +64,21 @@ Crash windows:
 |---|---|---|
 | journal header | `RECOVERY`, no staged tree | abort → READY at previous generation |
 | some blobs | `RECOVERY` | abort; orphan blobs pruned by GC |
-| apply, before commit record | `RECOVERY` with undo log | abort rolls back, READY |
+| apply, before commit record | `RECOVERY`, phase `applying` | complete forward; abort is refused |
 | commit record, before manifest rename | `RECOVERY` with completed journal | finish: rename, verify, READY at new generation |
 
 ## Lease
 
 ```
-FREE ──lease──▶ HELD ──release──▶ FREE
-                  │
-                  ├──connection lost──▶ FREE (reclaimed)
-                  └──ttl elapsed, connection alive──▶ HELD (renewed or expired on next check)
+FREE ──lease──▶ HELD ──release/connection lost──▶ FREE
 ```
 
-- The agent does not use wall-clock TTL as authority while the owning connection is alive; it
-  expires only when the connection is gone or the holder fails to renew before `expiresAt`.
-- A lease carries `operationId`; a second acquisition reports it.
+- The agent generates the `leaseId`; `operationId` is correlation metadata, not the identity. Two
+  workspaces cannot collide on a client-supplied string.
+- `ttlMs`/`expiresAt` are advisory. The kernel lock and connection own the lease; it is not revoked
+  while accepted work is active.
+- A second acquisition reports the holder. A recovery lease is explicit and accepted only while the
+  workspace has a journal.
 
 ## Job
 

@@ -267,6 +267,7 @@ describe('OpenCode plugin surface', () => {
 
   test('fetch checks the final local edit target before connecting', async () => {
     const { tools, cleanup, permissions } = await register(workspace);
+    fs.mkdirSync(path.join(workspace, 'out'), { recursive: true });
     try {
       const result = tool(tools, 'fleet_fetch');
       await assert.rejects(result.execute({ host: 'node', artifact: 'out.txt', dest: path.join(workspace, 'out') }, context));

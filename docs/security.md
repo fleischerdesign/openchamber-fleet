@@ -58,8 +58,11 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 - The lease is a kernel `flock`: it disappears with the process, so a crash cannot leave a lock.
   `sync.commit`, `sync.abort` and `sync.recover` require the lease that owns the transaction; the
   journal records its lease id, and a release is refused while a transaction or job is still
-  active. `ttlMs` is advisory: a lease lives with its connection, so a long accepted job cannot
-  lose its fence halfway through.
+  active. The agent generates the lease id; a client-supplied operation id cannot collide across
+  workspaces. A journal without a live owner needs an explicit recovery lease. `ttlMs` is advisory:
+  a lease lives with its connection, so a long accepted job cannot lose its fence halfway through.
+  Metadata reads and the short journal/manifest publish sections share a registry lock, so a reader
+  never sees a generation from one commit with a manifest from another.
 - A read-only plan is an in-memory preview. It creates no journal, so a cancelled preview cannot
   leave `RECOVERY` behind.
 - Job records and the transaction journal are written before the effect and updated after it.
@@ -107,9 +110,10 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   scratch root, not from a second agent-side identity. A legacy project file cannot silently bind an
   existing registry alias to another SSH target; normal loading refuses the conflict.
 - Transfer permissions bind the canonical path plus the opened source `dev/ino` (upload) or the
-  destination parent `dev/ino` (download). Node exposes no `openat`; a path component swapped
-  between the final check and the syscall remains an OS-level TOCTOU window. This is path policy,
-  not an inode sandbox.
+  destination parent `dev/ino` (download). A download refuses a missing destination parent and
+  re-checks the parent immediately before writing. Node exposes no `openat`; a path component
+  swapped between the final check and the syscall remains an OS-level TOCTOU window. This is path
+  policy, not an inode sandbox; hardlinks remain readable aliases of the same inode.
 - The detached supervisor runs with the user's full privileges, like the extension service and the
   OpenCode plugin. It is inside the same trust boundary, not a sandbox.
 - Without the extension service (the npm-only plugin path), background jobs stay in the OpenCode

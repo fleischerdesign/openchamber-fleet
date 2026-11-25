@@ -43,6 +43,19 @@ describe('fail-closed command flags', () => {
     assert.match(result.stderr, /plan-token requires a token value/);
   });
 
+  test('sync rejects --sync, positionals and duplicate flags', () => {
+    const { root, configDir } = configured();
+    const syncFlag = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--plan', '--sync', 'plan', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
+    assert.equal(syncFlag.status, 2);
+    assert.match(syncFlag.stderr, /--sync/);
+    const positional = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--plan', 'unexpected', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
+    assert.equal(positional.status, 2);
+    assert.match(positional.stderr, /positional/);
+    const duplicate = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--plan', '--plan', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
+    assert.equal(duplicate.status, 2);
+    assert.match(duplicate.stderr, /more than once/);
+  });
+
   test('run rejects conflicting plan flags and adopt', () => {
     const { root, configDir } = configured();
     const conflict = spawnSync(process.execPath, [cli, 'run', '--host', 'mob', '--plan', '--sync', 'plan', '--config-dir', configDir, '--', 'true'], { cwd: root, encoding: 'utf8' });

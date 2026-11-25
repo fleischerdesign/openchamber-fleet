@@ -82,9 +82,10 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     const many = path.join(base, 'many-source');
     const manyReplica = path.join(base, 'many-replica');
     fs.mkdirSync(many, { recursive: true });
-    const prefix = 'x'.repeat(180);
-    for (let index = 0; index < 450; index += 1) {
-      fs.writeFileSync(path.join(many, `${prefix}-${String(index).padStart(4, '0')}.txt`), `${index}\n`);
+    const prefix = 'x'.repeat(20);
+    const target = 't'.repeat(900);
+    for (let index = 0; index < 900; index += 1) {
+      fs.symlinkSync(target, path.join(many, `${prefix}-${String(index).padStart(4, '0')}`));
     }
     const result = await syncWorkspace(client, compileExcludes([]), {
       workspaceId: 'v1-many',
@@ -93,8 +94,8 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
       excludes: [],
       mode: 'apply',
     });
-    assert.equal(result.changes.length, 450);
-    assert.equal(fs.existsSync(path.join(manyReplica, `${prefix}-0449.txt`)), true);
+    assert.equal(result.changes.length, 900);
+    assert.equal(fs.readlinkSync(path.join(manyReplica, `${prefix}-0899`)), target);
   });
 
   test('plan previews an absent replica without creating root or state', async () => {
@@ -110,6 +111,32 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     assert.ok(result.planToken);
     assert.equal(fs.existsSync(previewRoot), false);
     assert.equal(fs.existsSync(path.join(state, 'v1-preview')), false);
+  });
+
+  test('an approved first apply provisions and commits with its own token', async () => {
+    const firstSource = path.join(base, 'first-apply-source');
+    const firstReplica = path.join(base, 'first-apply-replica');
+    fs.mkdirSync(firstSource, { recursive: true });
+    fs.writeFileSync(path.join(firstSource, 'first.txt'), 'first apply\n');
+    const planned = await syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-first-apply',
+      source: firstSource,
+      root: firstReplica,
+      excludes: [],
+      mode: 'plan',
+    });
+    assert.ok(planned.planToken);
+    assert.equal(fs.existsSync(firstReplica), false);
+    const applied = await syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-first-apply',
+      source: firstSource,
+      root: firstReplica,
+      excludes: [],
+      mode: 'apply',
+      planToken: planned.planToken,
+    });
+    assert.equal(applied.generation, 1);
+    assert.equal(fs.readFileSync(path.join(firstReplica, 'first.txt'), 'utf8'), 'first apply\n');
   });
 
   test('syncs a file larger than one DATA frame', async () => {
@@ -350,6 +377,18 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     } finally {
       await client.request('workspace.release', { leaseId: lease.leaseId });
     }
+  });
+
+  test('leases are agent-generated and cannot collide across workspaces', async () => {
+    const rootA = path.join(base, 'lease-a-replica');
+    const rootB = path.join(base, 'lease-b-replica');
+    await client.request('workspace.open', { workspaceId: 'lease-a', root: rootA, adopt: false });
+    await client.request('workspace.open', { workspaceId: 'lease-b', root: rootB, adopt: false });
+    const a = await client.request('workspace.lease', { workspaceId: 'lease-a', operationId: 'same-operation', ttlMs: 60_000 });
+    const b = await client.request('workspace.lease', { workspaceId: 'lease-b', operationId: 'same-operation', ttlMs: 60_000 });
+    assert.notEqual(a.leaseId, b.leaseId);
+    await client.request('workspace.release', { leaseId: a.leaseId });
+    await client.request('workspace.release', { leaseId: b.leaseId });
   });
 
   test('an apply only accepts the plan token it was given', async () => {

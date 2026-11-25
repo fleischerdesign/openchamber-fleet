@@ -34,6 +34,8 @@ pub struct TxnRecord {
     pub lease_id: String,
     #[serde(default)]
     pub entries: Vec<Entry>,
+    #[serde(skip)]
+    pub seen: HashSet<String>,
     #[serde(default, rename = "planDigest")]
     pub plan_digest: Option<String>,
     #[serde(default)]
@@ -72,12 +74,16 @@ pub fn begin(
         policy,
         lease_id: lease_id.to_string(),
         entries: Vec::new(),
+        seen: HashSet::new(),
         plan_digest: None,
         changes: Vec::new(),
         needed: Vec::new(),
         started_at: now,
     };
-    persist(ws, &record)?;
+    {
+        let _lock = workspace::registry_lock()?;
+        persist(ws, &record)?;
+    }
     Ok(record)
 }
 
@@ -89,14 +95,16 @@ pub fn add_entries(
     if record.phase != "entries" {
         return Err("INVALID_REQUEST entries are only accepted before plan".into());
     }
-    let mut seen: HashSet<String> = record
-        .entries
-        .iter()
-        .map(|entry| entry.path.clone())
-        .collect();
+    if record.seen.is_empty() && !record.entries.is_empty() {
+        record.seen = record
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+    }
     for entry in entries {
         entry.validate()?;
-        if !seen.insert(entry.path.clone()) {
+        if !record.seen.insert(entry.path.clone()) {
             return Err(format!("duplicate entry {}", entry.path));
         }
         record.entries.push(entry);
@@ -118,7 +126,10 @@ pub struct PlanResult {
 
 pub fn plan(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, String> {
     let result = compute(record, ws)?;
-    persist(ws, record)?;
+    {
+        let _lock = workspace::registry_lock()?;
+        persist(ws, record)?;
+    }
     Ok(result)
 }
 
@@ -158,6 +169,12 @@ pub fn compute(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, Str
                 }
             }
             Some(previous) => {
+                if previous.kind != entry.kind && (previous.is_dir() || entry.is_dir()) {
+                    return Err(format!(
+                        "UNSUPPORTED_METADATA {} changes between directory and non-directory; refuse until a safe recursive transition exists",
+                        entry.path
+                    ));
+                }
                 if !same_entry(previous, entry) {
                     changes.push(Change {
                         action: "update".into(),
@@ -276,7 +293,10 @@ pub fn commit(
 
     // The apply phase is recorded first: a crash from here on is recovered by completion.
     record.phase = "applying".into();
-    persist(ws, record)?;
+    {
+        let _lock = workspace::registry_lock()?;
+        persist(ws, record)?;
+    }
     fault_point()?;
     finish(record, ws, desired, policy)
 }
@@ -320,23 +340,29 @@ fn finish(
     if record.changes.is_empty() {
         // A no-op sync must not invalidate a waiting detached job by bumping
         // the generation it synchronized against.
+        let _lock = workspace::registry_lock()?;
         workspace::clear_journal(&ws.state)?;
         ws.recovery = None;
+        ws.state_label = "READY";
         return Ok((ws.generation, ws.manifest.digest.clone()));
     }
     apply(ws, &desired, &record.changes, &policy)?;
-    let generation = ws.generation + 1;
+    let generation = record.base_generation.saturating_add(1);
     let state = workspace::WorkspaceState {
         root: ws.root.to_string_lossy().to_string(),
         generation,
         manifest_digest: desired.digest.clone(),
     };
-    workspace::write_json_atomic(&ws.state.join("manifest.json"), &desired)?;
-    workspace::write_json_atomic(&ws.state.join("state.json"), &state)?;
-    workspace::clear_journal(&ws.state)?;
+    {
+        let _lock = workspace::registry_lock()?;
+        workspace::write_json_atomic(&ws.state.join("manifest.json"), &desired)?;
+        workspace::write_json_atomic(&ws.state.join("state.json"), &state)?;
+        workspace::clear_journal(&ws.state)?;
+    }
     ws.generation = generation;
     ws.manifest = desired;
     ws.recovery = None;
+    ws.state_label = "READY";
     Ok((generation, digest_of(&ws.manifest.entries)))
 }
 
@@ -516,16 +542,19 @@ pub fn abort(ws: &Workspace) -> Result<(), String> {
             if record.phase == "applying" {
                 return Err("RECOVERY_REQUIRED commit already started; complete it".into());
             }
+            let _lock = workspace::registry_lock()?;
             workspace::clear_journal(&ws.state)
         }
     }
 }
 
-pub fn inspect(ws: &Workspace) -> Option<TxnRecord> {
-    workspace::read_journal(&ws.state)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value(value).ok())
+pub fn inspect(ws: &Workspace) -> Result<Option<TxnRecord>, String> {
+    match workspace::read_journal(&ws.state)? {
+        None => Ok(None),
+        Some(value) => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|error| format!("journal is corrupt: {error}")),
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +582,7 @@ mod tests {
             generation: 0,
             manifest: Manifest::empty(),
             recovery: None,
+            state_label: "READY",
         }
     }
 
@@ -597,6 +627,41 @@ mod tests {
         let result2 = plan(&mut txn2, &ws).unwrap();
         assert!(result2.changes.is_empty());
         abort(&ws).unwrap();
+    }
+
+    #[test]
+    fn directory_to_symlink_is_refused_before_apply() {
+        let (root, state) = temp_workspace("dir-symlink");
+        let mut ws = workspace(&root, &state);
+        ws.manifest = Manifest::from_entries(vec![Entry {
+            path: "link".into(),
+            kind: "dir".into(),
+            mode: "0755".into(),
+            size: 0,
+            mtime_ms: 0,
+            digest: None,
+            link: None,
+        }])
+        .unwrap();
+        let mut txn = begin(&ws, Policy::default(), 0, "t", "lease").unwrap();
+        add_entries(
+            &mut txn,
+            vec![Entry {
+                path: "link".into(),
+                kind: "symlink".into(),
+                mode: "0777".into(),
+                size: 0,
+                mtime_ms: 0,
+                digest: None,
+                link: Some("target".into()),
+            }],
+            &ws,
+        )
+        .unwrap();
+        match plan(&mut txn, &ws) {
+            Ok(_) => panic!("directory-to-symlink must be refused"),
+            Err(error) => assert!(error.contains("UNSUPPORTED_METADATA"), "{error}"),
+        }
     }
 
     #[test]
@@ -675,6 +740,7 @@ mod symlink_tests {
             generation: 0,
             manifest: Manifest::empty(),
             recovery: None,
+            state_label: "READY",
         };
         let mut txn = begin(&ws, Policy::default(), 0, "t1", "lease").unwrap();
         let entry = Entry {

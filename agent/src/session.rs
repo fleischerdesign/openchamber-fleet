@@ -110,7 +110,8 @@ struct Upload {
 
 struct LeaseBinding {
     workspace_id: String,
-    operation_id: String,
+    lease_id: String,
+    recovery: bool,
     handle: LeaseHandle,
 }
 
@@ -353,14 +354,8 @@ impl Session {
         };
         match opened {
             Ok(workspace) => {
-                let absent = !workspace.state.join("state.json").exists();
-                let state = if absent {
-                    "ABSENT"
-                } else if workspace.recovery.is_some() {
-                    "RECOVERY"
-                } else {
-                    "READY"
-                };
+                let absent = workspace.state_label == "ABSENT";
+                let state = workspace.state_label;
                 let result = json!({
                     "workspaceId": workspace.id,
                     "root": workspace.root.to_string_lossy(),
@@ -413,19 +408,31 @@ impl Session {
         let Some(workspace) = self.registry.get(id) else {
             return Action::Reply(rpc::error(&request.id, "WORKSPACE_UNKNOWN", id, false));
         };
-        if workspace.recovery.is_some() && !recovery_lease {
+        if self
+            .leases
+            .values()
+            .any(|binding| binding.workspace_id == id)
+        {
             return Action::Reply(rpc::error(
                 &request.id,
-                "RECOVERY_REQUIRED",
-                "workspace has an unfinished transaction",
+                "WORKSPACE_BUSY",
+                "workspace already has a lease on this connection",
                 true,
+            ));
+        }
+        if recovery_lease && workspace.recovery.is_none() {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "INVALID_REQUEST",
+                "workspace is not in recovery",
+                false,
             ));
         }
         match workspace::acquire_lease(&workspace.state, operation, &self.installation, ttl) {
             Ok(handle) => {
-                let generation = match self.registry.get_mut(id) {
+                let (generation, recovered) = match self.registry.get_mut(id) {
                     Some(current) => match workspace::reload_workspace(current) {
-                        Ok(()) => current.generation,
+                        Ok(()) => (current.generation, current.recovery.is_some()),
                         Err(error) => {
                             handle.release();
                             return Action::Reply(error_response(&request.id, &error));
@@ -441,16 +448,35 @@ impl Session {
                         ));
                     }
                 };
+                if recovered != recovery_lease {
+                    handle.release();
+                    return Action::Reply(rpc::error(
+                        &request.id,
+                        if recovered {
+                            "RECOVERY_REQUIRED"
+                        } else {
+                            "INVALID_REQUEST"
+                        },
+                        if recovered {
+                            "workspace has an unfinished transaction"
+                        } else {
+                            "workspace is not in recovery"
+                        },
+                        recovered,
+                    ));
+                }
+                let lease_id = format!("lease-{}", identity_fragment());
                 let result = json!({
-                    "leaseId": operation,
+                    "leaseId": lease_id,
                     "generation": generation,
                     "expiresAt": handle.meta.expires_at,
                 });
                 self.leases.insert(
-                    operation.to_string(),
+                    lease_id.clone(),
                     LeaseBinding {
                         workspace_id: id.to_string(),
-                        operation_id: operation.to_string(),
+                        lease_id,
+                        recovery: recovery_lease,
                         handle,
                     },
                 );
@@ -543,6 +569,21 @@ impl Session {
             },
             None => Policy::default(),
         };
+        if self.jobs.values().any(|job| {
+            let record = job.status();
+            record.workspace == workspace_id && !record.is_terminal()
+        }) || self
+            .transactions
+            .values()
+            .any(|record| record.workspace == workspace_id)
+        {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_BUSY",
+                "workspace still has an active job or transaction",
+                true,
+            ));
+        }
         let Some(workspace) = self.registry.get(workspace_id) else {
             return Action::Reply(rpc::error(
                 &request.id,
@@ -628,11 +669,7 @@ impl Session {
                 true,
             ));
         }
-        let state = if workspace.state.join("state.json").exists() {
-            "READY"
-        } else {
-            "ABSENT"
-        };
+        let state = workspace.state_label;
         let txn_id = format!("txn-{}", identity_fragment());
         let record = TxnRecord {
             txn_id: txn_id.clone(),
@@ -642,6 +679,7 @@ impl Session {
             policy,
             lease_id: String::new(),
             entries: Vec::new(),
+            seen: std::collections::HashSet::new(),
             plan_digest: None,
             changes: Vec::new(),
             needed: Vec::new(),
@@ -1049,12 +1087,20 @@ impl Session {
                 false,
             ));
         }
-        let file = match File::open(&target) {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&target)
+        {
             Ok(file) => file,
             Err(error) => {
                 return Action::Reply(rpc::error(
                     &request.id,
-                    "INTERNAL",
+                    if error.raw_os_error() == Some(libc::ELOOP) {
+                        "PATH_UNSAFE"
+                    } else {
+                        "INTERNAL"
+                    },
                     &error.to_string(),
                     false,
                 ))
@@ -1236,7 +1282,7 @@ impl Session {
             return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
         };
         let lease_workspace = binding.workspace_id.clone();
-        let lease_operation = binding.operation_id.clone();
+        let lease_operation = binding.lease_id.clone();
         let transaction_workspace = self
             .transactions
             .get(txn_id)
@@ -1331,7 +1377,8 @@ impl Session {
                 false,
             ));
         }
-        let lease_operation = binding.operation_id.clone();
+        let lease_operation = binding.lease_id.clone();
+        let recovery_lease = binding.recovery;
         let transaction_lease = self
             .transactions
             .get(txn_id)
@@ -1345,6 +1392,13 @@ impl Session {
                     false,
                 ));
             }
+        } else if !recovery_lease {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "RECOVERY_REQUIRED",
+                "an orphan journal needs an explicit recovery lease",
+                true,
+            ));
         }
         self.transactions.remove(txn_id);
         let Some(mut workspace) = self.registry.get(&workspace_id).cloned() else {
@@ -1420,7 +1474,8 @@ impl Session {
                 false,
             ));
         }
-        let lease_operation = binding.operation_id.clone();
+        let lease_operation = binding.lease_id.clone();
+        let recovery_lease = binding.recovery;
         let transaction_lease = self
             .transactions
             .get(txn_id)
@@ -1434,6 +1489,13 @@ impl Session {
                     false,
                 ));
             }
+        } else if !recovery_lease {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "RECOVERY_REQUIRED",
+                "an orphan journal needs an explicit recovery lease",
+                true,
+            ));
         }
         self.transactions.remove(txn_id);
         let Some(workspace) = self.registry.get(&workspace_id).cloned() else {
@@ -1478,8 +1540,12 @@ impl Session {
                 false,
             ));
         };
+        let _state_lock = match workspace::registry_lock() {
+            Ok(lock) => lock,
+            Err(error) => return Action::Reply(error_response(&request.id, &error)),
+        };
         match sync::inspect(&workspace) {
-            Some(record) => Action::Reply(rpc::response(
+            Ok(Some(record)) => Action::Reply(rpc::response(
                 &request.id,
                 json!({
                     "state": "RECOVERY",
@@ -1489,10 +1555,11 @@ impl Session {
                     "startedAt": record.started_at,
                 }),
             )),
-            None => Action::Reply(rpc::response(
+            Ok(None) => Action::Reply(rpc::response(
                 &request.id,
                 json!({"state": "READY", "generation": workspace.generation}),
             )),
+            Err(error) => Action::Reply(error_response(&request.id, &error)),
         }
     }
 
@@ -1628,6 +1695,18 @@ impl Session {
                 false,
             ));
         };
+        if self
+            .transactions
+            .values()
+            .any(|record| record.workspace == workspace_id)
+        {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_BUSY",
+                "workspace still has an active transaction",
+                true,
+            ));
+        }
         let journal = {
             let _state_lock = match workspace::registry_lock() {
                 Ok(lock) => lock,
@@ -2083,10 +2162,11 @@ mod tests {
             .to_string(),
         );
         assert!(lease.get("result").is_some(), "{lease}");
+        let lease_id = lease["result"]["leaseId"].as_str().unwrap().to_string();
         let begin = reply(
             &mut session,
             &json!({"jsonrpc":"2.0","id":"4","method":"sync.begin","params":{
-                "workspaceId":"demo","leaseId":"op1","baseGeneration":0,"policy":{}}})
+                "workspaceId":"demo","leaseId":lease_id,"baseGeneration":0,"policy":{}}})
             .to_string(),
         );
         let txn = begin["result"]["txnId"].as_str().unwrap().to_string();
@@ -2131,7 +2211,7 @@ mod tests {
         let commit = reply(
             &mut session,
             &json!({"jsonrpc":"2.0","id":"9","method":"sync.commit","params":{
-                "txnId":txn,"leaseId":"op1","planDigest":plan_digest}})
+                "txnId":txn,"leaseId":lease_id,"planDigest":plan_digest}})
             .to_string(),
         );
         assert_eq!(commit["result"]["generation"], 1, "{commit}");
@@ -2171,11 +2251,12 @@ mod tests {
         let mut session = Session::new().unwrap();
         init(&mut session);
         reply(&mut session, &json!({"jsonrpc":"2.0","id":"1","method":"workspace.open","params":{"workspaceId":"exec-demo","root":root.to_string_lossy(),"adopt":true}}).to_string());
-        reply(&mut session, &json!({"jsonrpc":"2.0","id":"2","method":"workspace.lease","params":{"workspaceId":"exec-demo","operationId":"op","ttlMs":60000}}).to_string());
+        let lease = reply(&mut session, &json!({"jsonrpc":"2.0","id":"2","method":"workspace.lease","params":{"workspaceId":"exec-demo","operationId":"op","ttlMs":60000}}).to_string());
+        let lease_id = lease["result"]["leaseId"].as_str().unwrap().to_string();
         let start = reply(
             &mut session,
             &json!({"jsonrpc":"2.0","id":"3","method":"exec.start","params":{
-            "workspaceId":"exec-demo","leaseId":"op","expectedGeneration":0,
+            "workspaceId":"exec-demo","leaseId":lease_id,"expectedGeneration":0,
             "argv":["sh","-c","printf hello; printf err >&2; exit 3"]}})
             .to_string(),
         );
