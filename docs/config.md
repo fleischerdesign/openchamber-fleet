@@ -32,10 +32,12 @@ root. Nothing is written to the repository.
 | `hosts.<alias>.ssh` | `user@host` | required |
 | `hosts.<alias>.port` | integer | default 22 |
 | `hosts.<alias>.tags` | string[] | optional capabilities such as `linux`, `gpu`, `large`; lowercase identifiers, at most 20 |
+| `hosts.<alias>.allow` | string[] | optional operations: `workspace`, `scratch`, `transfer`; omitted means all |
 
 Tags are how an agent selects a machine without a UI choice: `fleet_hosts` lists them, and
 `fleet_run` accepts `host: "auto"` plus required tags. They describe capability; they are not
-authorization.
+authorization. `allow` is the authorization boundary: a host can be scratch-only or
+transfer-only without becoming a sync target.
 
 The registry must define at least one host. Unknown keys are an error. File mode is `0600`.
 
@@ -43,6 +45,17 @@ The registry must define at least one host. Unknown keys are an error. File mode
 
 Machines belong to the host registry, not to a project. A project describes what it needs and owns
 its excludes and optional replica-root overrides.
+
+A project file is **optional**. Without one, Fleet derives a safe workspace from the project
+directory and the global registry:
+
+- `label` is the directory name; the stable workspace id adds a hash of the project identity and
+  the canonical checkout path, so two checkouts with the same name get separate replicas.
+- all registry hosts are candidates; `hosts`/`requires` only exist when the user adds a file.
+- excludes are `.git`, `.direnv/` and `result*`.
+- the default replica root is `~/.cache/openchamber-fleet/<workspace-id>`.
+
+Saving the derived configuration from the panel or `fleet init` creates the explicit file.
 
 ```json
 {
@@ -94,9 +107,11 @@ Unknown keys are an error.
 
 ## Project identity
 
-The project file is keyed by the repository's `remote.origin.url`, so clones and worktrees share the
-same local project settings. Without a git remote, the canonical workspace path is used. Moving a
-non-git directory therefore creates a new project identity.
+The project settings file is keyed by the repository's `remote.origin.url`, so clones and worktrees
+share the same local project settings. Without a git remote, the canonical workspace path is used.
+Moving a non-git directory therefore creates a new settings identity. A derived replica id also
+includes the canonical checkout path, so two checkouts never share a replica by accident. An
+explicit project file keeps its configured `name` and remains opt-in sharing.
 
 ## Default workspace for projectless chats
 
@@ -116,9 +131,9 @@ fleet default                              # show it
 fleet default --clear                      # remove it
 ```
 
-The default is a real project directory; Fleet loads that project's normal split configuration. It
-is consulted **only** for OpenChamber internal chat directories. A real project without Fleet
-configuration still fails with `config-missing`; it never silently borrows another project.
+The default is a real project directory; Fleet loads that project's normal split or derived
+configuration. It is consulted **only** for OpenChamber internal chat directories. A real project
+without Fleet configuration derives its own workspace instead of borrowing another project.
 `fleet_hosts` and `fleet_jobs` also work in a projectless chat without a default.
 
 `fleet.json` is not part of this. It remains a legacy fallback for old checkouts and is never

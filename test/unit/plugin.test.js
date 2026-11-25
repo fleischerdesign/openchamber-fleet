@@ -132,8 +132,10 @@ describe('OpenCode plugin surface', () => {
     }
   });
 
-  test('a missing config asks for an explicit target instead of guessing', async () => {
-    const { tools, cleanup } = await register('/nonexistent');
+  test('a projectless chat without a default asks for an explicit target', async () => {
+    const chat = path.join(workspace, '.config', 'openchamber', 'chats', 'session-missing');
+    fs.mkdirSync(chat, { recursive: true });
+    const { tools, cleanup } = await register(chat);
     try {
       const result = tool(tools, 'fleet_exec');
       await assert.rejects(

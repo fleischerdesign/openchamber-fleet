@@ -99,7 +99,9 @@ The extension contributes native tool cards/tables, a project configuration pane
 Status section and the OpenCode plugin. It is a normal runtime extension: install it from Settings →
 Extensions and approve the declared service and plugin permissions. The panel edits the same local
 XDG configuration as the CLI: hosts are machine-level, projects only state requirements and own
-excludes; an allowlist is optional. Nothing is written to the repository. It uses only public
+excludes; an allowlist is optional and a project file is optional too. An unconfigured project
+derives a safe, isolated workspace; a host's `allow` field can limit it to scratch or transfers.
+Nothing is written to the repository. It uses only public
 OpenChamber SDK and OpenCode plugin APIs; Nix is an optional packaging path, not a runtime
 requirement.
 

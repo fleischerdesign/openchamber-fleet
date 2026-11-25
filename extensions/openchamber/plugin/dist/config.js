@@ -14,11 +14,18 @@ import { assertAlias, assertRemoteRoot, assertSshTarget, assertTag, assertWorksp
 const LEGACY_KEYS = new Set(['name', 'hosts', 'excludes', 'env', 'shell']);
 const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root', 'tags']);
 const HOST_REGISTRY_KEYS = new Set(['version', 'hosts']);
-const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags']);
+const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags', 'allow']);
 const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'requires', 'roots', 'excludes', 'env', 'shell']);
 const DEFAULTS_KEYS = new Set(['version', 'directory']);
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh']);
 const CONFIG_VERSION = 1;
+export function workspaceLabel(config) {
+    return config.label ?? config.name;
+}
+export function hostAllows(host, operation) {
+    return host.allow === undefined || host.allow.includes(operation);
+}
+const HOST_OPERATIONS = ['workspace', 'scratch', 'transfer'];
 export function defaultRemoteRoot(name) {
     return `~/.cache/openchamber-fleet/${name}`;
 }
@@ -139,10 +146,12 @@ export function loadHostsOnlyConfig(directory = process.cwd(), options = {}) {
             port: entry.port ?? 22,
             root: defaultRemoteRoot(alias),
             tags: entry.tags ?? [],
+            ...(entry.allow === undefined ? {} : { allow: entry.allow }),
         };
     }
     return {
         name: 'no project',
+        label: 'no project',
         dir: paths.workspaceRoot,
         file: paths.hostsFile,
         hosts,
@@ -229,10 +238,20 @@ export function loadConfigDocuments(cwd = process.cwd(), options = {}) {
     const hosts = fs.existsSync(paths.hostsFile)
         ? readHostRegistry(paths.hostsFile, false)
         : emptyHostRegistry();
-    const project = fs.existsSync(paths.projectFile)
+    const hasProject = fs.existsSync(paths.projectFile);
+    const project = hasProject
         ? readProjectConfig(paths.projectFile, false, name)
-        : defaultProjectConfig(name);
-    return { ...paths, hosts, project, legacy: false, revision: configRevision(paths) };
+        : Object.keys(hosts.hosts).length > 0 && !isOpenChamberInternalDirectory(paths.workspaceRoot)
+            ? derivedProjectConfig(paths)
+            : defaultProjectConfig(name);
+    return {
+        ...paths,
+        hosts,
+        project,
+        legacy: false,
+        configSource: hasProject ? 'file' : Object.keys(hosts.hosts).length > 0 ? 'derived' : 'file',
+        revision: configRevision(paths),
+    };
 }
 export function saveConfigDocuments(cwd, hosts, project, options = {}) {
     const paths = configPaths(cwd, options);
@@ -253,6 +272,7 @@ export function saveConfigDocuments(cwd, hosts, project, options = {}) {
         hosts: registry,
         project: projectConfig,
         legacy: false,
+        configSource: 'file',
         revision: configRevision(paths),
     };
 }
@@ -355,6 +375,7 @@ export function initProjectConfig(cwd, options) {
         hosts,
         project: projectConfig,
         legacy: false,
+        configSource: 'file',
         revision: configRevision(paths),
     };
 }
@@ -442,18 +463,51 @@ function selectedAliases(project, registry) {
         return requires.every((tag) => (entry.tags ?? []).includes(tag));
     });
 }
+function derivedWorkspaceName(paths) {
+    const base = defaultWorkspaceName(paths.workspaceRoot).slice(0, 48);
+    const digest = crypto
+        .createHash('sha256')
+        .update(`${paths.projectId}\0${path.resolve(paths.workspaceRoot)}`)
+        .digest('hex')
+        .slice(0, 10);
+    return `${base}-${digest}`;
+}
+/** A project that was never explicitly configured still gets safe, isolated defaults. */
+function derivedProjectConfig(paths) {
+    return {
+        version: CONFIG_VERSION,
+        name: derivedWorkspaceName(paths),
+        roots: {},
+        excludes: ['.git', '.direnv/', 'result*'],
+        env: {},
+        shell: 'bash',
+    };
+}
 function loadSplitConfig(paths) {
     const registry = readHostRegistry(paths.hostsFile, false);
-    const project = readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot));
+    const explicit = fs.existsSync(paths.projectFile);
+    const project = explicit
+        ? readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot))
+        : isOpenChamberInternalDirectory(paths.workspaceRoot)
+            ? readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot))
+            : derivedProjectConfig(paths);
     validateProjectSelection(project, registry, paths);
     const hosts = {};
     for (const alias of selectedAliases(project, registry)) {
         const entry = registry.hosts[alias];
         const root = project.roots[alias] ?? defaultRemoteRoot(project.name);
-        hosts[alias] = { alias, ssh: entry.ssh, port: entry.port ?? 22, root, tags: entry.tags ?? [] };
+        hosts[alias] = {
+            alias,
+            ssh: entry.ssh,
+            port: entry.port ?? 22,
+            root,
+            tags: entry.tags ?? [],
+            ...(entry.allow === undefined ? {} : { allow: entry.allow }),
+        };
     }
     return {
         name: project.name,
+        label: explicit ? project.name : defaultWorkspaceName(paths.workspaceRoot),
         dir: paths.workspaceRoot,
         file: paths.projectFile,
         hosts,
@@ -462,7 +516,7 @@ function loadSplitConfig(paths) {
         shell: project.shell,
         excludeMatcher: compileExcludes(project.excludes),
         projectId: paths.projectId,
-        source: 'project',
+        source: explicit ? 'project' : 'derived',
     };
 }
 function loadLegacyConfig(file) {
@@ -497,6 +551,7 @@ function loadLegacyConfig(file) {
     }
     return {
         name,
+        label: name,
         dir,
         file,
         hosts,
@@ -542,10 +597,12 @@ function parseHostRegistry(value, file) {
         const ssh = assertSshTarget(requireString(entry, 'ssh', `hosts.${alias}`));
         const port = entry.port === undefined ? undefined : requirePort(entry.port, `hosts.${alias}.port`);
         const tags = readTags(entry.tags, `hosts.${alias}.tags`);
+        const allow = readAllow(entry.allow, `hosts.${alias}.allow`);
         hosts[alias] = {
             ssh,
             ...(port === undefined ? {} : { port }),
             ...(tags.length === 0 ? {} : { tags }),
+            ...(allow.length === 0 ? {} : { allow }),
         };
     }
     if (Object.keys(hosts).length === 0) {
@@ -663,6 +720,7 @@ function documentsFromConfig(config, paths, sourceFile) {
             ssh: host.ssh,
             ...(host.port === 22 ? {} : { port: host.port }),
             ...(host.tags.length === 0 ? {} : { tags: [...host.tags] }),
+            ...(host.allow === undefined ? {} : { allow: [...host.allow] }),
         };
         if (host.root !== defaultRemoteRoot(config.name))
             roots[alias] = host.root;
@@ -680,6 +738,7 @@ function documentsFromConfig(config, paths, sourceFile) {
             shell: config.shell,
         },
         legacy: config.source === 'legacy' || (sourceFile !== null && path.basename(sourceFile) === 'fleet.json'),
+        configSource: config.source === 'legacy' ? 'legacy' : 'file',
         revision: configRevision(paths),
     };
 }
@@ -721,6 +780,22 @@ function writeJson(file, value) {
 }
 function readExcludes(top) {
     return top.excludes === undefined ? [] : requireStringArray(top.excludes, 'excludes');
+}
+function readAllow(value, where) {
+    if (value === undefined)
+        return [];
+    if (!Array.isArray(value))
+        throw new FleetError('config-invalid', `${where} must be an array`);
+    const allow = value.map((entry) => {
+        if (typeof entry !== 'string' || !HOST_OPERATIONS.includes(entry)) {
+            throw new FleetError('config-invalid', `${where} entries must be one of ${HOST_OPERATIONS.join(', ')}`);
+        }
+        return entry;
+    });
+    if (new Set(allow).size !== allow.length) {
+        throw new FleetError('config-invalid', `${where} must not contain duplicates`);
+    }
+    return allow;
 }
 function readTags(value, where) {
     if (value === undefined)

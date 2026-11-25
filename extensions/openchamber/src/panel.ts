@@ -5,6 +5,7 @@ interface HostEntry {
   ssh: string;
   port?: number;
   tags?: string[];
+  allow?: string[];
 }
 
 interface HostsFile {
@@ -25,11 +26,13 @@ interface ProjectFile {
 
 interface ConfigDocuments {
   projectId: string;
+  workspaceRoot: string;
   hostsFile: string;
   projectFile: string;
   hosts: HostsFile;
   project: ProjectFile;
   legacy: boolean;
+  configSource?: 'file' | 'derived' | 'legacy';
   revision: string;
 }
 
@@ -42,10 +45,16 @@ const projectConfig = document.querySelector<HTMLTextAreaElement>('#project-conf
 const result = document.querySelector<HTMLPreElement>('#result')!;
 const reload = document.querySelector<HTMLButtonElement>('#reload')!;
 const save = document.querySelector<HTMLButtonElement>('#save')!;
+const defaultDirectory = document.querySelector<HTMLInputElement>('#default-directory')!;
+const defaultStatus = document.querySelector<HTMLParagraphElement>('#default-status')!;
+const setDefault = document.querySelector<HTMLButtonElement>('#set-default')!;
+const useProjectDefault = document.querySelector<HTMLButtonElement>('#use-project-default')!;
+const clearDefault = document.querySelector<HTMLButtonElement>('#clear-default')!;
 
 let currentDirectory: string | null = null;
 let loadVersion = 0;
 let revision: string | null = null;
+let lastDocuments: ConfigDocuments | null = null;
 const drafts = new Map<string, { hosts: string; project: string }>();
 
 function showNotice(message: string, tone: 'info' | 'warning' | 'error' | 'success' = 'info'): void {
@@ -96,6 +105,39 @@ async function loadDocuments(directory: string): Promise<ConfigDocuments> {
     throw new Error(parsed.error?.message ?? `Fleet service returned HTTP ${response.status}`);
   }
   return parsed.result;
+}
+
+interface FleetDefaults {
+  version?: number;
+  directory?: string;
+}
+
+async function loadDefault(): Promise<void> {
+  try {
+    const response = await host.serviceRequest({ method: 'GET', path: '/default', body: '' });
+    const parsed = JSON.parse(response.body || '{}') as { ok?: boolean; result?: FleetDefaults };
+    if (response.status < 200 || response.status >= 300 || parsed.ok === false) return;
+    const value = parsed.result?.directory ?? '';
+    defaultDirectory.value = value;
+    defaultStatus.textContent = value
+      ? `Projectless chats use ${value}.`
+      : 'No default. Projectless chats can use remote-only scratch.';
+  } catch {
+    defaultStatus.textContent = 'Default workspace unavailable.';
+  }
+}
+
+async function saveDefault(value: string | null): Promise<void> {
+  const response = await host.serviceRequest({
+    method: 'POST',
+    path: '/default',
+    body: JSON.stringify({ directory: value }),
+  });
+  const parsed = JSON.parse(response.body || '{}') as { ok?: boolean; error?: { message?: string } };
+  if (response.status < 200 || response.status >= 300 || parsed.ok === false) {
+    throw new Error(parsed.error?.message ?? `Fleet service returned HTTP ${response.status}`);
+  }
+  await loadDefault();
 }
 
 function parseHosts(text: string): HostsFile {
@@ -171,7 +213,7 @@ function renderHosts(documents: ConfigDocuments): void {
     name.textContent = alias;
     const ssh = document.createElement('small');
     ssh.textContent = entry
-      ? `${entry.ssh}${entry.tags && entry.tags.length > 0 ? ` · ${entry.tags.join(', ')}` : ''}${problem ? ` · ${problem}` : ''}`
+      ? `${entry.ssh}${entry.tags && entry.tags.length > 0 ? ` · ${entry.tags.join(', ')}` : ''}${entry.allow ? ` · ${entry.allow.join(', ')}` : ''}${problem ? ` · ${problem}` : ''}`
       : problem ?? 'missing from host registry';
     title.append(name, ssh);
     const actions = document.createElement('div');
@@ -192,6 +234,7 @@ function renderHosts(documents: ConfigDocuments): void {
 }
 
 function fill(documents: ConfigDocuments, directory: string): void {
+  lastDocuments = documents;
   const draft = drafts.get(directory);
   revision = documents.revision;
   hostsConfig.value = draft?.hosts ?? `${JSON.stringify(documents.hosts, null, 2)}\n`;
@@ -212,8 +255,11 @@ function fill(documents: ConfigDocuments, directory: string): void {
       ? ` · ${problems} need attention`
       : '';
   const legacy = documents.legacy ? ' Legacy fleet.json detected; saving migrates it to local configuration.' : '';
+  const derived = documents.configSource === 'derived'
+    ? ' Derived configuration; saving creates the project file.'
+    : '';
   const warning = explicit !== undefined && (explicit.length === 0 || problems > 0);
-  showNotice(`${count} host(s), ${scope}${requirement}${attention}.${legacy}`, warning ? 'warning' : 'success');
+  showNotice(`${count} host(s), ${scope}${requirement}${attention}.${derived}${legacy}`, warning ? 'warning' : 'success');
 }
 
 async function load(): Promise<void> {
@@ -228,6 +274,7 @@ async function load(): Promise<void> {
   } catch (error) {
     if (currentDirectory !== active || version !== loadVersion) return;
     revision = null;
+    lastDocuments = null;
     const draft = drafts.get(active);
     hostsConfig.value = draft?.hosts ?? '';
     projectConfig.value = draft?.project ?? '';
@@ -244,6 +291,7 @@ host.onReady((ready) => {
   applyHostReady(ready, document.documentElement);
   currentDirectory = ready.directory;
   directory.textContent = currentDirectory ?? 'Open a project to configure Fleet.';
+  void loadDefault();
   if (currentDirectory) void load();
 });
 
@@ -269,7 +317,30 @@ function rememberDraft(): void {
 
 hostsConfig.addEventListener('input', rememberDraft);
 projectConfig.addEventListener('input', rememberDraft);
-reload.addEventListener('click', () => void load());
+reload.addEventListener('click', () => {
+  void loadDefault();
+  void load();
+});
+setDefault.addEventListener('click', () => {
+  void saveDefault(defaultDirectory.value.trim() || null)
+    .then(() => showNotice('Default workspace saved.', 'success'))
+    .catch((error: unknown) => showNotice(error instanceof Error ? error.message : String(error), 'error'));
+});
+useProjectDefault.addEventListener('click', () => {
+  const project = lastDocuments?.workspaceRoot ?? currentDirectory;
+  if (!project) {
+    showNotice('Open a project first.', 'error');
+    return;
+  }
+  void saveDefault(project)
+    .then(() => showNotice('This project is now the default workspace.', 'success'))
+    .catch((error: unknown) => showNotice(error instanceof Error ? error.message : String(error), 'error'));
+});
+clearDefault.addEventListener('click', () => {
+  void saveDefault(null)
+    .then(() => showNotice('Default workspace cleared.', 'success'))
+    .catch((error: unknown) => showNotice(error instanceof Error ? error.message : String(error), 'error'));
+});
 save.addEventListener('click', () => {
   void (async () => {
     const active = currentDirectory;

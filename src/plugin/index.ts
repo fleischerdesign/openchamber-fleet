@@ -2,8 +2,8 @@
 
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { compileExcludes, loadHostsOnlyConfig, loadSessionConfig } from '../config.js';
-import type { HostConfig, WorkspaceConfig } from '../config.js';
+import { compileExcludes, hostAllows, loadHostsOnlyConfig, loadSessionConfig, workspaceLabel } from '../config.js';
+import type { HostConfig, HostOperation, WorkspaceConfig } from '../config.js';
 import { FleetError, friendlyErrorMessage } from '../errors.js';
 import { hostViews, selectHost } from '../hosts.js';
 import { assertRelativePath } from '../paths.js';
@@ -148,12 +148,15 @@ async function workspaceOfTarget(
   }
 }
 
-function hostOf(config: WorkspaceConfig, input: Record<string, unknown>): HostConfig {
+function hostOf(config: WorkspaceConfig, input: Record<string, unknown>, operation?: HostOperation): HostConfig {
   const alias = input.host;
   if (typeof alias !== 'string' || alias.length === 0) throw new AgentError('INVALID_REQUEST', 'host is required');
   const host = config.hosts[alias];
   if (!host) {
     throw new AgentError('INVALID_REQUEST', `unknown host ${JSON.stringify(alias)}; known: ${Object.keys(config.hosts).join(', ')}`);
+  }
+  if (operation !== undefined && !hostAllows(host, operation)) {
+    throw new AgentError('HOST_NOT_ALLOWED', `host ${JSON.stringify(alias)} is not allowed for ${operation}`);
   }
   return host;
 }
@@ -230,7 +233,7 @@ function syncOutput(
 ): Record<string, unknown> {
   const items = result.changes.slice(0, 200);
   return {
-    workspace: config.name,
+    workspace: workspaceLabel(config),
     host: host.alias,
     mode,
     modeLabel: mode === 'apply' ? 'Applied' : 'Planned',
@@ -281,7 +284,7 @@ function validateExec(config: WorkspaceConfig, host: HostConfig, input: Record<s
   const command = commandText(argv);
   const envDigest = createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([left], [right]) => left.localeCompare(right)))).digest('hex');
   const descriptor = JSON.stringify({
-    workspace: config.name,
+    workspace: workspaceLabel(config),
     host: host.alias,
     cwd: cwd ?? '.',
     envKeys: Object.keys(env).sort(),
@@ -296,7 +299,7 @@ function validateExec(config: WorkspaceConfig, host: HostConfig, input: Record<s
     command,
     descriptor,
     metadata: {
-      workspace: config.name,
+      workspace: workspaceLabel(config),
       host: host.alias,
       argv,
       cwd: cwd ?? '.',
@@ -348,7 +351,7 @@ function runOutput(
             ? 'The job was cancelled.'
             : 'Inspect stderr or call fleet_job_status for a background job.';
   return {
-    workspace: config.name,
+    workspace: workspaceLabel(config),
     target,
     host: host.alias,
     argv,
@@ -383,7 +386,7 @@ function execOutput(
   supervised = false,
 ): Record<string, unknown> {
   return {
-    workspace: config.name,
+    workspace: workspaceLabel(config),
     host: host.alias,
     argv,
     commandLabel: commandLabelOf(argv),
@@ -451,13 +454,13 @@ export default {
         async execute(input, context) {
           const selected = targetOf(input) ?? 'workspace';
           const config = await workspaceOfTarget(ctx, context, targetOf(input));
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, selected === 'scratch' ? 'scratch' : 'workspace');
           const info = await withClient(host, context, (client) => status(client, config.name, host.root, context?.signal));
           const state = selected === 'scratch' && info.generation === 0 && info.recovery !== true
             ? { label: 'Remote-only', nextStep: 'Upload files into scratch or run a command with fleet_exec.' }
             : replicaState(info);
           return jsonResult({
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             target: selected,
             host: host.alias,
             generation: info.generation,
@@ -494,13 +497,13 @@ export default {
         }, ['workspace', 'host', 'mode', 'modeLabel', 'planDigest', 'changes', 'needed', 'items']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, 'workspace');
           const mode = input.mode === 'apply' ? 'apply' : 'plan';
           const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
           const excludes = [...new Set([...config.excludes, ...extra])];
           if (mode === 'apply') {
             await assertPermission(ctx, context, 'fleet.sync', [`${config.name}@${host.alias}`], {
-              workspace: config.name,
+              workspace: workspaceLabel(config),
               host: host.alias,
               mode,
               excludes,
@@ -516,7 +519,7 @@ export default {
             mode,
             adopt: input.adopt === true,
             signal: context?.signal,
-            onProgress: (update: SyncProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            onProgress: (update: SyncProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           }), { closeOnAbort: false });
           return jsonResult(syncOutput(config, host, mode, result), { host: host.alias, mode, planDigest: result.planDigest });
         },
@@ -556,7 +559,7 @@ export default {
         async execute(input, context) {
           const selected = targetOf(input) ?? 'workspace';
           const config = await workspaceOfTarget(ctx, context, targetOf(input));
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, selected === 'scratch' ? 'scratch' : 'workspace');
           const exec = validateExec(config, host, input);
           const metadata = { ...exec.metadata, target: selected, background: input.background === true };
           const descriptor = JSON.stringify({ ...JSON.parse(exec.descriptor), target: selected });
@@ -576,7 +579,7 @@ export default {
               agentPath: agentPath(),
             });
             return jsonResult({
-              workspace: config.name,
+              workspace: workspaceLabel(config),
               target: selected,
               host: host.alias,
               argv: exec.argv,
@@ -604,7 +607,7 @@ export default {
             env: exec.env,
             timeoutMs: exec.timeoutMs,
             signal: context?.signal,
-            onProgress: (update: ExecProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            onProgress: (update: ExecProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           }), { closeOnAbort: false });
           return jsonResult({ ...execOutput(config, host, exec.argv, false, result), target: selected }, {
             host: host.alias,
@@ -663,6 +666,7 @@ export default {
           const host = selectHost(config, {
             ...(typeof input.host === 'string' ? { host: input.host } : {}),
             ...(Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {}),
+            operation: selected === 'scratch' ? 'scratch' : 'workspace',
           });
           const exec = validateExec(config, host, input);
           const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
@@ -703,7 +707,7 @@ export default {
             excludes: extra,
             adopt: input.adopt === true,
             signal: context?.signal,
-            onSyncProgress: (update: SyncProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            onSyncProgress: (update: SyncProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           };
 
           if (background) {
@@ -760,12 +764,12 @@ export default {
               env: exec.env,
               timeoutMs: exec.timeoutMs,
               signal: context?.signal,
-              onProgress: (update: ExecProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+              onProgress: (update: ExecProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
             }), { closeOnAbort: false }).then((exec) => ({ state: exec.state, sync: null, exec }))
             : await withClient(host, context, (client) => runWorkspace(client, config, host, {
               ...common,
               argv: exec.argv,
-              onExecProgress: (update: ExecProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+              onExecProgress: (update: ExecProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
             }), { closeOnAbort: false });
           return jsonResult(runOutput(config, host, exec.argv, false, result.state, result.sync, result.exec, result.exec?.jobId ?? '', false, selected), {
             host: host.alias,
@@ -780,12 +784,16 @@ export default {
         name: 'fleet_hosts',
         description: 'List configured hosts and their tags. Use it to choose a host or pass tags to fleet_run/host=auto. In a projectless chat this also works without a workspace; target="scratch" lists the global registry.',
         options: { codemode: false },
-        input: schema({ tags: stringArray, target }),
+        input: schema({
+          tags: stringArray,
+          target,
+          operation: { type: 'string', enum: ['workspace', 'scratch', 'transfer'] },
+        }),
         output: output({
           workspace: string,
           target: string,
-          hosts: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string }, ['alias', 'tags', 'tagsLabel']) },
-          items: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string }, ['alias', 'tags', 'tagsLabel']) },
+          hosts: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string, operations: stringArray, operationsLabel: string }, ['alias', 'tags', 'tagsLabel', 'operations', 'operationsLabel']) },
+          items: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string, operations: stringArray, operationsLabel: string }, ['alias', 'tags', 'tagsLabel', 'operations', 'operationsLabel']) },
           selected: { type: ['string', 'null'] },
         }, ['workspace', 'target', 'hosts', 'items', 'selected']),
         async execute(input, context) {
@@ -793,16 +801,22 @@ export default {
           const config = selectedTarget === 'scratch'
             ? await workspaceOfTarget(ctx, context, 'scratch')
             : await hostsWorkspaceOf(ctx, context);
-          const views = hostViews(config);
+          const operation = input.operation === 'workspace' || input.operation === 'scratch' || input.operation === 'transfer'
+            ? input.operation
+            : undefined;
+          const views = hostViews(config).filter((view) => operation === undefined || view.operations.includes(operation));
           let selected: string | null = null;
           if (Array.isArray(input.tags) && input.tags.length > 0) {
             try {
-              selected = selectHost(config, { tags: input.tags.map(String) }).alias;
+              selected = selectHost(config, {
+                tags: input.tags.map(String),
+                ...(operation === undefined ? {} : { operation }),
+              }).alias;
             } catch {
               selected = null;
             }
           }
-          return jsonResult({ workspace: config.name, target: selectedTarget ?? 'workspace', hosts: views, items: views, selected });
+          return jsonResult({ workspace: workspaceLabel(config), target: selectedTarget ?? 'workspace', hosts: views, items: views, selected });
         },
       });
 
@@ -870,7 +884,7 @@ export default {
         async execute(input, context) {
           const selected = targetOf(input) ?? 'workspace';
           const config = await workspaceOfTarget(ctx, context, targetOf(input));
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, 'transfer');
           if (typeof input.artifact !== 'string' || typeof input.dest !== 'string') {
             throw new AgentError('INVALID_REQUEST', 'artifact and dest are required');
           }
@@ -878,7 +892,7 @@ export default {
           const dest = path.resolve(config.dir, input.dest);
           const target = canonicalArtifactTarget(dest, artifact);
           await assertPermission(ctx, context, 'edit', [target], {
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             target: selected,
             host: host.alias,
             artifact,
@@ -887,7 +901,7 @@ export default {
           const relative = path.relative(config.dir, target);
           if (relative.startsWith('..') || path.isAbsolute(relative)) {
             await assertPermission(ctx, context, 'external_directory', [`${path.dirname(target)}/*`], {
-              workspace: config.name,
+              workspace: workspaceLabel(config),
               target: selected,
               host: host.alias,
               destination: target,
@@ -901,9 +915,9 @@ export default {
             dest: target,
             overwrite: input.overwrite === true,
             signal: context?.signal,
-            onProgress: (update: TransferProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            onProgress: (update: TransferProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           }));
-          return jsonResult({ workspace: config.name, target: selected, host: host.alias, artifact, statusLabel: 'Verified', ...result });
+          return jsonResult({ workspace: workspaceLabel(config), target: selected, host: host.alias, artifact, statusLabel: 'Verified', ...result });
         },
       });
 
@@ -932,7 +946,7 @@ export default {
             throw new AgentError('INVALID_REQUEST', 'localPath and remotePath are required');
           }
           const config = await workspaceOfTarget(ctx, context, 'scratch');
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, 'transfer');
           const source = path.resolve(config.dir, input.localPath);
           let remotePath: string;
           try {
@@ -941,7 +955,7 @@ export default {
             throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
           }
           await assertPermission(ctx, context, 'fleet.upload', [`${host.alias}:${source}->${remotePath}`], {
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             target: 'scratch',
             host: host.alias,
             source,
@@ -950,7 +964,7 @@ export default {
           const relative = path.relative(config.dir, source);
           if (relative.startsWith('..') || path.isAbsolute(relative)) {
             await assertPermission(ctx, context, 'external_directory', [`${path.dirname(source)}/*`], {
-              workspace: config.name,
+              workspace: workspaceLabel(config),
               target: 'scratch',
               host: host.alias,
               source,
@@ -964,10 +978,10 @@ export default {
             source,
             overwrite: input.overwrite === true,
             signal: context?.signal,
-            onProgress: (update: TransferProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            onProgress: (update: TransferProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           }));
           return jsonResult({
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             target: 'scratch',
             host: host.alias,
             source,
@@ -1006,7 +1020,7 @@ export default {
           }
           const selected = targetOf(input) ?? 'workspace';
           const config = await workspaceOfTarget(ctx, context, targetOf(input));
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, 'transfer');
           let remotePath: string;
           try {
             remotePath = assertRelativePath(input.remotePath);
@@ -1015,7 +1029,7 @@ export default {
           }
           const destination = path.resolve(config.dir, input.localPath);
           await assertPermission(ctx, context, 'fleet.download', [`${host.alias}:${remotePath}->${destination}`], {
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             target: selected,
             host: host.alias,
             source: remotePath,
@@ -1024,7 +1038,7 @@ export default {
           const relative = path.relative(config.dir, destination);
           if (relative.startsWith('..') || path.isAbsolute(relative)) {
             await assertPermission(ctx, context, 'external_directory', [`${path.dirname(destination)}/*`], {
-              workspace: config.name,
+              workspace: workspaceLabel(config),
               target: selected,
               host: host.alias,
               destination,
@@ -1038,10 +1052,10 @@ export default {
             dest: destination,
             overwrite: input.overwrite === true,
             signal: context?.signal,
-            onProgress: (update: TransferProgress) => progress({ ...update, workspace: config.name, host: host.alias }),
+            onProgress: (update: TransferProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           }));
           return jsonResult({
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             target: selected,
             host: host.alias,
             source: remotePath,
@@ -1121,10 +1135,10 @@ export default {
         }, ['workspace', 'host', 'state', 'recovered', 'resultLabel', 'nextStep']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
-          const host = hostOf(config, input);
+          const host = hostOf(config, input, 'workspace');
           const mode = input.mode === 'abort' ? 'abort' : 'recover';
           await assertPermission(ctx, context, 'fleet.recover', [`${config.name}@${host.alias}`], {
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             host: host.alias,
             mode,
           }, [`${config.name}@${host.alias}`]);
@@ -1143,7 +1157,7 @@ export default {
               : 'Nothing to recover'
             : 'Recovery still needed';
           return jsonResult({
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             host: host.alias,
             state: result.state,
             txnId: result.txnId ?? null,

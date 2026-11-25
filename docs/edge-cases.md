@@ -85,6 +85,12 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | XFR-03 | An existing destination is not overwritten by default | `test/v1/protocol.test.js` |
 | XFR-04 | Jobs are addressed by id and owning session, not by the current workspace | `test/unit/jobs.test.js`, `test/unit/supervised.test.js` |
 | XFR-05 | A background exec carries the synchronized generation | `test/unit/supervised.test.js` |
+| WS-07 | A project without a workspace file derives a safe, isolated workspace | `test/unit/config.test.js` |
+| WS-08 | Two checkouts with the same basename get different replica ids | `test/unit/config.test.js` |
+| WS-09 | A real project derives its own workspace instead of borrowing the default | `test/unit/config.test.js` |
+| HOST-01 | A host's `allow` limits workspace, scratch and transfer operations | `test/unit/config.test.js` |
+| HOST-02 | Invalid host operation names are refused | `test/unit/config.test.js` |
+| HOST-03 | An idle supervisor of another version is replaced; a busy one defers | `test/unit/health.test.js` |
 
 ## Host selection
 

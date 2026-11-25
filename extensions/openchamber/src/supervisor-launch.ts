@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { JobStore } from '../../../src/jobs/store.js';
-import { lockActive, readHealthySupervisor } from '../../../src/jobs/health.js';
+import { lockActive, readHealthySupervisor, supervisorVersionDecision } from '../../../src/jobs/health.js';
+import type { SupervisorDiscovery } from '../../../src/jobs/protocol.js';
 
 export type SupervisorState = 'healthy' | 'started' | 'unavailable' | 'disabled';
 
@@ -16,6 +17,7 @@ export interface EnsureSupervisorOptions {
 }
 
 let inFlight: Promise<SupervisorState> | null = null;
+let deferredPid: number | null = null;
 
 function disabled(): boolean {
   const value = process.env.FLEET_SUPERVISOR;
@@ -35,6 +37,30 @@ async function waitForHealthy(store: JobStore, timeoutMs: number): Promise<boole
   }
 }
 
+async function retireStale(
+  store: JobStore,
+  record: SupervisorDiscovery,
+  options: EnsureSupervisorOptions,
+): Promise<boolean> {
+  options.log(`retiring supervisor ${record.pid} version ${record.version} for ${options.version}`);
+  try {
+    process.kill(record.pid, 'SIGTERM');
+  } catch {
+    // The process may already be gone; the discovery check below decides.
+  }
+  const deadline = Date.now() + 6000;
+  while (Date.now() < deadline) {
+    const current = readHealthySupervisor(store);
+    if (!current || current.pid !== record.pid) {
+      store.removeSupervisor(record.instance);
+      return true;
+    }
+    await delay(100);
+  }
+  options.log(`supervisor ${record.pid} did not retire within 6s`);
+  return false;
+}
+
 async function ensure(options: EnsureSupervisorOptions): Promise<SupervisorState> {
   if (disabled()) return 'disabled';
   const store = new JobStore(options.stateRoot);
@@ -44,7 +70,26 @@ async function ensure(options: EnsureSupervisorOptions): Promise<SupervisorState
     options.log(`supervisor state directory is unusable: ${error instanceof Error ? error.message : String(error)}`);
     return 'unavailable';
   }
-  if (readHealthySupervisor(store)) return 'healthy';
+  const healthy = readHealthySupervisor(store);
+  const decision = supervisorVersionDecision(healthy, options.version);
+  if (decision === 'reuse') {
+    deferredPid = null;
+    return 'healthy';
+  }
+  if (decision === 'defer') {
+    if (deferredPid !== healthy?.pid) {
+      deferredPid = healthy?.pid ?? null;
+      options.log(
+        `supervisor ${healthy?.pid} runs ${healthy?.version} with active work; handover deferred until it is idle`,
+      );
+    }
+    return 'healthy';
+  }
+  if (decision === 'replace' && healthy) {
+    const retired = await retireStale(store, healthy, options);
+    if (!retired) return 'healthy';
+  }
+  deferredPid = null;
 
   const lock = store.readLock();
   if (lock && lockActive(lock)) {

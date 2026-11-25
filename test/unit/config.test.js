@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
+import { selectHost } from '../../dist/hosts.js';
 import {
   compileExcludes,
   initProjectConfig,
@@ -43,7 +44,8 @@ function aliasesOf(workspace, configDir) {
 
 describe('fleet.json validation (CFG-01…CFG-08)', () => {
   test('rejects a missing file', () => {
-    assert.throws(() => loadConfig(tmp), (error) => error.code === 'config-missing');
+    const configDir = fs.mkdtempSync(path.join(tmp, 'missing-config-'));
+    assert.throws(() => loadConfig(tmp, { configDir }), (error) => error.code === 'config-missing');
   });
 
   test('rejects unknown top-level keys', () => {
@@ -142,6 +144,64 @@ describe('split host registry and project configuration', () => {
     const secondConfig = loadConfig(second, { configDir });
     assert.equal(secondConfig.name, 'second');
     assert.deepEqual(secondConfig.excludes, ['target/']);
+  });
+
+  test('a real project without a project file derives a safe workspace', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'derived-project-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'derived-config-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { node: { ssh: 'u@h' } },
+    }));
+
+    const config = loadConfig(workspace, { configDir });
+    assert.equal(config.source, 'derived');
+    assert.equal(config.label, path.basename(workspace).toLowerCase());
+    assert.match(config.name, /^[a-z0-9._-]+-[0-9a-f]{10}$/);
+    assert.deepEqual(config.excludes, ['.git', '.direnv/', 'result*']);
+    assert.equal(config.hosts.node.root, `~/.cache/openchamber-fleet/${config.name}`);
+
+    const documents = loadConfigDocuments(workspace, { configDir });
+    assert.equal(documents.configSource, 'derived');
+    assert.equal(documents.project.name, config.name);
+    assert.deepEqual(documents.project.excludes, ['.git', '.direnv/', 'result*']);
+
+    const saved = saveConfigDocuments(workspace, documents.hosts, documents.project, { configDir });
+    assert.equal(saved.configSource, 'file');
+    assert.equal(loadConfig(workspace, { configDir }).source, 'project');
+  });
+
+  test('two checkouts with the same basename derive distinct replicas', () => {
+    const first = path.join(tmp, 'same-name', 'a', 'project');
+    const second = path.join(tmp, 'same-name', 'b', 'project');
+    fs.mkdirSync(first, { recursive: true });
+    fs.mkdirSync(second, { recursive: true });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'same-name-config-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { node: { ssh: 'u@h' } },
+    }));
+
+    const left = loadConfig(first, { configDir });
+    const right = loadConfig(second, { configDir });
+    assert.equal(left.label, 'project');
+    assert.equal(right.label, 'project');
+    assert.notEqual(left.name, right.name);
+    assert.notEqual(left.hosts.node.root, right.hosts.node.root);
+  });
+
+  test('a real project derives its own workspace instead of borrowing the default', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'derived-vs-default-'));
+    const defaultProject = fs.mkdtempSync(path.join(tmp, 'derived-default-project-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'derived-default-config-'));
+    initProjectConfig(defaultProject, { alias: 'node', ssh: 'u@h', name: 'default-project', configDir });
+    saveDefaults(defaultProject, { configDir });
+
+    const resolved = loadSessionConfig(workspace, { configDir });
+    assert.equal(resolved.fallback, false);
+    assert.equal(resolved.config.dir, fs.realpathSync(workspace));
+    assert.equal(resolved.config.source, 'derived');
+    assert.notEqual(resolved.config.name, 'default-project');
   });
 
   test('an implicit project uses every registry host', () => {
@@ -357,6 +417,34 @@ describe('split host registry and project configuration', () => {
     assert.deepEqual(migrated.excludes, ['secret/']);
     assert.deepEqual(migrated.env, { TOKEN: 'token' });
     assert.equal(migrated.shell, 'zsh');
+  });
+
+  test('host operation allowances are parsed, enforced and round-tripped', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'allow-ops-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'allow-ops-config-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { scratch: { ssh: 'u@h', allow: ['scratch'] } },
+    }));
+    const config = loadConfig(workspace, { configDir });
+    assert.deepEqual(config.hosts.scratch.allow, ['scratch']);
+    assert.equal(selectHost(config, { operation: 'scratch' }).alias, 'scratch');
+    assert.throws(
+      () => selectHost(config, { operation: 'workspace' }),
+      /not allowed|no configured host matches/,
+    );
+    const documents = loadConfigDocuments(workspace, { configDir });
+    assert.deepEqual(documents.hosts.hosts.scratch.allow, ['scratch']);
+  });
+
+  test('invalid host operation allowances are refused', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'bad-allow-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'bad-allow-config-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { node: { ssh: 'u@h', allow: ['everything'] } },
+    }));
+    assert.throws(() => loadConfig(workspace, { configDir }), /allow entries must be one of/);
   });
 
   test('host tags round-trip through the split documents', () => {
@@ -622,7 +710,10 @@ describe('projectless default workspace', () => {
     assert.equal(isOpenChamberInternalDirectory(chat), true);
     assert.equal(isOpenChamberInternalDirectory(project), false);
     assert.throws(() => loadSessionConfig(chat, { configDir }), (error) => error.code === 'config-missing');
-    assert.throws(() => loadSessionConfig(unconfigured, { configDir }), (error) => error.code === 'config-missing');
+    const derived = loadSessionConfig(unconfigured, { configDir });
+    assert.equal(derived.fallback, false);
+    assert.equal(derived.config.source, 'derived');
+    assert.notEqual(derived.config.name, 'default-project');
 
     const saved = saveDefaults(project, { configDir });
     assert.equal(saved.directory, fs.realpathSync(project));
@@ -631,7 +722,9 @@ describe('projectless default workspace', () => {
     assert.equal(resolved.fallback, true);
     assert.equal(resolved.config.name, 'default-project');
     assert.equal(loadHostsOnlyConfig(chat, { configDir }).hosts.mob.ssh, 'u@h');
-    assert.throws(() => loadSessionConfig(unconfigured, { configDir }), (error) => error.code === 'config-missing');
+    const stillDerived = loadSessionConfig(unconfigured, { configDir });
+    assert.equal(stillDerived.fallback, false);
+    assert.equal(stillDerived.config.source, 'derived');
 
     saveDefaults(null, { configDir });
     assert.throws(() => loadSessionConfig(chat, { configDir }), /no default workspace/);

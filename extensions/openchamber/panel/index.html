@@ -21,7 +21,9 @@
     button:hover { background: var(--oc-hover, #333); }
     button.primary { background: var(--oc-primary, #5b8def); color: var(--oc-primary-foreground, white); border-color: transparent; }
     button:disabled { opacity: .5; cursor: default; }
-    textarea { width: 100%; min-height: 120px; resize: vertical; border: 1px solid var(--oc-border, #333); border-radius: 8px; background: var(--oc-background, #111); color: inherit; padding: 8px; }
+    textarea, input { width: 100%; border: 1px solid var(--oc-border, #333); border-radius: 8px; background: var(--oc-background, #111); color: inherit; padding: 8px; }
+    textarea { min-height: 120px; resize: vertical; }
+    .grow { flex: 1 1 240px; }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; padding: 8px; border-radius: 6px; background: var(--oc-muted-surface, #222); max-height: 260px; overflow: auto; }
     .error { color: var(--oc-error-text, #ef6666); }
     .ok { color: var(--oc-success-text, #5ecb8b); }
@@ -33,6 +35,15 @@
   <p id="directory">Open a project to configure Fleet.</p>
   <div id="notice" aria-live="polite"></div>
   <div id="hosts"></div>
+  <h2>Default workspace</h2>
+  <p>Used only by projectless chats. It is a real project directory, never a repository file.</p>
+  <div class="row">
+    <input id="default-directory" class="grow" spellcheck="false" placeholder="/home/user/dev/project">
+    <button id="set-default">Set default</button>
+    <button id="use-project-default">Use this project</button>
+    <button id="clear-default">Clear</button>
+  </div>
+  <p id="default-status"></p>
   <h2>Host registry</h2>
   <p>Machines are stored locally for this OpenChamber instance, never in the repository.</p>
   <textarea id="hosts-config" spellcheck="false" placeholder="Hosts are not configured yet."></textarea>

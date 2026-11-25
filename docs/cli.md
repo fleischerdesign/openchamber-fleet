@@ -21,10 +21,12 @@ Every command opens one SSH session, performs one operation and closes it. `FLEE
 overrides the agent binary name. Every command accepts `--config-dir <dir>`; the default is
 `$XDG_CONFIG_HOME/openchamber-fleet`.
 
-`fleet init` writes the host registry and project configuration there, never into the repository.
-The host registry is reusable by every project. A new project gets no `hosts` allowlist and
-therefore follows the whole registry; add `requires` or an explicit `hosts` list to the project file
-when it must be restricted. Selecting an alias that already exists keeps its SSH target; `--force`
+`fleet init` writes the host registry and, when needed, a project configuration there, never into
+the repository. A project without a file is fully usable: Fleet derives a safe workspace from the
+project directory. `fleet init` is the explicit way to add a host or create overrides. The host
+registry is reusable by every project. A project can restrict hosts with `requires` or an explicit
+`hosts` allowlist. A host's `allow` field limits operations (`workspace`, `scratch`, `transfer`);
+tags remain suitability, not authorization. Selecting an alias that already exists keeps its SSH target; `--force`
 replaces it. An existing legacy `fleet.json` is migrated with its name, hosts, roots, excludes,
 environment and shell intact. Use `--workspace-file` only when a repository-local legacy file is
 explicitly wanted; it is written at the workspace root even from a subdirectory.

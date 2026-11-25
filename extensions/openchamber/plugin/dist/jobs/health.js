@@ -35,6 +35,14 @@ export function readHealthySupervisor(store, now = Date.now()) {
     const record = store.readSupervisor();
     return supervisorHealthy(record, now) ? record : null;
 }
+/** Decide whether a healthy supervisor can serve this build, must wait, or may be retired. */
+export function supervisorVersionDecision(record, version) {
+    if (!record)
+        return 'start';
+    if (record.version === version)
+        return 'reuse';
+    return (record.activeJobs ?? 0) > 0 ? 'defer' : 'replace';
+}
 /** A lock without discovery is a supervisor that is still starting; do not spawn a second. */
 export function lockActive(lock, now = Date.now()) {
     if (!lock || lock.protocol !== SUPERVISOR_PROTOCOL)
