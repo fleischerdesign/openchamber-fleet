@@ -280,8 +280,11 @@ async function cmdSync(parsed) {
             excludes,
             mode: parsed.flags.has('plan') ? 'plan' : 'apply',
             adopt: parsed.flags.has('adopt'),
+            ...(typeof parsed.flags.get('plan-token') === 'string' ? { planToken: String(parsed.flags.get('plan-token')) } : {}),
         });
         process.stdout.write(`plan ${result.changes.length} change(s) ${result.planDigest}\n`);
+        if (result.planToken)
+            process.stdout.write(`plan-token ${result.planToken}\n`);
         for (const change of result.changes.slice(0, 50)) {
             process.stdout.write(`  ${change.action.padEnd(7)} ${change.path}\n`);
         }
@@ -330,9 +333,6 @@ async function cmdRun(parsed) {
     if (parsed.flags.has('scratch') && (sync === 'plan' || sync === 'apply')) {
         throw new FleetError('usage', '--scratch has no source tree; sync=plan/apply requires a project workspace');
     }
-    if (parsed.flags.has('adopt') && sync !== 'auto' && sync !== 'apply') {
-        throw new FleetError('usage', '--adopt is only valid with --sync auto or --sync apply');
-    }
     const additions = parsed.flags.has('scratch')
         ? []
         : excludesOf(config, parsed.flags).filter((pattern) => !config.excludes.includes(pattern));
@@ -354,7 +354,6 @@ async function cmdRun(parsed) {
                 timeoutMs: timeoutMsOf(parsed.flags),
                 sync,
                 excludes: additions,
-                adopt: parsed.flags.has('adopt'),
             });
         if (parsed.flags.has('json')) {
             process.stdout.write(`${JSON.stringify({
@@ -528,7 +527,7 @@ function printHelp() {
         '  fleet recover --host <alias> [--abort] [--json]',
         '  fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]',
         '  fleet run [--host <alias|auto>] [--tag a,b] [--cwd P] [--env K=V,...] [--timeout SEC]',
-        '            [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--scratch] [--json] -- <command…>',
+        '            [--sync auto|never|plan|apply] [--exclude pat,pat] [--scratch] [--json] -- <command…>',
         '  fleet exec --host <alias> [--cwd P] [--env K=V,...] [--timeout SEC] [--scratch] [--json] -- <command…>',
         '  fleet fetch --host <alias> --dest <dir> [--overwrite] [--scratch] -- <path>',
         '  fleet upload <local-path> --host <alias> --to <remote-path> [--scratch] [--overwrite]',

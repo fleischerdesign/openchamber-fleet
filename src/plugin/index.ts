@@ -238,6 +238,7 @@ function syncOutput(
     mode,
     modeLabel: mode === 'apply' ? 'Applied' : 'Planned',
     planDigest: result.planDigest,
+    planToken: result.planToken ?? null,
     generation: result.generation ?? null,
     manifestDigest: result.manifestDigest ?? null,
     changes: result.changes.length,
@@ -481,6 +482,7 @@ export default {
           mode: { type: 'string', enum: ['plan', 'apply'] },
           excludes: stringArray,
           adopt: boolean,
+          planToken: string,
         }, ['host', 'mode']),
         output: output({
           workspace: string,
@@ -488,13 +490,14 @@ export default {
           mode: string,
           modeLabel: string,
           planDigest: string,
+          planToken: { type: ['string', 'null'] },
           generation: { type: ['number', 'null'] },
           manifestDigest: { type: ['string', 'null'] },
           changes: { type: 'number' },
           changesTruncated: boolean,
           needed: { type: 'number' },
           items: { type: 'array', items: schema({ action: string, path: string }, ['action', 'path']) },
-        }, ['workspace', 'host', 'mode', 'modeLabel', 'planDigest', 'changes', 'needed', 'items']),
+        }, ['workspace', 'host', 'mode', 'modeLabel', 'planDigest', 'planToken', 'changes', 'needed', 'items']),
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input, 'workspace');
@@ -518,6 +521,7 @@ export default {
             excludes,
             mode,
             adopt: input.adopt === true,
+            ...(typeof input.planToken === 'string' ? { planToken: input.planToken } : {}),
             signal: context?.signal,
             onProgress: (update: SyncProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           }), { closeOnAbort: false });
@@ -633,7 +637,6 @@ export default {
           background: boolean,
           sync: { type: 'string', enum: ['auto', 'never', 'plan', 'apply'] },
           excludes: stringArray,
-          adopt: boolean,
         }, ['argv']),
         output: output({
           workspace: string,
@@ -677,16 +680,12 @@ export default {
           if (selected === 'scratch' && (syncMode === 'plan' || syncMode === 'apply')) {
             throw new AgentError('INVALID_REQUEST', 'scratch has no source tree; sync=plan/apply requires target="workspace"');
           }
-          if (input.adopt === true && syncMode !== 'auto' && syncMode !== 'apply') {
-            throw new AgentError('INVALID_REQUEST', 'adopt is only valid with sync=auto or sync=apply');
-          }
           const background = input.background === true;
           const metadata = {
             ...exec.metadata,
             target: selected,
             sync: syncMode,
             excludes,
-            adopt: input.adopt === true,
             background,
           };
           const descriptor = JSON.stringify({
@@ -694,7 +693,6 @@ export default {
             target: selected,
             sync: syncMode,
             excludes,
-            adopt: input.adopt === true,
           });
           await assertPermission(ctx, context, 'fleet.run', [descriptor], metadata, [descriptor]);
 
@@ -705,7 +703,6 @@ export default {
             ...(exec.timeoutMs === undefined ? {} : { timeoutMs: exec.timeoutMs }),
             sync: syncMode,
             excludes: extra,
-            adopt: input.adopt === true,
             signal: context?.signal,
             onSyncProgress: (update: SyncProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
           };

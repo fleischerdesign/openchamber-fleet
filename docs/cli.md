@@ -8,9 +8,9 @@ fleet doctor [--host <alias>] [--agent-path PATH]
 fleet hosts [--tag a,b] [--json]
 fleet status --host <alias> [--json]
 fleet recover --host <alias> [--abort] [--json]
-fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]
+fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt] [--plan-token TOKEN]
 fleet run [--host <alias|auto>] [--tag a,b] [--cwd PATH] [--env K=V,...] [--timeout SEC]
-          [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--scratch] [--json] -- <command…>
+          [--sync auto|never|plan|apply] [--exclude pat,pat] [--scratch] [--json] -- <command…>
 fleet exec --host <alias> [--cwd PATH] [--env K=V,...] [--timeout SEC] [--scratch] [--json] -- <command…>
 fleet fetch --host <alias> --dest <dir> [--overwrite] [--scratch] -- <path>
 fleet upload <local-path> --host <alias> --to <remote-path> [--overwrite]
@@ -56,7 +56,10 @@ file, verify a SHA-256 digest, stream without loading the file into memory and r
 unless `--overwrite` is given.
 
 `fleet sync --plan`, `fleet status` and `fleet fetch` are read-only: they never create a replica
-root or a state entry on the host.
+root or a state entry on the host. A plan prints a `plan-token`; `fleet sync --apply
+--plan-token TOKEN` refuses a different source, policy, generation or file set with `PLAN_STALE`.
+The OpenCode tools expose the same token. `adopt` remains a separate `fleet sync --apply` operator
+action; normal runs never adopt an existing unmanaged directory.
 
 ## Exit codes
 

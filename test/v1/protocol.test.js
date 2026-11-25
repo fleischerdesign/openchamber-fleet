@@ -245,6 +245,38 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     }
   });
 
+  test('an apply only accepts the plan token it was given', async () => {
+    const applySource = path.join(base, 'token-source');
+    const applyReplica = path.join(base, 'token-replica');
+    fs.mkdirSync(applySource, { recursive: true });
+    fs.writeFileSync(path.join(applySource, 'file.txt'), 'first\n');
+    await syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-token',
+      source: applySource,
+      root: applyReplica,
+      excludes: [],
+      mode: 'apply',
+    });
+    fs.writeFileSync(path.join(applySource, 'file.txt'), 'second\n');
+    const planned = await syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-token',
+      source: applySource,
+      root: applyReplica,
+      excludes: [],
+      mode: 'plan',
+    });
+    assert.ok(planned.planToken);
+    fs.writeFileSync(path.join(applySource, 'file.txt'), 'third\n');
+    await assert.rejects(syncWorkspace(client, compileExcludes([]), {
+      workspaceId: 'v1-token',
+      source: applySource,
+      root: applyReplica,
+      excludes: [],
+      mode: 'apply',
+      planToken: planned.planToken,
+    }), (error) => error.code === 'PLAN_STALE');
+  });
+
   test('refuses a transfer through an intermediate symlink', async () => {
     const outside = path.join(base, 'outside-secret');
     fs.mkdirSync(outside, { recursive: true });
