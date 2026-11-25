@@ -25,6 +25,7 @@ export interface StartJobInput {
   cwd?: string;
   env?: Record<string, string>;
   timeoutMs?: number;
+  expectedGeneration?: number;
   startupSignal?: AbortSignal;
   onProgress?: (progress: ExecProgress) => void | Promise<void>;
   agentPath: string;
@@ -108,6 +109,7 @@ export class FleetJobRegistry {
         cwd: input.cwd,
         env: input.env,
         timeoutMs: input.timeoutMs,
+        ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
         signal: startup.signal,
         onProgress: input.onProgress,
       });
@@ -158,16 +160,28 @@ export class FleetJobRegistry {
     return record;
   }
 
-  async status(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob> {
-    const key = jobKey(config.name, host, jobId);
-    const active = this.jobs.get(key);
-    const record = active?.record ?? (this.ctx.storage ? await this.ctx.storage.get(storageKey(key)) : undefined);
-    if (!isStoredJob(record)) throw new AgentError('OPERATION_UNKNOWN', `unknown job ${jobId}`);
-    if (record.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
-    return record;
+  async status(jobId: string, sessionID: string): Promise<StoredJob> {
+    for (const active of this.jobs.values()) {
+      if (active.record.jobId !== jobId) continue;
+      if (active.record.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
+      return active.record;
+    }
+    if (this.ctx.storage) {
+      let after: string | undefined;
+      do {
+        const page = await this.ctx.storage.scan({ prefix: STORAGE_PREFIX, limit: 1000, after });
+        for (const entry of page.entries) {
+          if (!isStoredJob(entry.value) || entry.value.jobId !== jobId) continue;
+          if (entry.value.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
+          return entry.value;
+        }
+        after = page.next;
+      } while (after);
+    }
+    throw new AgentError('OPERATION_UNKNOWN', `unknown job ${jobId}`);
   }
 
-  async list(sessionID: string, directory?: string): Promise<StoredJob[]> {
+  async list(sessionID: string): Promise<StoredJob[]> {
     const records = new Map<string, StoredJob>();
     if (this.ctx.storage) {
       let after: string | undefined;
@@ -176,7 +190,7 @@ export class FleetJobRegistry {
         for (const entry of page.entries) {
           if (!isStoredJob(entry.value)) continue;
           const record = entry.value;
-          if (record.sessionID !== sessionID || (directory && record.directory !== directory)) continue;
+          if (record.sessionID !== sessionID) continue;
           if (record.startedAt + RETENTION_MS < Date.now()) continue;
           records.set(record.key, record);
         }
@@ -184,14 +198,14 @@ export class FleetJobRegistry {
       } while (after);
     }
     for (const active of this.jobs.values()) {
-      if (active.record.sessionID !== sessionID || (directory && active.record.directory !== directory)) continue;
+      if (active.record.sessionID !== sessionID) continue;
       records.set(active.record.key, active.record);
     }
     return [...records.values()].sort((left, right) => right.startedAt - left.startedAt).slice(0, 50);
   }
 
-  async cancel(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob> {
-    const record = await this.status(config, host, jobId, sessionID);
+  async cancel(jobId: string, sessionID: string): Promise<StoredJob> {
+    const record = await this.status(jobId, sessionID);
     if (TERMINAL.has(record.state)) return record;
     const active = this.jobs.get(record.key);
     if (!active) return record;

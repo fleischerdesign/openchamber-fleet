@@ -5,7 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { compileExcludes } from '../../dist/config.js';
-import { connectProcess, execCommand, fetchArtifact, startExecCommand, syncWorkspace } from '../../dist/v1/operations.js';
+import {
+  connectProcess,
+  downloadFile,
+  execCommand,
+  fetchArtifact,
+  probeWorkspace,
+  startExecCommand,
+  status,
+  syncWorkspace,
+  uploadFile,
+} from '../../dist/v1/operations.js';
 
 const binary = process.env.FLEET_AGENT_BIN ?? path.resolve('agent/target/debug/fleet-agent');
 const available = fs.existsSync(binary);
@@ -161,6 +171,108 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     });
     assert.equal(fs.readFileSync(fetched.file, 'utf8'), 'artifact');
     assert.match(fetched.digest, /^sha256:[0-9a-f]{64}$/);
+  });
+
+  test('probe is read-only and distinguishes an absent workspace', async () => {
+    const absentRoot = path.join(base, 'absent-replica');
+    const probe = await probeWorkspace(client, 'v1-absent', absentRoot);
+    assert.equal(probe.state, 'ABSENT');
+    assert.equal(fs.existsSync(absentRoot), false);
+    const info = await status(client, 'v1-absent', absentRoot);
+    assert.equal(info.generation, 0);
+    assert.equal(info.recovery, false);
+    assert.equal(fs.existsSync(absentRoot), false);
+  });
+
+  test('round-trips one file through the scratch transfer path', async () => {
+    const transferRoot = path.join(base, 'transfer-replica');
+    const local = path.join(base, 'upload.txt');
+    const downloaded = path.join(base, 'download.txt');
+    fs.writeFileSync(local, 'transfer payload\n');
+    const uploaded = await uploadFile(client, {
+      workspaceId: 'v1-transfer',
+      root: transferRoot,
+      path: 'upload.txt',
+      source: local,
+    });
+    assert.equal(uploaded.bytes, 17);
+    assert.match(uploaded.digest, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(fs.readFileSync(path.join(transferRoot, 'upload.txt'), 'utf8'), 'transfer payload\n');
+
+    await assert.rejects(uploadFile(client, {
+      workspaceId: 'v1-transfer',
+      root: transferRoot,
+      path: 'upload.txt',
+      source: local,
+    }), (error) => error.code === 'DEST_EXISTS');
+
+    const fetched = await downloadFile(client, {
+      workspaceId: 'v1-transfer',
+      root: transferRoot,
+      path: 'upload.txt',
+      dest: downloaded,
+    });
+    assert.equal(fs.readFileSync(fetched.file, 'utf8'), 'transfer payload\n');
+    assert.equal(fetched.digest, uploaded.digest);
+    await assert.rejects(downloadFile(client, {
+      workspaceId: 'v1-transfer',
+      root: transferRoot,
+      path: 'upload.txt',
+      dest: downloaded,
+    }), /exists/i);
+  });
+
+  test('binds a lease to the workspace that acquired it', async () => {
+    await client.request('workspace.open', {
+      workspaceId: 'v1-transfer',
+      root: path.join(base, 'transfer-replica'),
+      adopt: false,
+    });
+    const lease = await client.request('workspace.lease', {
+      workspaceId: 'v1-test',
+      operationId: 'cross-workspace-lease',
+      ttlMs: 60_000,
+    });
+    try {
+      await assert.rejects(client.request('exec.start', {
+        workspaceId: 'v1-transfer',
+        leaseId: lease.leaseId,
+        expectedGeneration: 0,
+        argv: ['true'],
+      }), (error) => error.code === 'LEASE_MISMATCH');
+    } finally {
+      await client.request('workspace.release', { leaseId: lease.leaseId });
+    }
+  });
+
+  test('refuses a transfer through an intermediate symlink', async () => {
+    const outside = path.join(base, 'outside-secret');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'do not leak');
+    fs.symlinkSync(outside, path.join(replica, 'leak'));
+    await assert.rejects(downloadFile(client, {
+      workspaceId: 'v1-test',
+      root: replica,
+      path: 'leak/secret.txt',
+      dest: path.join(base, 'leaked.txt'),
+    }), (error) => error.code === 'PATH_UNSAFE');
+  });
+
+  test('refuses cwd escapes and transfer path traversal', async () => {
+    await assert.rejects(execCommand(client, {
+      workspaceId: 'v1-test',
+      root: replica,
+      argv: ['true'],
+      cwd: '..',
+    }), /PATH_UNSAFE|unsafe path|escape/i);
+    const local = path.join(base, 'traversal.txt');
+    fs.writeFileSync(local, 'x');
+    await assert.rejects(uploadFile(client, {
+      workspaceId: 'v1-test',
+      root: replica,
+      path: '../escape.txt',
+      source: local,
+    }), /PATH_UNSAFE|unsafe path|escape/i);
   });
 });
 

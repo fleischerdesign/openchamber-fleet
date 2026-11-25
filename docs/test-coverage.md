@@ -31,6 +31,8 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Path validation | — | `test/unit/paths.test.js` |
 | Plugin surface | — | `test/unit/plugin.test.js` |
 | Host selection by registry, allowlist and tags | SEL-01…SEL-08 | `test/unit/config.test.js` |
+| Read-only probes, lease binding, cwd safety | CTX-01…CTX-05 | `test/v1/protocol.test.js`, `test/unit/operations.test.js`, `test/unit/run.test.js` |
+| Scratch and single-file transfer | CTX-06, XFR-01…XFR-05 | `test/unit/scratch.test.js`, `test/v1/protocol.test.js`, `test/unit/jobs.test.js`, `test/unit/supervised.test.js` |
 | Default workspace for projectless chats | PROJ-01…PROJ-04, SEL-09 | `test/unit/config.test.js`, `test/unit/cli.test.js`, `test/unit/service.test.js` |
 | Detached job store, locks, retention | — | `test/unit/job-store.test.js` |
 | Supervisor state machine, queue, recovery, shutdown | — | `test/unit/supervisor.test.js` |

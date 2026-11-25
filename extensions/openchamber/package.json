@@ -1,6 +1,6 @@
 {
   "name": "@fleischerdesign/openchamber-fleet-extension",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "openchamber": {
@@ -161,6 +161,37 @@
               }
             },
             "fields": [
+              { "label": "Size", "value": "{output.bytes} bytes" },
+              { "label": "SHA-256", "value": "{output.digest}" }
+            ]
+          }
+        },
+        {
+          "match": "fleet_upload",
+          "name": "Fleet upload",
+          "icon": "upload",
+          "title": "Fleet upload · {input.host}",
+          "subtitle": "{output.bytes} bytes · {output.statusLabel}",
+          "output": "table",
+          "columns": ["source", "destination", "digest"]
+        },
+        {
+          "match": "fleet_download",
+          "name": "Fleet download",
+          "icon": "download",
+          "title": "Fleet download · {input.host}",
+          "output": "card",
+          "card": {
+            "label": "{output.source}",
+            "title": "{output.file}",
+            "status": {
+              "value": "{output.statusLabel}",
+              "tones": {
+                "Verified": "success"
+              }
+            },
+            "fields": [
+              { "label": "Target", "value": "{output.target}" },
               { "label": "Size", "value": "{output.bytes} bytes" },
               { "label": "SHA-256", "value": "{output.digest}" }
             ]

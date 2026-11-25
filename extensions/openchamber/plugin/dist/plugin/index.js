@@ -4,15 +4,18 @@ import path from 'node:path';
 import { compileExcludes, loadHostsOnlyConfig, loadSessionConfig } from '../config.js';
 import { FleetError, friendlyErrorMessage } from '../errors.js';
 import { hostViews, selectHost } from '../hosts.js';
+import { assertRelativePath } from '../paths.js';
 import { commandLabelOf, exitLabelOf, stateLabelOf } from '../labels.js';
 import { runWorkspace, syncForRun } from '../run.js';
+import { scratchConfig } from '../scratch.js';
 import { replicaState } from '../status.js';
 import { AgentError } from '../v1/errors.js';
-import { canonicalArtifactTarget, connectSsh, execCommand, fetchArtifact, recoverWorkspace, status, syncWorkspace, } from '../v1/operations.js';
+import { canonicalArtifactTarget, connectSsh, downloadFile, execCommand, recoverWorkspace, status, syncWorkspace, uploadFile, } from '../v1/operations.js';
 import { BackgroundJobs } from './background.js';
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
 const stringArray = { type: 'array', items: string };
+const target = { type: 'string', enum: ['workspace', 'scratch'] };
 function schema(properties, required = []) {
     return { type: 'object', properties, required, additionalProperties: false };
 }
@@ -86,6 +89,37 @@ async function hostsWorkspaceOf(ctx, context) {
             }
         }
         throw configErrorOf(error);
+    }
+}
+function targetOf(input) {
+    if (input.target === 'scratch')
+        return 'scratch';
+    if (input.target === 'workspace')
+        return 'workspace';
+    return undefined;
+}
+/** Resolve the explicit target; absent target means the session's project. */
+async function workspaceOfTarget(ctx, context, target) {
+    if (target === 'scratch') {
+        const directory = await sessionDirectoryOf(ctx, context);
+        try {
+            return scratchConfig({
+                seed: context?.sessionID ?? directory,
+                directory,
+            });
+        }
+        catch (error) {
+            throw configErrorOf(error);
+        }
+    }
+    try {
+        return await workspaceOf(ctx, context);
+    }
+    catch (error) {
+        if (error instanceof AgentError && error.code === 'CONFIG_MISSING' && target === undefined) {
+            throw new AgentError('TARGET_REQUIRED', 'This chat has no project workspace. Pass target="scratch" for remote-only execution, or open a project / set a default workspace.');
+        }
+        throw error;
     }
 }
 function hostOf(config, input) {
@@ -185,10 +219,25 @@ function validateExec(config, host, input) {
         throw new AgentError('INVALID_REQUEST', `execution-sensitive environment variables must be declared in the project config: ${unsafeEnv.join(', ')}`);
     }
     const env = { ...config.env, ...inputEnv };
-    const cwd = typeof input.cwd === 'string' ? input.cwd : undefined;
+    let cwd;
+    if (typeof input.cwd === 'string') {
+        try {
+            cwd = assertRelativePath(input.cwd);
+        }
+        catch (error) {
+            throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
+        }
+    }
     const command = commandText(argv);
     const envDigest = createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([left], [right]) => left.localeCompare(right)))).digest('hex');
-    const descriptor = JSON.stringify({ host: host.alias, cwd: cwd ?? '.', envKeys: Object.keys(env).sort(), envDigest, argv });
+    const descriptor = JSON.stringify({
+        workspace: config.name,
+        host: host.alias,
+        cwd: cwd ?? '.',
+        envKeys: Object.keys(env).sort(),
+        envDigest,
+        argv,
+    });
     return {
         argv,
         ...(cwd === undefined ? {} : { cwd }),
@@ -214,22 +263,25 @@ function syncLabelOf(sync) {
         return 'Not synced';
     return sync.changes === 0 ? 'Up to date' : `${sync.changes} change${sync.changes === 1 ? '' : 's'}`;
 }
-function runOutput(config, host, argv, background, state, sync, exec, jobId, supervised = false) {
+function runOutput(config, host, argv, background, state, sync, exec, jobId, supervised = false, target = 'workspace') {
     const exitCode = exec?.exitCode ?? null;
     const signal = exec?.signal ?? null;
     const nextStep = state === 'sync-required'
         ? 'Review the changes, then run fleet_run with sync=apply or fleet_sync apply.'
-        : background
-            ? supervised
-                ? 'The session resumes when the job finishes.'
-                : 'The job is bound to this OpenCode runtime; a restart reports it as interrupted.'
-            : state === 'succeeded'
-                ? 'No action needed.'
-                : state === 'cancelled'
-                    ? 'The job was cancelled.'
-                    : 'Inspect stderr or call fleet_job_status for a background job.';
+        : state === 'sync-planned'
+            ? 'Plan only: no command ran. Apply the sync when you are ready.'
+            : background
+                ? supervised
+                    ? 'The session resumes when the job finishes.'
+                    : 'The job is bound to this OpenCode runtime; a restart reports it as interrupted.'
+                : state === 'succeeded'
+                    ? 'No action needed.'
+                    : state === 'cancelled'
+                        ? 'The job was cancelled.'
+                        : 'Inspect stderr or call fleet_job_status for a background job.';
     return {
         workspace: config.name,
+        target,
         host: host.alias,
         argv,
         commandLabel: commandLabelOf(argv),
@@ -242,7 +294,7 @@ function runOutput(config, host, argv, background, state, sync, exec, jobId, sup
         signal,
         jobId,
         supervised,
-        syncLabel: syncLabelOf(sync),
+        syncLabel: target === 'scratch' ? 'Remote-only' : syncLabelOf(sync),
         syncChanges: sync?.changes ?? 0,
         syncGeneration: sync?.generation ?? null,
         syncPlanDigest: sync?.planDigest ?? null,
@@ -304,25 +356,30 @@ export default {
         await ctx.tool.transform((tools) => {
             tools.add({
                 name: 'fleet_status',
-                description: 'Show whether a configured Fleet host is ready, synchronized, or needs recovery.',
+                description: 'Show the effective workspace and whether a host replica is ready, synchronized, or needs recovery. Read-only: it never creates a workspace.',
                 options: { codemode: false },
-                input: schema({ host: string }, ['host']),
+                input: schema({ host: string, target }, ['host']),
                 output: output({
                     workspace: string,
+                    target: string,
                     host: string,
                     generation: { type: 'number' },
                     manifestDigest: string,
                     recovery: boolean,
                     statusLabel: string,
                     nextStep: string,
-                }, ['workspace', 'host', 'generation', 'manifestDigest', 'recovery', 'statusLabel', 'nextStep']),
+                }, ['workspace', 'target', 'host', 'generation', 'manifestDigest', 'recovery', 'statusLabel', 'nextStep']),
                 async execute(input, context) {
-                    const config = await workspaceOf(ctx, context);
+                    const selected = targetOf(input) ?? 'workspace';
+                    const config = await workspaceOfTarget(ctx, context, targetOf(input));
                     const host = hostOf(config, input);
                     const info = await withClient(host, context, (client) => status(client, config.name, host.root, context?.signal));
-                    const state = replicaState(info);
+                    const state = selected === 'scratch' && info.generation === 0 && info.recovery !== true
+                        ? { label: 'Remote-only', nextStep: 'Upload files into scratch or run a command with fleet_exec.' }
+                        : replicaState(info);
                     return jsonResult({
                         workspace: config.name,
+                        target: selected,
                         host: host.alias,
                         generation: info.generation,
                         manifestDigest: info.manifestDigest,
@@ -386,10 +443,11 @@ export default {
             });
             tools.add({
                 name: 'fleet_exec',
-                description: 'Low-level remote execution without syncing. Prefer fleet_run for normal work; use this only when the replica is intentionally current. background=true returns a jobId, ends the turn, and resumes this session automatically; it uses the detached supervisor when the OpenChamber extension service is available.',
+                description: 'Low-level remote execution without syncing. Use target="scratch" in a projectless chat. Prefer fleet_run for normal work; use this only when the replica is intentionally current. background=true returns a jobId, ends the turn, and resumes this session automatically.',
                 options: { codemode: false, permission: 'shell' },
                 input: schema({
                     host: string,
+                    target,
                     argv: { type: 'array', items: string, minItems: 1 },
                     cwd: string,
                     env: { type: 'object', additionalProperties: string },
@@ -398,6 +456,7 @@ export default {
                 }, ['host', 'argv']),
                 output: output({
                     workspace: string,
+                    target: string,
                     host: string,
                     argv: stringArray,
                     commandLabel: string,
@@ -412,14 +471,16 @@ export default {
                     signal: { type: ['number', 'null'] },
                     stdout: string,
                     stderr: string,
-                }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'supervised', 'modeLabel', 'jobId', 'state', 'stateLabel', 'exitLabel']),
+                }, ['workspace', 'target', 'host', 'argv', 'commandLabel', 'background', 'supervised', 'modeLabel', 'jobId', 'state', 'stateLabel', 'exitLabel']),
                 async execute(input, context) {
-                    const config = await workspaceOf(ctx, context);
+                    const selected = targetOf(input) ?? 'workspace';
+                    const config = await workspaceOfTarget(ctx, context, targetOf(input));
                     const host = hostOf(config, input);
                     const exec = validateExec(config, host, input);
-                    const metadata = { ...exec.metadata, background: input.background === true };
-                    await assertPermission(ctx, context, 'fleet.exec', [exec.descriptor], metadata, [exec.descriptor]);
-                    await assertShellPermission(ctx, context, exec, { background: input.background === true });
+                    const metadata = { ...exec.metadata, target: selected, background: input.background === true };
+                    const descriptor = JSON.stringify({ ...JSON.parse(exec.descriptor), target: selected });
+                    await assertPermission(ctx, context, 'fleet.exec', [descriptor], metadata, [descriptor]);
+                    await assertShellPermission(ctx, context, exec, { target: selected, background: input.background === true });
                     if (input.background === true) {
                         const record = await registry.start({
                             config,
@@ -434,6 +495,7 @@ export default {
                         });
                         return jsonResult({
                             workspace: config.name,
+                            target: selected,
                             host: host.alias,
                             argv: exec.argv,
                             commandLabel: commandLabelOf(exec.argv),
@@ -461,7 +523,7 @@ export default {
                         signal: context?.signal,
                         onProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
                     }), { closeOnAbort: false });
-                    return jsonResult(execOutput(config, host, exec.argv, false, result), {
+                    return jsonResult({ ...execOutput(config, host, exec.argv, false, result), target: selected }, {
                         host: host.alias,
                         jobId: result.jobId,
                         exitCode: result.exitCode,
@@ -471,10 +533,11 @@ export default {
             });
             tools.add({
                 name: 'fleet_run',
-                description: 'Run argv on a configured host, synchronizing the workspace first when it changed. This is the normal execution tool; the agent does not need a separate sync call. background=true returns a jobId, ends the turn, and resumes this session when the job finishes; it uses the detached supervisor when the OpenChamber extension service is available.',
+                description: 'Run argv on a host. With target="workspace" (the default in a project chat) it synchronizes the workspace first when needed. With target="scratch" it runs in a private per-session remote scratch directory without any sync; in a projectless chat without a default, target is required. background=true returns a jobId and resumes this session when the job finishes.',
                 options: { codemode: false, permission: 'shell' },
                 input: schema({
                     host: string,
+                    target,
                     tags: stringArray,
                     argv: { type: 'array', items: string, minItems: 1 },
                     cwd: string,
@@ -487,6 +550,7 @@ export default {
                 }, ['argv']),
                 output: output({
                     workspace: string,
+                    target: string,
                     host: string,
                     argv: stringArray,
                     commandLabel: string,
@@ -508,31 +572,43 @@ export default {
                     stdout: string,
                     stderr: string,
                     nextStep: string,
-                }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'supervised', 'modeLabel', 'state', 'stateLabel', 'exitCode', 'exitLabel', 'jobId', 'syncLabel', 'syncChanges', 'syncGeneration', 'syncPlanDigest', 'syncItems', 'syncTruncated', 'stdout', 'stderr', 'nextStep']),
+                }, ['workspace', 'target', 'host', 'argv', 'commandLabel', 'background', 'supervised', 'modeLabel', 'state', 'stateLabel', 'exitCode', 'exitLabel', 'jobId', 'syncLabel', 'syncChanges', 'syncGeneration', 'syncPlanDigest', 'syncItems', 'syncTruncated', 'stdout', 'stderr', 'nextStep']),
                 async execute(input, context) {
-                    const config = await workspaceOf(ctx, context);
+                    const selected = targetOf(input) ?? 'workspace';
+                    const config = await workspaceOfTarget(ctx, context, targetOf(input));
                     const host = selectHost(config, {
                         ...(typeof input.host === 'string' ? { host: input.host } : {}),
                         ...(Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {}),
                     });
                     const exec = validateExec(config, host, input);
                     const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
-                    const excludes = [...new Set([...config.excludes, ...extra])];
+                    const excludes = selected === 'scratch' ? [] : [...new Set([...config.excludes, ...extra])];
                     const syncMode = input.sync === 'never' || input.sync === 'plan' || input.sync === 'apply'
                         ? input.sync
                         : 'auto';
+                    if (selected === 'scratch' && (syncMode === 'plan' || syncMode === 'apply')) {
+                        throw new AgentError('INVALID_REQUEST', 'scratch has no source tree; sync=plan/apply requires target="workspace"');
+                    }
                     if (input.adopt === true && syncMode !== 'auto' && syncMode !== 'apply') {
                         throw new AgentError('INVALID_REQUEST', 'adopt is only valid with sync=auto or sync=apply');
                     }
                     const background = input.background === true;
                     const metadata = {
                         ...exec.metadata,
+                        target: selected,
                         sync: syncMode,
                         excludes,
                         adopt: input.adopt === true,
                         background,
                     };
-                    await assertPermission(ctx, context, 'fleet.run', [exec.descriptor], metadata, [exec.descriptor]);
+                    const descriptor = JSON.stringify({
+                        ...JSON.parse(exec.descriptor),
+                        target: selected,
+                        sync: syncMode,
+                        excludes,
+                        adopt: input.adopt === true,
+                    });
+                    await assertPermission(ctx, context, 'fleet.run', [descriptor], metadata, [descriptor]);
                     const progress = progressReporter(context);
                     const common = {
                         ...(exec.cwd === undefined ? {} : { cwd: exec.cwd }),
@@ -545,14 +621,16 @@ export default {
                         onSyncProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
                     };
                     if (background) {
-                        const prepared = await withClient(host, context, (client) => syncForRun(client, config, host, {
-                            ...common,
-                            argv: exec.argv,
-                        }), { closeOnAbort: false });
+                        await assertShellPermission(ctx, context, exec, { target: selected, background: true, sync: syncMode, excludes });
+                        const prepared = selected === 'scratch'
+                            ? { sync: null, required: false }
+                            : await withClient(host, context, (client) => syncForRun(client, config, host, {
+                                ...common,
+                                argv: exec.argv,
+                            }), { closeOnAbort: false });
                         if (prepared.required) {
-                            return jsonResult(runOutput(config, host, exec.argv, true, 'sync-required', prepared.sync, null, ''));
+                            return jsonResult(runOutput(config, host, exec.argv, true, 'sync-required', prepared.sync, null, '', false, selected));
                         }
-                        await assertShellPermission(ctx, context, exec, { background: true, sync: syncMode });
                         const record = await registry.start({
                             config,
                             host,
@@ -561,25 +639,39 @@ export default {
                             cwd: exec.cwd,
                             env: exec.env,
                             timeoutMs: exec.timeoutMs,
+                            ...(typeof prepared.sync?.generation === 'number' ? { expectedGeneration: prepared.sync.generation } : {}),
                             startupSignal: context?.signal,
                             agentPath: agentPath(),
                         });
-                        return jsonResult(runOutput(config, host, exec.argv, true, record.state, prepared.sync, null, record.jobId, record.supervised === true), {
+                        return jsonResult(runOutput(config, host, exec.argv, true, record.state, prepared.sync, null, record.jobId, record.supervised === true, selected), {
                             host: host.alias,
+                            target: selected,
                             jobId: record.jobId,
                             background: true,
                             supervised: record.supervised === true,
                             state: record.state,
                         });
                     }
-                    const result = await withClient(host, context, (client) => runWorkspace(client, config, host, {
-                        ...common,
-                        argv: exec.argv,
-                        onExecProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
-                        beforeExec: () => assertShellPermission(ctx, context, exec, { background: false, sync: syncMode }),
-                    }), { closeOnAbort: false });
-                    return jsonResult(runOutput(config, host, exec.argv, false, result.state, result.sync, result.exec, result.exec?.jobId ?? ''), {
+                    await assertShellPermission(ctx, context, exec, { target: selected, background: false, sync: syncMode, excludes });
+                    const result = selected === 'scratch'
+                        ? await withClient(host, context, (client) => execCommand(client, {
+                            workspaceId: config.name,
+                            root: host.root,
+                            argv: exec.argv,
+                            cwd: exec.cwd,
+                            env: exec.env,
+                            timeoutMs: exec.timeoutMs,
+                            signal: context?.signal,
+                            onProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
+                        }), { closeOnAbort: false }).then((exec) => ({ state: exec.state, sync: null, exec }))
+                        : await withClient(host, context, (client) => runWorkspace(client, config, host, {
+                            ...common,
+                            argv: exec.argv,
+                            onExecProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
+                        }), { closeOnAbort: false });
+                    return jsonResult(runOutput(config, host, exec.argv, false, result.state, result.sync, result.exec, result.exec?.jobId ?? '', false, selected), {
                         host: host.alias,
+                        target: selected,
                         state: result.state,
                         changes: result.sync?.changes ?? 0,
                     });
@@ -587,17 +679,21 @@ export default {
             });
             tools.add({
                 name: 'fleet_hosts',
-                description: 'List configured hosts and their tags. Use it to choose a host or pass tags to fleet_run/host=auto.',
+                description: 'List configured hosts and their tags. Use it to choose a host or pass tags to fleet_run/host=auto. In a projectless chat this also works without a workspace; target="scratch" lists the global registry.',
                 options: { codemode: false },
-                input: schema({ tags: stringArray }),
+                input: schema({ tags: stringArray, target }),
                 output: output({
                     workspace: string,
+                    target: string,
                     hosts: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string }, ['alias', 'tags', 'tagsLabel']) },
                     items: { type: 'array', items: schema({ alias: string, tags: stringArray, tagsLabel: string }, ['alias', 'tags', 'tagsLabel']) },
                     selected: { type: ['string', 'null'] },
-                }, ['workspace', 'hosts', 'items', 'selected']),
+                }, ['workspace', 'target', 'hosts', 'items', 'selected']),
                 async execute(input, context) {
-                    const config = await hostsWorkspaceOf(ctx, context);
+                    const selectedTarget = targetOf(input);
+                    const config = selectedTarget === 'scratch'
+                        ? await workspaceOfTarget(ctx, context, 'scratch')
+                        : await hostsWorkspaceOf(ctx, context);
                     const views = hostViews(config);
                     let selected = null;
                     if (Array.isArray(input.tags) && input.tags.length > 0) {
@@ -608,7 +704,7 @@ export default {
                             selected = null;
                         }
                     }
-                    return jsonResult({ workspace: config.name, hosts: views, items: views, selected });
+                    return jsonResult({ workspace: config.name, target: selectedTarget ?? 'workspace', hosts: views, items: views, selected });
                 },
             });
             tools.add({
@@ -637,7 +733,7 @@ export default {
                         }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
                 }, ['jobs', 'items']),
                 async execute(_input, context) {
-                    const jobs = await registry.list(sessionIDOf(context), ctx.location?.directory);
+                    const jobs = await registry.list(sessionIDOf(context));
                     const rows = jobs.map((record) => ({
                         jobId: record.jobId,
                         host: record.host,
@@ -652,25 +748,28 @@ export default {
             });
             tools.add({
                 name: 'fleet_fetch',
-                description: 'Copy one named artifact from the replica to a local directory, verifying its digest before writing.',
+                description: 'Copy one artifact from the selected workspace or scratch space to a local directory, verifying its digest before writing. For arbitrary single files use fleet_download.',
                 options: { codemode: false, permission: 'edit' },
                 input: schema({
                     host: string,
+                    target,
                     artifact: string,
                     dest: string,
                     overwrite: boolean,
                 }, ['host', 'artifact', 'dest']),
                 output: output({
                     workspace: string,
+                    target: string,
                     host: string,
                     artifact: string,
                     file: string,
                     bytes: { type: 'number' },
                     digest: string,
                     statusLabel: string,
-                }, ['workspace', 'host', 'artifact', 'file', 'bytes', 'digest', 'statusLabel']),
+                }, ['workspace', 'target', 'host', 'artifact', 'file', 'bytes', 'digest', 'statusLabel']),
                 async execute(input, context) {
-                    const config = await workspaceOf(ctx, context);
+                    const selected = targetOf(input) ?? 'workspace';
+                    const config = await workspaceOfTarget(ctx, context, targetOf(input));
                     const host = hostOf(config, input);
                     if (typeof input.artifact !== 'string' || typeof input.dest !== 'string') {
                         throw new AgentError('INVALID_REQUEST', 'artifact and dest are required');
@@ -680,37 +779,184 @@ export default {
                     const target = canonicalArtifactTarget(dest, artifact);
                     await assertPermission(ctx, context, 'edit', [target], {
                         workspace: config.name,
+                        target: selected,
                         host: host.alias,
                         artifact,
-                        target,
+                        destination: target,
                     }, [`${path.dirname(target)}/*`]);
                     const relative = path.relative(config.dir, target);
                     if (relative.startsWith('..') || path.isAbsolute(relative)) {
                         await assertPermission(ctx, context, 'external_directory', [`${path.dirname(target)}/*`], {
                             workspace: config.name,
+                            target: selected,
                             host: host.alias,
-                            target,
+                            destination: target,
                         }, [`${path.dirname(target)}/*`]);
                     }
                     const progress = progressReporter(context);
-                    const result = await withClient(host, context, (client) => fetchArtifact(client, {
+                    const result = await withClient(host, context, (client) => downloadFile(client, {
                         workspaceId: config.name,
                         root: host.root,
-                        artifact,
-                        dest,
+                        path: artifact,
+                        dest: target,
                         overwrite: input.overwrite === true,
-                        expectedTarget: target,
                         signal: context?.signal,
                         onProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
                     }));
-                    return jsonResult({ workspace: config.name, host: host.alias, artifact, statusLabel: 'Verified', ...result });
+                    return jsonResult({ workspace: config.name, target: selected, host: host.alias, artifact, statusLabel: 'Verified', ...result });
+                },
+            });
+            tools.add({
+                name: 'fleet_upload',
+                description: 'Upload one local regular file into the session scratch space on a host. Use this for files outside the workspace, such as /tmp artifacts. It never needs a project config and never syncs a workspace.',
+                options: { codemode: false, permission: 'fleet.upload' },
+                input: schema({
+                    host: string,
+                    localPath: string,
+                    remotePath: string,
+                    overwrite: boolean,
+                }, ['host', 'localPath', 'remotePath']),
+                output: output({
+                    workspace: string,
+                    target: string,
+                    host: string,
+                    source: string,
+                    destination: string,
+                    bytes: { type: 'number' },
+                    digest: string,
+                    statusLabel: string,
+                }, ['workspace', 'target', 'host', 'source', 'destination', 'bytes', 'digest', 'statusLabel']),
+                async execute(input, context) {
+                    if (typeof input.localPath !== 'string' || typeof input.remotePath !== 'string') {
+                        throw new AgentError('INVALID_REQUEST', 'localPath and remotePath are required');
+                    }
+                    const config = await workspaceOfTarget(ctx, context, 'scratch');
+                    const host = hostOf(config, input);
+                    const source = path.resolve(config.dir, input.localPath);
+                    let remotePath;
+                    try {
+                        remotePath = assertRelativePath(input.remotePath);
+                    }
+                    catch (error) {
+                        throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
+                    }
+                    await assertPermission(ctx, context, 'fleet.upload', [`${host.alias}:${source}->${remotePath}`], {
+                        workspace: config.name,
+                        target: 'scratch',
+                        host: host.alias,
+                        source,
+                        destination: remotePath,
+                    });
+                    const relative = path.relative(config.dir, source);
+                    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+                        await assertPermission(ctx, context, 'external_directory', [`${path.dirname(source)}/*`], {
+                            workspace: config.name,
+                            target: 'scratch',
+                            host: host.alias,
+                            source,
+                        });
+                    }
+                    const progress = progressReporter(context);
+                    const result = await withClient(host, context, (client) => uploadFile(client, {
+                        workspaceId: config.name,
+                        root: host.root,
+                        path: remotePath,
+                        source,
+                        overwrite: input.overwrite === true,
+                        signal: context?.signal,
+                        onProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
+                    }));
+                    return jsonResult({
+                        workspace: config.name,
+                        target: 'scratch',
+                        host: host.alias,
+                        source,
+                        destination: remotePath,
+                        bytes: result.bytes,
+                        digest: result.digest,
+                        statusLabel: 'Verified',
+                    }, { host: host.alias, bytes: result.bytes, digest: result.digest });
+                },
+            });
+            tools.add({
+                name: 'fleet_download',
+                description: 'Download one regular file from the selected workspace or session scratch space to a local path. Use this for remote files outside the workspace, such as /tmp logs and generated artifacts.',
+                options: { codemode: false, permission: 'edit' },
+                input: schema({
+                    host: string,
+                    target,
+                    remotePath: string,
+                    localPath: string,
+                    overwrite: boolean,
+                }, ['host', 'remotePath', 'localPath']),
+                output: output({
+                    workspace: string,
+                    target: string,
+                    host: string,
+                    source: string,
+                    file: string,
+                    bytes: { type: 'number' },
+                    digest: string,
+                    statusLabel: string,
+                }, ['workspace', 'target', 'host', 'source', 'file', 'bytes', 'digest', 'statusLabel']),
+                async execute(input, context) {
+                    if (typeof input.remotePath !== 'string' || typeof input.localPath !== 'string') {
+                        throw new AgentError('INVALID_REQUEST', 'remotePath and localPath are required');
+                    }
+                    const selected = targetOf(input) ?? 'workspace';
+                    const config = await workspaceOfTarget(ctx, context, targetOf(input));
+                    const host = hostOf(config, input);
+                    let remotePath;
+                    try {
+                        remotePath = assertRelativePath(input.remotePath);
+                    }
+                    catch (error) {
+                        throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
+                    }
+                    const destination = path.resolve(config.dir, input.localPath);
+                    await assertPermission(ctx, context, 'fleet.download', [`${host.alias}:${remotePath}->${destination}`], {
+                        workspace: config.name,
+                        target: selected,
+                        host: host.alias,
+                        source: remotePath,
+                        destination,
+                    });
+                    const relative = path.relative(config.dir, destination);
+                    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+                        await assertPermission(ctx, context, 'external_directory', [`${path.dirname(destination)}/*`], {
+                            workspace: config.name,
+                            target: selected,
+                            host: host.alias,
+                            destination,
+                        });
+                    }
+                    const progress = progressReporter(context);
+                    const result = await withClient(host, context, (client) => downloadFile(client, {
+                        workspaceId: config.name,
+                        root: host.root,
+                        path: remotePath,
+                        dest: destination,
+                        overwrite: input.overwrite === true,
+                        signal: context?.signal,
+                        onProgress: (update) => progress({ ...update, workspace: config.name, host: host.alias }),
+                    }));
+                    return jsonResult({
+                        workspace: config.name,
+                        target: selected,
+                        host: host.alias,
+                        source: remotePath,
+                        file: result.file,
+                        bytes: result.bytes,
+                        digest: result.digest,
+                        statusLabel: 'Verified',
+                    }, { host: host.alias, bytes: result.bytes, digest: result.digest });
                 },
             });
             tools.add({
                 name: 'fleet_job_status',
                 description: 'Show the state and bounded output tail of a background Fleet job.',
                 options: { codemode: false },
-                input: schema({ host: string, jobId: string }, ['host', 'jobId']),
+                input: schema({ host: string, jobId: string }, ['jobId']),
                 output: output({
                     workspace: string, host: string, jobId: string, state: string, stateLabel: string,
                     runLabel: string, supervised: boolean,
@@ -720,18 +966,19 @@ export default {
                     stdoutTail: string, stderrTail: string, error: { type: ['string', 'null'] },
                 }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'runLabel', 'supervised', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
                 async execute(input, context) {
-                    const config = await workspaceOf(ctx, context);
-                    const host = hostOf(config, input);
                     if (typeof input.jobId !== 'string')
                         throw new AgentError('INVALID_REQUEST', 'jobId is required');
-                    return jsonResult(storedJobOutput(await registry.status(config, host.alias, input.jobId, sessionIDOf(context))));
+                    const job = await registry.status(input.jobId, sessionIDOf(context));
+                    if (!job)
+                        throw new AgentError('JOB_NOT_FOUND', `unknown job ${input.jobId}`);
+                    return jsonResult(storedJobOutput(job));
                 },
             });
             tools.add({
                 name: 'fleet_job_cancel',
-                description: 'Request cancellation of a background Fleet job. The final state reports the real outcome.',
+                description: 'Request cancellation of a background Fleet job by id. The final state reports the real outcome.',
                 options: { codemode: false, permission: 'fleet.job.cancel' },
-                input: schema({ host: string, jobId: string }, ['host', 'jobId']),
+                input: schema({ host: string, jobId: string }, ['jobId']),
                 output: output({
                     workspace: string, host: string, jobId: string, state: string, stateLabel: string,
                     runLabel: string, supervised: boolean,
@@ -741,16 +988,20 @@ export default {
                     stdoutTail: string, stderrTail: string, error: { type: ['string', 'null'] },
                 }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'runLabel', 'supervised', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
                 async execute(input, context) {
-                    const config = await workspaceOf(ctx, context);
-                    const host = hostOf(config, input);
                     if (typeof input.jobId !== 'string')
                         throw new AgentError('INVALID_REQUEST', 'jobId is required');
-                    await assertPermission(ctx, context, 'fleet.job.cancel', [`${config.name}@${host.alias}:${input.jobId}`], {
-                        workspace: config.name,
-                        host: host.alias,
+                    const job = await registry.status(input.jobId, sessionIDOf(context));
+                    if (!job)
+                        throw new AgentError('JOB_NOT_FOUND', `unknown job ${input.jobId}`);
+                    await assertPermission(ctx, context, 'fleet.job.cancel', [`${job.workspace}@${job.host}:${input.jobId}`], {
+                        workspace: job.workspace,
+                        host: job.host,
                         jobId: input.jobId,
                     });
-                    return jsonResult(storedJobOutput(await registry.cancel(config, host.alias, input.jobId, sessionIDOf(context))));
+                    const cancelled = await registry.cancel(input.jobId, sessionIDOf(context));
+                    if (!cancelled)
+                        throw new AgentError('JOB_NOT_FOUND', `unknown job ${input.jobId}`);
+                    return jsonResult(storedJobOutput(cancelled));
                 },
             });
             tools.add({

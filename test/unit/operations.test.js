@@ -35,10 +35,12 @@ describe('sync cancellation cleanup', () => {
     const begin = new Promise((resolve) => { beginResolve = resolve; });
     const calls = [];
     const client = {
+      info: { capabilities: { 'workspace.probe': 1 } },
       request: async (method, params) => {
         calls.push([method, params]);
+        if (method === 'workspace.probe') return { state: 'READY', generation: 1, manifestDigest: 'sha256:x', recovery: false, root: '/replica' };
         if (method === 'workspace.open') return { generation: 1, manifestDigest: 'sha256:x', recovery: false };
-        if (method === 'workspace.lease') return { leaseId: 'lease' };
+        if (method === 'workspace.lease') return { leaseId: 'lease', generation: 1 };
         if (method === 'sync.begin') return begin;
         if (method === 'sync.abort') return { ok: true };
         if (method === 'workspace.release') return { ok: true };
@@ -65,6 +67,31 @@ describe('sync cancellation cleanup', () => {
   });
 });
 
+describe('read-only planning', () => {
+  test('plan on an absent replica probes and refuses without provisioning', async () => {
+    const calls = [];
+    const client = {
+      info: { capabilities: { 'workspace.probe': 1 } },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === 'workspace.probe') {
+          return { state: 'ABSENT', generation: 0, manifestDigest: '', recovery: false, root: '/replica' };
+        }
+        throw new Error(`unexpected ${method}`);
+      },
+      close: () => {},
+    };
+    await assert.rejects(syncWorkspace(client, { matches: () => false }, {
+      workspaceId: 'absent-plan',
+      source: base,
+      root: '/replica',
+      excludes: [],
+      mode: 'plan',
+    }), /does not exist yet/);
+    assert.deepEqual(calls.map(([method]) => method), ['workspace.probe']);
+  });
+});
+
 describe('exec failure cleanup', () => {
   test('a stream failure cancels the remote job before releasing the lease', async () => {
     const calls = [];
@@ -72,8 +99,9 @@ describe('exec failure cleanup', () => {
       closed: false,
       request: async (method, params) => {
         calls.push(method);
+        if (method === 'workspace.probe') return { state: 'READY', generation: 1, manifestDigest: 'sha256:x', recovery: false, root: '/replica' };
         if (method === 'workspace.open') return { generation: 1, manifestDigest: 'sha256:x', recovery: false };
-        if (method === 'workspace.lease') return { leaseId: 'lease' };
+        if (method === 'workspace.lease') return { leaseId: 'lease', generation: 1 };
         if (method === 'exec.start') return { jobId: 'job-1', stdoutStream: 1, stderrStream: 2 };
         if (method === 'exec.cancel') {
           assert.equal(client.closed, false);

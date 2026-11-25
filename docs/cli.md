@@ -10,9 +10,11 @@ fleet status --host <alias> [--json]
 fleet recover --host <alias> [--abort] [--json]
 fleet sync --host <alias> (--plan | --apply) [--exclude pat,pat] [--adopt]
 fleet run [--host <alias|auto>] [--tag a,b] [--cwd PATH] [--env K=V,...] [--timeout SEC]
-          [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--json] -- <command…>
-fleet exec --host <alias> [--cwd PATH] [--env K=V,...] [--timeout SEC] [--json] -- <command…>
-fleet fetch --host <alias> --dest <dir> [--overwrite] -- <path>
+          [--sync auto|never|plan|apply] [--exclude pat,pat] [--adopt] [--scratch] [--json] -- <command…>
+fleet exec --host <alias> [--cwd PATH] [--env K=V,...] [--timeout SEC] [--scratch] [--json] -- <command…>
+fleet fetch --host <alias> --dest <dir> [--overwrite] [--scratch] -- <path>
+fleet upload <local-path> --host <alias> --to <remote-path> [--overwrite]
+fleet download <remote-path> --host <alias> --dest <local-path> [--scratch] [--overwrite]
 ```
 
 Every command opens one SSH session, performs one operation and closes it. `FLEET_AGENT_PATH`
@@ -44,6 +46,15 @@ sync summary. `fleet exec` remains the raw no-sync variant.
 
 `fleet run --host auto --tag linux -- cargo test` selects the first configured host carrying every
 requested tag. The selection is an agent decision; there is no UI sync switch.
+
+`--scratch` selects a private remote-only session space. It has no source and no sync; `run`,
+`exec`, `fetch`, `status` and `hosts` accept it. Uploads always land in scratch. A download with
+`--scratch` reads that space; without it, the project replica is used. Transfers handle one regular
+file, verify a SHA-256 digest, stream without loading the file into memory and refuse to overwrite
+unless `--overwrite` is given.
+
+`fleet sync --plan`, `fleet status` and `fleet fetch` are read-only: they never create a replica
+root or a state entry on the host.
 
 ## Exit codes
 

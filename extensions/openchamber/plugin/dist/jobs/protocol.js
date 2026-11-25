@@ -100,6 +100,7 @@ export function isStartRequest(value) {
         && (value.cwd === undefined || typeof value.cwd === 'string')
         && isEnv(value.env)
         && (value.timeoutMs === undefined || (isInteger(value.timeoutMs) && value.timeoutMs > 0))
+        && (value.expectedGeneration === undefined || isInteger(value.expectedGeneration))
         && isNonEmptyString(value.agentPath)
         && (value.sshPath === undefined || isNonEmptyString(value.sshPath))
         && (value.sshEnv === undefined || isEnv(value.sshEnv))

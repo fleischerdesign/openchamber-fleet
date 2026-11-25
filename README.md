@@ -63,12 +63,19 @@ fleet run --host workstation -- cargo test --all-features
 fleet run --host auto --tag linux -- cargo test --all-features
 fleet sync --host workstation --plan
 fleet fetch --host workstation --dest ./out -- target/release/app
+
+# projectless: explicit scratch, no project config
+fleet run --scratch --host workstation -- uname -a
+fleet upload ./report.md --host workstation --to report.md
+fleet download report.json --host workstation --dest ./report.json --scratch
 ```
 
 `fleet run` synchronizes first (default `--sync auto`), then executes. `fleet exec` is the low-level
-variant when the replica is intentionally current. The agent-facing tools are `fleet_run`,
-`fleet_sync`, `fleet_exec`, `fleet_fetch`, `fleet_hosts`, `fleet_status`, `fleet_jobs`,
-`fleet_job_status`, `fleet_job_cancel` and `fleet_recover`.
+variant when the replica is intentionally current. `--scratch` selects a private per-session remote
+space without a source tree or manifest. Uploads go only into scratch; downloads can read scratch or
+the replica. The agent-facing tools are `fleet_run`, `fleet_sync`, `fleet_exec`, `fleet_fetch`,
+`fleet_upload`, `fleet_download`, `fleet_hosts`, `fleet_status`, `fleet_jobs`, `fleet_job_status`,
+`fleet_job_cancel` and `fleet_recover`.
 
 ### Nix (optional)
 

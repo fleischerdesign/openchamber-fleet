@@ -1,6 +1,5 @@
 /** The plugin half of detached jobs: write requests, read records, notify, cancel. */
 
-import type { WorkspaceConfig } from '../config.js';
 import { JobStore } from '../jobs/store.js';
 import { readHealthySupervisor } from '../jobs/health.js';
 import { readRuntimePointer, resolveStateRoot } from '../jobs/paths.js';
@@ -107,6 +106,7 @@ export class SupervisedJobRegistry {
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       env: input.env ?? {},
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
       agentPath: input.agentPath,
       ...(process.env.FLEET_SSH_PATH ? { sshPath: process.env.FLEET_SSH_PATH } : {}),
       ...(Object.keys(sshEnv).length === 0 ? {} : { sshEnv }),
@@ -164,16 +164,15 @@ export class SupervisedJobRegistry {
     throw new AgentError('SUPERVISOR_UNAVAILABLE', 'the detached supervisor claimed the job but wrote no record');
   }
 
-  async status(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob | null> {
+  async status(jobId: string, sessionID: string): Promise<StoredJob | null> {
     const record = this.store.readJob(jobId);
     if (!record) return null;
-    if (record.workspace !== config.name || record.host.alias !== host) return null;
     if (record.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
     if (!isTerminal(record.state)) this.watch(jobId);
     return this.stored(record);
   }
 
-  async list(sessionID: string, directory?: string): Promise<StoredJob[]> {
+  async list(sessionID: string): Promise<StoredJob[]> {
     let jobs: JobRecord[];
     try {
       jobs = this.store.listJobs();
@@ -181,14 +180,14 @@ export class SupervisedJobRegistry {
       return [];
     }
     return jobs
-      .filter((record) => record.sessionID === sessionID && (!directory || record.directory === directory))
+      .filter((record) => record.sessionID === sessionID)
       .map((record) => this.stored(record))
       .slice(0, 50);
   }
 
-  async cancel(config: WorkspaceConfig, host: string, jobId: string, sessionID: string): Promise<StoredJob | null> {
+  async cancel(jobId: string, sessionID: string): Promise<StoredJob | null> {
     const record = this.store.readJob(jobId);
-    if (!record || record.workspace !== config.name || record.host.alias !== host) return null;
+    if (!record) return null;
     if (record.sessionID !== sessionID) throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
     if (isTerminal(record.state)) return this.stored(record);
 

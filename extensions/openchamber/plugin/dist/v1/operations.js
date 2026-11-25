@@ -20,6 +20,11 @@ export function connectProcess(command, args = ['stdio']) {
         capabilities: ['workspace.sync@1', 'exec@1', 'artifact@1'],
     });
 }
+function requireCapability(client, name) {
+    if (client.info.capabilities[name] !== 1) {
+        throw new AgentError('UNSUPPORTED_CAPABILITY', `agent does not provide ${name}; update fleet-agent`);
+    }
+}
 function operationId() {
     return crypto.randomBytes(6).toString('hex');
 }
@@ -60,11 +65,24 @@ export async function openWorkspace(client, workspaceId, root, adopt = false, si
     throwIfAborted(signal);
     return result;
 }
-export async function status(client, workspaceId, root, signal) {
-    await openWorkspace(client, workspaceId, root, false, signal);
-    const result = (await client.request('workspace.status', { workspaceId }));
+/** Inspect a workspace without provisioning its root or state. */
+export async function probeWorkspace(client, workspaceId, root, signal) {
+    throwIfAborted(signal);
+    requireCapability(client, 'workspace.probe');
+    const result = (await client.request('workspace.probe', { workspaceId, root }));
     throwIfAborted(signal);
     return result;
+}
+export async function status(client, workspaceId, root, signal) {
+    const probe = await probeWorkspace(client, workspaceId, root, signal);
+    if (probe.state === 'READY' || probe.state === 'RECOVERY') {
+        return {
+            generation: probe.generation,
+            manifestDigest: probe.manifestDigest,
+            recovery: probe.recovery,
+        };
+    }
+    return { generation: 0, manifestDigest: '', recovery: false };
 }
 async function fetchPlanPages(client, txnId, kind, signal) {
     const items = [];
@@ -84,6 +102,19 @@ export async function syncWorkspace(client, matcher, options) {
         throw new AgentError('INVALID_REQUEST', 'adopt is only valid with mode=apply');
     }
     throwIfAborted(options.signal);
+    if (options.mode === 'plan') {
+        const probe = await probeWorkspace(client, options.workspaceId, options.root, options.signal);
+        if (probe.state !== 'READY') {
+            if (probe.state === 'UNMANAGED') {
+                throw new AgentError('WORKSPACE_UNMANAGED', 'the replica exists but is not managed; apply with adopt=true to take it over', false, {
+                    state: probe.state,
+                });
+            }
+            throw new AgentError('WORKSPACE_ABSENT', 'the replica does not exist yet; apply the first sync to create it', false, {
+                state: probe.state,
+            });
+        }
+    }
     await report(options.onProgress, { phase: 'scanning' });
     const scanned = await scanWorkspace(options.source, matcher);
     throwIfAborted(options.signal);
@@ -101,7 +132,11 @@ export async function syncWorkspace(client, matcher, options) {
     }
     throwIfAborted(options.signal);
     const lease = operationId();
-    await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
+    const leaseInfo = (await client.request('workspace.lease', {
+        workspaceId: options.workspaceId,
+        operationId: lease,
+        ttlMs: 600_000,
+    }));
     let txnId;
     let beginPromise;
     const onAbort = () => {
@@ -141,7 +176,7 @@ export async function syncWorkspace(client, matcher, options) {
         beginPromise = client.request('sync.begin', {
             workspaceId: options.workspaceId,
             leaseId: lease,
-            baseGeneration: workspace.generation,
+            baseGeneration: leaseInfo.generation,
             policy: { excludes: options.excludes, preserve: [], deleteManaged: true },
         });
         const begin = await beginPromise;
@@ -247,16 +282,20 @@ export async function startExecCommand(client, options) {
     await report(options.onProgress, {
         phase: 'starting', stdoutBytes: 0, stderrBytes: 0, stdoutTail: '', stderrTail: '',
     });
-    const workspace = await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
+    await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
     const lease = operationId();
-    await client.request('workspace.lease', { workspaceId: options.workspaceId, operationId: lease, ttlMs: 600_000 });
+    const leaseInfo = (await client.request('workspace.lease', {
+        workspaceId: options.workspaceId,
+        operationId: lease,
+        ttlMs: 600_000,
+    }));
     let start;
     try {
         throwIfAborted(options.signal);
         start = (await client.request('exec.start', {
             workspaceId: options.workspaceId,
             leaseId: lease,
-            expectedGeneration: workspace.generation,
+            expectedGeneration: options.expectedGeneration ?? leaseInfo.generation,
             argv: options.argv,
             cwd: options.cwd,
             env: options.env ?? {},
@@ -381,6 +420,111 @@ export async function execCommand(client, options) {
     const result = await handle.result;
     throwIfAborted(options.signal);
     return result;
+}
+/** Resolve a local write target and reject symlinks on the destination or its parent. */
+export function canonicalTransferTarget(file) {
+    const absolute = path.resolve(file);
+    const target = canonicalArtifactTarget(path.dirname(absolute), path.basename(absolute));
+    try {
+        if (fs.lstatSync(target).isSymbolicLink()) {
+            throw new AgentError('PATH_UNSAFE', `destination ${target} is a symlink`);
+        }
+    }
+    catch (error) {
+        if (error.code !== 'ENOENT')
+            throw error;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    return target;
+}
+export async function uploadFile(client, options) {
+    throwIfAborted(options.signal);
+    requireCapability(client, 'transfer');
+    let metadata;
+    try {
+        metadata = fs.lstatSync(options.source);
+    }
+    catch {
+        throw new AgentError('NOT_FOUND', `local file ${options.source} does not exist`);
+    }
+    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new AgentError('PATH_UNSAFE', `local file ${options.source} must be a regular file`);
+    }
+    const digest = await sha256File(options.source);
+    throwIfAborted(options.signal);
+    await report(options.onProgress, { phase: 'opening', bytes: 0 });
+    await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
+    const put = (await client.request('transfer.put', {
+        workspaceId: options.workspaceId,
+        path: options.path,
+        size: metadata.size,
+        digest,
+        overwrite: options.overwrite === true,
+    }));
+    await report(options.onProgress, { phase: 'uploading', bytes: 0, digest });
+    await client.uploadFile(put.streamId, options.source);
+    await report(options.onProgress, { phase: 'done', bytes: metadata.size, digest });
+    return { bytes: metadata.size, digest, file: options.path };
+}
+export async function downloadFile(client, options) {
+    throwIfAborted(options.signal);
+    requireCapability(client, 'transfer');
+    const target = canonicalTransferTarget(options.dest);
+    if (fs.existsSync(target) && options.overwrite !== true) {
+        throw new AgentError('DEST_EXISTS', `${target} exists; pass overwrite`);
+    }
+    const probe = await probeWorkspace(client, options.workspaceId, options.root, options.signal);
+    if (probe.state !== 'READY') {
+        throw new AgentError('WORKSPACE_ABSENT', 'the source workspace does not exist on this host yet', false, {
+            state: probe.state,
+        });
+    }
+    await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
+    const parent = path.dirname(target);
+    const temporary = path.join(parent, `.fleet-download-${process.pid}-${Date.now()}`);
+    await report(options.onProgress, { phase: 'opening', bytes: 0 });
+    const opened = (await client.request('transfer.get', {
+        workspaceId: options.workspaceId,
+        path: options.path,
+    }));
+    throwIfAborted(options.signal);
+    await report(options.onProgress, { phase: 'downloading', bytes: 0, digest: opened.digest });
+    try {
+        await client.collectToFile(opened.streamId, temporary, {
+            initialCredit: 8 * 1024 * 1024,
+            timeoutMs: 300_000,
+        });
+        throwIfAborted(options.signal);
+        const digest = await sha256File(temporary);
+        const size = fs.statSync(temporary).size;
+        if (size !== opened.size || digest !== opened.digest) {
+            throw new AgentError('BLOB_CORRUPT', `download verification failed for ${options.path}`);
+        }
+        await report(options.onProgress, { phase: 'writing', bytes: size, digest });
+        if (options.overwrite === true) {
+            fs.renameSync(temporary, target);
+        }
+        else {
+            try {
+                fs.linkSync(temporary, target);
+            }
+            catch (error) {
+                if (error.code === 'EEXIST') {
+                    throw new AgentError('DEST_EXISTS', `${target} exists; pass overwrite`);
+                }
+                throw error;
+            }
+            fs.unlinkSync(temporary);
+        }
+        await report(options.onProgress, { phase: 'done', bytes: size, digest });
+        return { bytes: size, digest, file: target };
+    }
+    finally {
+        try {
+            fs.rmSync(temporary, { force: true });
+        }
+        catch { /* already published */ }
+    }
 }
 export function artifactTarget(dest, artifact) {
     return path.resolve(dest, path.basename(artifact));

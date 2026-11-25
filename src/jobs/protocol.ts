@@ -79,6 +79,8 @@ export interface StartRequest {
   readonly cwd?: string;
   readonly env: Record<string, string>;
   readonly timeoutMs?: number;
+  /** Replica generation the caller synchronized against. */
+  readonly expectedGeneration?: number;
   readonly agentPath: string;
   readonly sshPath?: string;
   readonly sshEnv?: Record<string, string>;
@@ -210,6 +212,7 @@ export function isStartRequest(value: unknown): value is StartRequest {
     && (value.cwd === undefined || typeof value.cwd === 'string')
     && isEnv(value.env)
     && (value.timeoutMs === undefined || (isInteger(value.timeoutMs) && value.timeoutMs > 0))
+    && (value.expectedGeneration === undefined || isInteger(value.expectedGeneration))
     && isNonEmptyString(value.agentPath)
     && (value.sshPath === undefined || isNonEmptyString(value.sshPath))
     && (value.sshEnv === undefined || isEnv(value.sshEnv))

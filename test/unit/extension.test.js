@@ -21,6 +21,7 @@ describe('OpenChamber extension package', () => {
     assert.equal(parsed.manifest.contributes.panel.icon, 'server');
     assert.equal(parsed.manifest.engines.openchamber, '>=2.8.0');
     assert.deepEqual(parsed.manifest.contributes.tools.map((tool) => tool.match).sort(), [
+      'fleet_download',
       'fleet_exec',
       'fleet_fetch',
       'fleet_hosts',
@@ -31,6 +32,7 @@ describe('OpenChamber extension package', () => {
       'fleet_run',
       'fleet_status',
       'fleet_sync',
+      'fleet_upload',
     ]);
     assert.equal(parsed.manifest.contributes.opencodePlugin, 'plugin');
     assert.equal(parsed.manifest.contributes.service.entry, 'service/main.js');
@@ -50,7 +52,7 @@ describe('OpenChamber extension package', () => {
       session: { get: async () => ({ location: { directory: process.cwd() } }), synthetic: async () => ({}) },
     });
     try {
-      assert.equal(tools.length, 10);
+      assert.equal(tools.length, 12);
       assert.ok(tools.some((tool) => tool.name === 'fleet_exec' && tool.output));
     } finally {
       await cleanup();
