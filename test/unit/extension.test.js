@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { parseManifestJson } from '@openchamber/sdk/schemas';
@@ -36,9 +37,12 @@ describe('OpenChamber extension package', () => {
     assert.equal(parsed.manifest.contributes.statusSection.source.path, '/status-view');
   });
 
-  test('ships built panel, service and a loadable dependency-free OpenCode plugin', async () => {
+  test('ships built panel, service, supervisor and a loadable dependency-free OpenCode plugin', async () => {
     assert.ok(fs.statSync(path.join(root, 'panel/main.js')).size > 1000);
     assert.ok(fs.statSync(path.join(root, 'service/main.js')).size > 1000);
+    assert.ok(fs.statSync(path.join(root, 'supervisor/main.js')).size > 1000);
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-extension-state-'));
+    process.env.FLEET_STATE_DIR = stateDir;
     const tools = [];
     const cleanup = await extensionPlugin.setup({
       location: { directory: process.cwd() },
@@ -50,6 +54,8 @@ describe('OpenChamber extension package', () => {
       assert.ok(tools.some((tool) => tool.name === 'fleet_exec' && tool.output));
     } finally {
       await cleanup();
+      delete process.env.FLEET_STATE_DIR;
+      fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
 });

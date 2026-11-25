@@ -50,7 +50,7 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | EXEC-04 | Cancel terminates the process group | `exec::tests::cancel_terminates_the_process_group` |
 | EXEC-05 | The caller environment is not inherited | planned (explicit env test) |
 | EXEC-06 | Output is credit-controlled with a bounded spool | `session` pump test |
-| EXEC-07 | A connection loss cancels its jobs | planned (failure suite) |
+| EXEC-07 | A connection loss cancels its jobs | `test/v1/protocol.test.js` |
 | EXEC-08 | A crash leaves `unknown`, never a guessed outcome | planned (failure suite) |
 
 ## Artifacts
@@ -69,6 +69,18 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | CTL-02 | The controller scans the source, never the replica | `test/v1/protocol.test.js` |
 | CTL-03 | SSH argv is fixed and the agent path is validated | planned (unit) |
 | CTL-04 | Sync, exec and fetch work against the real agent | `test/v1/protocol.test.js` |
+
+## Detached jobs
+
+| ID | Statement | Test |
+|---|---|---|
+| JOB-01 | A background job survives an OpenCode runtime restart | live gate + model in `test/unit/supervised.test.js` |
+| JOB-02 | An old running record is interrupted, never resumed | `test/unit/supervisor.test.js` |
+| JOB-03 | A new plugin instance can cancel an old job | `test/unit/supervised.test.js` |
+| JOB-04 | A terminal job produces one resuming notification | `test/unit/supervised.test.js` |
+| JOB-05 | Closing the agent session kills the remote process group | `test/v1/protocol.test.js` |
+| JOB-06 | Without the service the plugin falls back to the runtime-bound path | `test/unit/supervised.test.js` |
+| JOB-07 | The spool is `0700`/`0600` and carries no environment in job records | `test/unit/job-store.test.js` |
 
 ## Recovery, failure, performance
 

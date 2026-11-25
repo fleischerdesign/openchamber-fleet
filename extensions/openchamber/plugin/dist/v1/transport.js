@@ -45,7 +45,7 @@ export function spawnTransport(command, args, env) {
         },
     };
 }
-export function sshTransport(host, agentPath) {
-    return spawnTransport(process.env.FLEET_SSH_PATH ?? 'ssh', sshArgs(host, agentPath));
+export function sshTransport(host, agentPath, env, sshPath) {
+    return spawnTransport(sshPath ?? process.env.FLEET_SSH_PATH ?? 'ssh', sshArgs(host, agentPath), env === undefined ? process.env : { ...process.env, ...env });
 }
 //# sourceMappingURL=transport.js.map

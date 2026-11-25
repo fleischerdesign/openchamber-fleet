@@ -126,6 +126,23 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     }
   });
 
+  test('closing the agent session terminates its running job', async () => {
+    const marker = path.join(base, 'leaked-marker');
+    fs.rmSync(marker, { force: true });
+    const connection = await connectProcess(binary);
+    const handle = await startExecCommand(connection, {
+      workspaceId: 'v1-test',
+      root: replica,
+      argv: ['sh', '-c', `sleep 2; printf leaked > ${JSON.stringify(marker)}`],
+      timeoutMs: 30_000,
+    });
+    const settled = handle.result.catch(() => {});
+    await connection.request('session.shutdown', {});
+    await settled;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert.equal(fs.existsSync(marker), false, 'the remote process group outlived its agent session');
+  });
+
   test('fetches an artifact with digest verification', async () => {
     await execCommand(client, {
       workspaceId: 'v1-test',

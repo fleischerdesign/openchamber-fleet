@@ -9,7 +9,7 @@ import { runWorkspace, syncForRun } from '../run.js';
 import { replicaState } from '../status.js';
 import { AgentError } from '../v1/errors.js';
 import { canonicalArtifactTarget, connectSsh, execCommand, fetchArtifact, recoverWorkspace, status, syncWorkspace, } from '../v1/operations.js';
-import { FleetJobRegistry } from './jobs.js';
+import { BackgroundJobs } from './background.js';
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
 const stringArray = { type: 'array', items: string };
@@ -189,13 +189,15 @@ function syncLabelOf(sync) {
         return 'Not synced';
     return sync.changes === 0 ? 'Up to date' : `${sync.changes} change${sync.changes === 1 ? '' : 's'}`;
 }
-function runOutput(config, host, argv, background, state, sync, exec, jobId) {
+function runOutput(config, host, argv, background, state, sync, exec, jobId, supervised = false) {
     const exitCode = exec?.exitCode ?? null;
     const signal = exec?.signal ?? null;
     const nextStep = state === 'sync-required'
         ? 'Review the changes, then run fleet_run with sync=apply or fleet_sync apply.'
         : background
-            ? 'The session resumes when the job finishes.'
+            ? supervised
+                ? 'The session resumes when the job finishes.'
+                : 'The job is bound to this OpenCode runtime; a restart reports it as interrupted.'
             : state === 'succeeded'
                 ? 'No action needed.'
                 : state === 'cancelled'
@@ -207,13 +209,14 @@ function runOutput(config, host, argv, background, state, sync, exec, jobId) {
         argv,
         commandLabel: commandLabelOf(argv),
         background,
-        modeLabel: background ? 'Background job' : 'Foreground',
+        modeLabel: background ? (supervised ? 'Background job · detached' : 'Background job') : 'Foreground',
         state,
         stateLabel: stateLabelOf(state),
         exitCode,
         exitLabel: exitLabelOf(exitCode, signal, state),
         signal,
         jobId,
+        supervised,
         syncLabel: syncLabelOf(sync),
         syncChanges: sync?.changes ?? 0,
         syncGeneration: sync?.generation ?? null,
@@ -225,14 +228,15 @@ function runOutput(config, host, argv, background, state, sync, exec, jobId) {
         nextStep,
     };
 }
-function execOutput(config, host, argv, background, result) {
+function execOutput(config, host, argv, background, result, supervised = false) {
     return {
         workspace: config.name,
         host: host.alias,
         argv,
         commandLabel: commandLabelOf(argv),
         background,
-        modeLabel: background ? 'Background job' : 'Foreground',
+        modeLabel: background ? (supervised ? 'Background job · detached' : 'Background job') : 'Foreground',
+        supervised,
         jobId: result.jobId,
         state: result.state,
         stateLabel: stateLabelOf(result.state),
@@ -252,6 +256,8 @@ function storedJobOutput(record) {
         commandLabel: commandLabelOf(record.argv),
         state: record.state,
         stateLabel: stateLabelOf(record.state),
+        runLabel: record.supervised === true ? 'Detached supervisor' : 'OpenCode runtime',
+        supervised: record.supervised === true,
         exitCode: record.exitCode ?? null,
         exitLabel: exitLabelOf(record.exitCode ?? null, record.signal ?? null, record.state),
         signal: record.signal ?? null,
@@ -267,7 +273,7 @@ function storedJobOutput(record) {
 export default {
     id: 'openchamber-fleet',
     async setup(ctx) {
-        const registry = new FleetJobRegistry(ctx, agentPath());
+        const registry = new BackgroundJobs(ctx, agentPath());
         await registry.recoverInterrupted();
         registry.watchSessionDeletion();
         await ctx.tool.transform((tools) => {
@@ -355,7 +361,7 @@ export default {
             });
             tools.add({
                 name: 'fleet_exec',
-                description: 'Low-level remote execution without syncing. Prefer fleet_run for normal work; use this only when the replica is intentionally current. background=true returns a jobId, ends the turn, and resumes this session automatically.',
+                description: 'Low-level remote execution without syncing. Prefer fleet_run for normal work; use this only when the replica is intentionally current. background=true returns a jobId, ends the turn, and resumes this session automatically; it uses the detached supervisor when the OpenChamber extension service is available.',
                 options: { codemode: false, permission: 'shell' },
                 input: schema({
                     host: string,
@@ -371,6 +377,7 @@ export default {
                     argv: stringArray,
                     commandLabel: string,
                     background: boolean,
+                    supervised: boolean,
                     modeLabel: string,
                     jobId: string,
                     state: string,
@@ -380,7 +387,7 @@ export default {
                     signal: { type: ['number', 'null'] },
                     stdout: string,
                     stderr: string,
-                }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'modeLabel', 'jobId', 'state', 'stateLabel', 'exitLabel']),
+                }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'supervised', 'modeLabel', 'jobId', 'state', 'stateLabel', 'exitLabel']),
                 async execute(input, context) {
                     const config = await workspaceOf(ctx, context);
                     const host = hostOf(config, input);
@@ -406,7 +413,8 @@ export default {
                             argv: exec.argv,
                             commandLabel: commandLabelOf(exec.argv),
                             background: true,
-                            modeLabel: 'Background job',
+                            supervised: record.supervised === true,
+                            modeLabel: record.supervised === true ? 'Background job · detached' : 'Background job',
                             jobId: record.jobId,
                             state: record.state,
                             stateLabel: stateLabelOf(record.state),
@@ -415,7 +423,7 @@ export default {
                             signal: null,
                             stdout: '',
                             stderr: '',
-                        }, { host: host.alias, jobId: record.jobId, background: true });
+                        }, { host: host.alias, jobId: record.jobId, background: true, supervised: record.supervised === true });
                     }
                     const progress = progressReporter(context);
                     const result = await withClient(host, context, (client) => execCommand(client, {
@@ -438,7 +446,7 @@ export default {
             });
             tools.add({
                 name: 'fleet_run',
-                description: 'Run argv on a configured host, synchronizing the workspace first when it changed. This is the normal execution tool; the agent does not need a separate sync call. background=true returns a jobId, ends the turn, and resumes this session when the job finishes.',
+                description: 'Run argv on a configured host, synchronizing the workspace first when it changed. This is the normal execution tool; the agent does not need a separate sync call. background=true returns a jobId, ends the turn, and resumes this session when the job finishes; it uses the detached supervisor when the OpenChamber extension service is available.',
                 options: { codemode: false, permission: 'shell' },
                 input: schema({
                     host: string,
@@ -458,6 +466,7 @@ export default {
                     argv: stringArray,
                     commandLabel: string,
                     background: boolean,
+                    supervised: boolean,
                     modeLabel: string,
                     state: string,
                     stateLabel: string,
@@ -474,7 +483,7 @@ export default {
                     stdout: string,
                     stderr: string,
                     nextStep: string,
-                }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'modeLabel', 'state', 'stateLabel', 'exitCode', 'exitLabel', 'jobId', 'syncLabel', 'syncChanges', 'syncGeneration', 'syncPlanDigest', 'syncItems', 'syncTruncated', 'stdout', 'stderr', 'nextStep']),
+                }, ['workspace', 'host', 'argv', 'commandLabel', 'background', 'supervised', 'modeLabel', 'state', 'stateLabel', 'exitCode', 'exitLabel', 'jobId', 'syncLabel', 'syncChanges', 'syncGeneration', 'syncPlanDigest', 'syncItems', 'syncTruncated', 'stdout', 'stderr', 'nextStep']),
                 async execute(input, context) {
                     const config = await workspaceOf(ctx, context);
                     const host = selectHost(config, {
@@ -530,10 +539,11 @@ export default {
                             startupSignal: context?.signal,
                             agentPath: agentPath(),
                         });
-                        return jsonResult(runOutput(config, host, exec.argv, true, record.state, prepared.sync, null, record.jobId), {
+                        return jsonResult(runOutput(config, host, exec.argv, true, record.state, prepared.sync, null, record.jobId, record.supervised === true), {
                             host: host.alias,
                             jobId: record.jobId,
                             background: true,
+                            supervised: record.supervised === true,
                             state: record.state,
                         });
                     }
@@ -578,7 +588,7 @@ export default {
             });
             tools.add({
                 name: 'fleet_jobs',
-                description: 'List the background jobs owned by this session, newest first.',
+                description: 'List this session\'s background jobs, newest first.',
                 options: { codemode: false },
                 input: schema({}),
                 output: output({
@@ -588,16 +598,18 @@ export default {
                             commandLabel: string,
                             state: string,
                             stateLabel: string,
+                            runLabel: string,
                             exitLabel: string,
-                        }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'exitLabel']) },
+                        }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
                     items: { type: 'array', items: schema({
                             jobId: string,
                             host: string,
                             commandLabel: string,
                             state: string,
                             stateLabel: string,
+                            runLabel: string,
                             exitLabel: string,
-                        }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'exitLabel']) },
+                        }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
                 }, ['jobs', 'items']),
                 async execute(_input, context) {
                     const jobs = await registry.list(sessionIDOf(context), ctx.location?.directory);
@@ -607,6 +619,7 @@ export default {
                         commandLabel: commandLabelOf(record.argv),
                         state: record.state,
                         stateLabel: stateLabelOf(record.state),
+                        runLabel: record.supervised === true ? 'Detached' : 'Runtime',
                         exitLabel: exitLabelOf(record.exitCode ?? null, record.signal ?? null, record.state),
                     }));
                     return jsonResult({ jobs: rows, items: rows });
@@ -670,16 +683,17 @@ export default {
             });
             tools.add({
                 name: 'fleet_job_status',
-                description: 'Show the state and bounded output tail of a background Fleet job started by this OpenCode runtime.',
+                description: 'Show the state and bounded output tail of a background Fleet job.',
                 options: { codemode: false },
                 input: schema({ host: string, jobId: string }, ['host', 'jobId']),
                 output: output({
                     workspace: string, host: string, jobId: string, state: string, stateLabel: string,
+                    runLabel: string, supervised: boolean,
                     exitCode: { type: ['number', 'null'] }, exitLabel: string, signal: { type: ['number', 'null'] },
                     startedAt: { type: 'number' }, endedAt: { type: ['number', 'null'] },
                     stdoutBytes: { type: 'number' }, stderrBytes: { type: 'number' },
                     stdoutTail: string, stderrTail: string, error: { type: ['string', 'null'] },
-                }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
+                }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'runLabel', 'supervised', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
                 async execute(input, context) {
                     const config = await workspaceOf(ctx, context);
                     const host = hostOf(config, input);
@@ -695,11 +709,12 @@ export default {
                 input: schema({ host: string, jobId: string }, ['host', 'jobId']),
                 output: output({
                     workspace: string, host: string, jobId: string, state: string, stateLabel: string,
+                    runLabel: string, supervised: boolean,
                     exitCode: { type: ['number', 'null'] }, exitLabel: string, signal: { type: ['number', 'null'] },
                     startedAt: { type: 'number' }, endedAt: { type: ['number', 'null'] },
                     stdoutBytes: { type: 'number' }, stderrBytes: { type: 'number' },
                     stdoutTail: string, stderrTail: string, error: { type: ['string', 'null'] },
-                }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
+                }, ['workspace', 'host', 'jobId', 'state', 'stateLabel', 'runLabel', 'supervised', 'exitLabel', 'startedAt', 'stdoutBytes', 'stderrBytes']),
                 async execute(input, context) {
                     const config = await workspaceOf(ctx, context);
                     const host = hostOf(config, input);

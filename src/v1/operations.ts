@@ -17,6 +17,8 @@ export interface Host {
 
 export interface ConnectOptions {
   readonly agentPath?: string;
+  readonly env?: Record<string, string>;
+  readonly sshPath?: string;
 }
 
 const PAGE = 5000;
@@ -24,7 +26,7 @@ const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
 const DEFAULT_EXEC_WAIT_MS = 24 * 60 * 60 * 1000;
 
 export async function connectSsh(host: Host, options: ConnectOptions = {}): Promise<AgentClient> {
-  return AgentClient.connect(sshTransport(host, options.agentPath ?? 'fleet-agent'), {
+  return AgentClient.connect(sshTransport(host, options.agentPath ?? 'fleet-agent', options.env, options.sshPath), {
     capabilities: ['workspace.sync@1', 'exec@1', 'artifact@1'],
   });
 }
