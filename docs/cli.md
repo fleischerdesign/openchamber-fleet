@@ -1,7 +1,7 @@
 # CLI
 
 ```
-fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--tag a,b] [--force]
+fleet init --host <alias> --ssh <user@host> [--port N] [--root PATH] [--name NAME] [--scope name|checkout] [--tag a,b] [--force]
 fleet init ... --workspace-file       # opt-in legacy fleet.json in the repository
 fleet default [<project-dir>] [--clear] [--json]
 fleet doctor [--host <alias>] [--agent-path PATH]
@@ -25,9 +25,11 @@ overrides the agent binary name. Every command accepts `--config-dir <dir>`; the
 the repository. A project without a file is fully usable: Fleet derives a safe workspace from the
 project directory. `fleet init` is the explicit way to add a host or create overrides. The host
 registry is reusable by every project. A project can restrict hosts with `requires` or an explicit
-`hosts` allowlist. A host's `allow` field limits operations (`workspace`, `scratch`, `transfer`);
-tags remain suitability, not authorization. Selecting an alias that already exists keeps its SSH target; `--force`
-replaces it. An existing legacy `fleet.json` is migrated with its name, hosts, roots, excludes,
+`hosts` allowlist. A host's `allow` field is controller policy for the operations `workspace`,
+`scratch` and `transfer`; omitted means all and an explicit empty array denies all. Tags remain
+suitability, not authorization. Selecting an alias that already exists keeps its SSH target and its
+policy; `--force` replaces the target but preserves the policy. `--scope name` creates one shared
+replica identity; the default for a derived project is `checkout`. An existing legacy `fleet.json` is migrated with its name, hosts, roots, excludes,
 environment and shell intact. Use `--workspace-file` only when a repository-local legacy file is
 explicitly wanted; it is written at the workspace root even from a subdirectory.
 `--tag` adds host capabilities such as `linux,gpu`; `fleet hosts` lists them and `fleet run` can
@@ -49,17 +51,20 @@ sync summary. `fleet exec` remains the raw no-sync variant.
 `fleet run --host auto --tag linux -- cargo test` selects the first configured host carrying every
 requested tag. The selection is an agent decision; there is no UI sync switch.
 
-`--scratch` selects a private remote-only session space. It has no source and no sync; `run`,
-`exec`, `fetch`, `status` and `hosts` accept it. Uploads always land in scratch. A download with
+`--scratch` selects a private remote-only space for the current directory and shared config; the
+OpenCode plugin keys scratch by session instead. It has no source and no sync; `run`, `exec`,
+`fetch`, `status` and `hosts` accept it. Uploads always land in scratch. A download with
 `--scratch` reads that space; without it, the project replica is used. Transfers handle one regular
 file, verify a SHA-256 digest, stream without loading the file into memory and refuse to overwrite
 unless `--overwrite` is given.
 
-`fleet sync --plan`, `fleet status` and `fleet fetch` are read-only: they never create a replica
-root or a state entry on the host. A plan prints a `plan-token`; `fleet sync --apply
---plan-token TOKEN` refuses a different source, policy, generation or file set with `PLAN_STALE`.
-The OpenCode tools expose the same token. `adopt` remains a separate `fleet sync --apply` operator
-action; normal runs never adopt an existing unmanaged directory.
+`fleet sync --plan`, `fleet status`, recovery inspection and `fleet fetch` are read-only: they never
+create a replica root, state entry or transaction journal. A plan works before the first apply. It
+prints a `plan-token`; `fleet sync --apply --plan-token TOKEN` refuses a different host, agent
+installation, source content, policy, generation or file set with `PLAN_STALE`, and checks the
+approval before provisioning. The OpenCode tools expose the same token. `adopt` remains a separate
+`fleet sync --apply` operator action; normal runs never adopt an existing unmanaged directory and
+the model-facing tool cannot request it.
 
 ## Exit codes
 
@@ -86,8 +91,9 @@ $ fleet sync --host workstation --apply --exclude target/
 generation 7 sha256:41ab…
 ```
 
-`--plan` never mutates: it runs the transaction and aborts it. `--apply` commits and prints the new
-generation. `--adopt` takes over an existing unmanaged directory; without it the agent refuses.
+`--plan` never mutates: it computes an in-memory preview and writes no journal. `--apply` commits
+and prints the new generation; a no-op apply keeps the generation unchanged. `--adopt` takes over an
+existing unmanaged directory; without it the agent refuses. It is deliberately CLI-only.
 
 ## Exec
 

@@ -70,6 +70,7 @@ export function isJobRecord(value) {
         && isNonEmptyString(value.sessionID)
         && isNonEmptyString(value.workspace)
         && isNonEmptyString(value.directory)
+        && (value.target === undefined || value.target === 'workspace' || value.target === 'scratch')
         && isHost(value.host)
         && isStringArray(value.argv)
         && typeof value.state === 'string'
@@ -95,6 +96,7 @@ export function isStartRequest(value) {
         && isNonEmptyString(value.sessionID)
         && isNonEmptyString(value.workspace)
         && isNonEmptyString(value.directory)
+        && (value.target === undefined || value.target === 'workspace' || value.target === 'scratch')
         && isHost(value.host)
         && isStringArray(value.argv)
         && (value.cwd === undefined || typeof value.cwd === 'string')
@@ -117,7 +119,14 @@ export function isSupervisorDiscovery(value) {
         && isInteger(value.bootTime)
         && isInteger(value.updatedAt)
         && isNonEmptyString(value.stateRoot)
-        && isInteger(value.activeJobs);
+        && isInteger(value.activeJobs)
+        && (value.drain === undefined || typeof value.drain === 'boolean')
+        && (value.draining === undefined || typeof value.draining === 'boolean');
+}
+export function isSupervisorDrain(value) {
+    if (!isRecord(value))
+        return false;
+    return isNonEmptyString(value.instance) && isInteger(value.requestedAt);
 }
 export function isSupervisorLock(value) {
     if (!isRecord(value))

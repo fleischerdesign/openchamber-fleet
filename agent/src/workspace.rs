@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,38 @@ pub fn validate_workspace_id(id: &str) -> Result<(), String> {
     }
 }
 
+/// Resolve the nearest existing ancestor and append the missing components.
+/// The result is the real path the agent will operate on, not a path alias.
+fn canonicalize_lenient(path: &Path) -> Result<PathBuf, String> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name = current
+                    .file_name()
+                    .ok_or_else(|| format!("cannot resolve {}", path.display()))?
+                    .to_os_string();
+                missing.push(name);
+                current = current
+                    .parent()
+                    .ok_or_else(|| format!("cannot resolve {}", path.display()))?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(format!("cannot resolve {}: {error}", path.display()));
+            }
+        }
+    }
+    let mut resolved = fs::canonicalize(&current)
+        .map_err(|error| format!("cannot resolve {}: {error}", current.display()))?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
 pub fn resolve_root(input: &str) -> Result<PathBuf, String> {
     let expanded = if let Some(rest) = input.strip_prefix("~/") {
         let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
@@ -134,7 +166,65 @@ pub fn resolve_root(input: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("root {input:?} is too broad for a replica"));
     }
-    Ok(PathBuf::from(normalized))
+    let canonical = canonicalize_lenient(Path::new(&normalized))?;
+    // Re-check the real path: a symlinked alias must not turn a narrow input
+    // into a broad or forbidden root.
+    let canonical_text = canonical
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let canonical_parts: Vec<&str> = canonical_text
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if canonical_parts.len() < 2
+        || forbidden.contains(&canonical_text.as_str())
+        || canonical_text == home_normalized
+    {
+        return Err(format!(
+            "root {input:?} resolves to a root that is too broad"
+        ));
+    }
+    Ok(canonical)
+}
+
+fn same_root(value: &str, root: &Path) -> bool {
+    let stored = Path::new(value);
+    if stored == root {
+        return true;
+    }
+    canonicalize_lenient(stored)
+        .map(|canonical| canonical == root)
+        .unwrap_or(false)
+}
+
+fn assert_root_unowned(id: &str, root: &Path) -> Result<(), String> {
+    let base = state_root();
+    let entries = match fs::read_dir(&base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_message(error)),
+    };
+    for entry in entries.flatten() {
+        let other = entry.file_name().to_string_lossy().to_string();
+        if other == id || !entry.path().is_dir() {
+            continue;
+        }
+        let state_file = entry.path().join("state.json");
+        let Ok(text) = fs::read_to_string(&state_file) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<WorkspaceState>(&text) else {
+            continue;
+        };
+        if same_root(&value.root, root) {
+            return Err(format!(
+                "WORKSPACE_ROOT_CONFLICT root {} is already bound to workspace {other}; use a distinct root per workspace",
+                root.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn state_root() -> PathBuf {
@@ -155,7 +245,7 @@ pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
     let value: WorkspaceState =
         serde_json::from_str(&fs::read_to_string(&state_file).map_err(io_message)?)
             .map_err(|error| format!("workspace state is corrupt: {error}"))?;
-    if Path::new(&value.root) != workspace.root {
+    if !same_root(&value.root, &workspace.root) {
         return Err(format!(
             "workspace {} is registered at {} not {}",
             workspace.id,
@@ -179,6 +269,7 @@ pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
 pub fn probe_workspace(id: &str, root_input: &str) -> Result<WorkspaceProbe, String> {
     validate_workspace_id(id)?;
     let root = resolve_root(root_input)?;
+    assert_root_unowned(id, &root)?;
     let state = state_root().join(id);
     let state_file = state.join("state.json");
     let manifest_file = state.join("manifest.json");
@@ -197,7 +288,7 @@ pub fn probe_workspace(id: &str, root_input: &str) -> Result<WorkspaceProbe, Str
     let value: WorkspaceState =
         serde_json::from_str(&fs::read_to_string(&state_file).map_err(io_message)?)
             .map_err(|error| format!("workspace state is corrupt: {error}"))?;
-    if Path::new(&value.root) != root {
+    if !same_root(&value.root, &root) {
         return Err(format!(
             "workspace {id} is registered at {} not {}",
             value.root,
@@ -266,6 +357,7 @@ pub fn safe_directory(root: &Path, relative: &str) -> Result<PathBuf, String> {
 pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspace, String> {
     validate_workspace_id(id)?;
     let root = resolve_root(root_input)?;
+    assert_root_unowned(id, &root)?;
     let state = state_root().join(id);
     ensure_dir(&state)?;
     let state_file = state.join("state.json");
@@ -277,7 +369,7 @@ pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspa
         let value: WorkspaceState =
             serde_json::from_str(&fs::read_to_string(&state_file).map_err(io_message)?)
                 .map_err(|error| format!("workspace state is corrupt: {error}"))?;
-        if Path::new(&value.root) != root {
+        if !same_root(&value.root, &root) {
             return Err(format!(
                 "workspace {id} is registered at {} not {}",
                 value.root,
@@ -333,6 +425,60 @@ pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspa
     })
 }
 
+/// Load a workspace snapshot without creating state, a root or a journal.
+/// An absent state and an absent root produce the empty-base manifest.
+pub fn preview_workspace(id: &str, root_input: &str) -> Result<Workspace, String> {
+    validate_workspace_id(id)?;
+    let root = resolve_root(root_input)?;
+    assert_root_unowned(id, &root)?;
+    let state = state_root().join(id);
+    let state_file = state.join("state.json");
+    let manifest_file = state.join("manifest.json");
+    let journal_file = state.join("journal.json");
+    if !state_file.exists() {
+        if root.exists() {
+            return Err(format!(
+                "WORKSPACE_UNMANAGED {} exists and is not managed; apply with adopt=true to take it over",
+                root.display()
+            ));
+        }
+        return Ok(Workspace {
+            id: id.to_string(),
+            root,
+            state,
+            generation: 0,
+            manifest: Manifest::empty(),
+            recovery: None,
+        });
+    }
+    let value: WorkspaceState =
+        serde_json::from_str(&fs::read_to_string(&state_file).map_err(io_message)?)
+            .map_err(|error| format!("workspace state is corrupt: {error}"))?;
+    if !same_root(&value.root, &root) {
+        return Err(format!(
+            "workspace {id} is registered at {} not {}",
+            value.root,
+            root.display()
+        ));
+    }
+    let manifest: Manifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_file).map_err(io_message)?)
+            .map_err(|error| format!("workspace manifest is corrupt: {error}"))?;
+    let recovery = if journal_file.exists() {
+        Some(fs::read_to_string(&journal_file).map_err(io_message)?)
+    } else {
+        None
+    };
+    Ok(Workspace {
+        id: id.to_string(),
+        root,
+        state,
+        generation: value.generation,
+        manifest,
+        recovery,
+    })
+}
+
 /// Take the exclusive node lease. `flock` is released by the kernel when the process dies.
 pub fn acquire_lease(
     state: &Path,
@@ -378,9 +524,16 @@ pub fn write_json_atomic<T: Serialize>(file: &Path, value: &T) -> Result<(), Str
     }
     let temporary = file.with_extension(format!("tmp{}", std::process::id()));
     let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
-    fs::write(&temporary, text).map_err(io_message)?;
+    let mut handle = File::create(&temporary).map_err(io_message)?;
+    handle.write_all(text.as_bytes()).map_err(io_message)?;
+    handle.sync_all().map_err(io_message)?;
     set_mode(&temporary, 0o600)?;
     fs::rename(&temporary, file).map_err(io_message)?;
+    if let Some(parent) = file.parent() {
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
     Ok(())
 }
 

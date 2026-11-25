@@ -11,7 +11,7 @@ export function scratchIdentity(seed) {
 }
 export function scratchConfig(options) {
     const identity = scratchIdentity(options.seed);
-    const base = loadHostsOnlyConfig(options.directory);
+    const base = loadHostsOnlyConfig(options.directory, options.configDir === undefined ? {} : { configDir: options.configDir });
     const hosts = {};
     for (const host of Object.values(base.hosts)) {
         hosts[host.alias] = { ...host, root: identity.root };
@@ -26,6 +26,7 @@ export function scratchConfig(options) {
         env: {},
         shell: 'bash',
         excludeMatcher: compileExcludes([]),
+        source: 'scratch',
     };
 }
 export function scratchRootForSeed(seed) {

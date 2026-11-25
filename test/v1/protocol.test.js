@@ -66,6 +66,31 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
       mode: 'plan',
     });
     assert.deepEqual(second.changes, []);
+
+    const noop = await syncWorkspace(client, matcher, {
+      workspaceId: 'v1-test',
+      source,
+      root: replica,
+      excludes: ['target/'],
+      mode: 'apply',
+    });
+    assert.deepEqual(noop.changes, []);
+    assert.equal(noop.generation, result.generation, 'a no-op apply must not bump the generation');
+  });
+
+  test('plan previews an absent replica without creating root or state', async () => {
+    const previewRoot = path.join(base, 'preview-replica');
+    const result = await syncWorkspace(client, matcher, {
+      workspaceId: 'v1-preview',
+      source,
+      root: previewRoot,
+      excludes: ['target/'],
+      mode: 'plan',
+    });
+    assert.ok(result.changes.some((change) => change.path === 'src/app.txt'));
+    assert.ok(result.planToken);
+    assert.equal(fs.existsSync(previewRoot), false);
+    assert.equal(fs.existsSync(path.join(state, 'v1-preview')), false);
   });
 
   test('syncs a file larger than one DATA frame', async () => {
@@ -220,6 +245,23 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
       path: 'upload.txt',
       dest: downloaded,
     }), /exists/i);
+  });
+
+  test('refuses to bind one replica root to two workspace ids', async () => {
+    const root = path.join(base, 'root-conflict-replica');
+    await client.request('workspace.open', { workspaceId: 'root-conflict-a', root, adopt: false });
+    await assert.rejects(
+      client.request('workspace.open', { workspaceId: 'root-conflict-b', root, adopt: false }),
+      (error) => error.code === 'WORKSPACE_ROOT_CONFLICT',
+    );
+  });
+
+  test('read-only open never creates an absent workspace', async () => {
+    const root = path.join(base, 'readonly-absent-replica');
+    const opened = await client.request('workspace.open', { workspaceId: 'readonly-absent', root, readOnly: true });
+    assert.equal(opened.absent, true);
+    assert.equal(fs.existsSync(root), false);
+    assert.equal(fs.existsSync(path.join(state, 'readonly-absent')), false);
   });
 
   test('binds a lease to the workspace that acquired it', async () => {

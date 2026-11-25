@@ -154,7 +154,8 @@ for 90 seconds and no job is active.
 Permissions follow OpenCode rules: `fleet_run` evaluates the combined sync-and-run descriptor under
 `fleet.run` and the exact command under `shell`; raw `fleet_exec` uses `fleet.exec` and `shell`.
 Fetch evaluates `edit` and `external_directory`; sync apply/recovery use dedicated `fleet.sync` /
-`fleet.recover` actions. Status and sync planning are read-only; `adopt` is apply-only.
+`fleet.recover` actions. Status, planning and recovery inspection are read-only; `adopt` is an
+explicit CLI-only apply action.
 
 Hosts can carry tags in the local host registry, for example `"tags": ["linux", "gpu"]`. The agent
 uses `fleet_hosts` to inspect them and `fleet_run` with `host: "auto"` plus tags to select a machine;
@@ -178,7 +179,8 @@ there is no per-run switch in the UI.
 - The agent is a Rust binary; the release publishes Linux x86_64/aarch64 builds. On macOS, build it
   from source with `cargo install --path agent` (or `cargo install --git
   https://github.com/fleischerdesign/openchamber-fleet fleet-agent`).
-- Linux is tested; macOS is expected to work (Unix APIs only); Windows is unsupported.
+- Linux is covered by the flake gate. macOS is not covered by CI; it uses Unix APIs only and needs
+  a source build of the agent. Release binaries are published for Linux. Windows is unsupported.
 - SSH key authentication, host keys verified (`StrictHostKeyChecking=yes`).
 
 ## Status

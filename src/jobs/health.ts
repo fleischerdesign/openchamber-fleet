@@ -51,6 +51,7 @@ export function supervisorVersionDecision(
   version: string,
 ): SupervisorVersionDecision {
   if (!record) return 'start';
+  if (record.draining === true) return 'defer';
   if (record.version === version) return 'reuse';
   return (record.activeJobs ?? 0) > 0 ? 'defer' : 'replace';
 }

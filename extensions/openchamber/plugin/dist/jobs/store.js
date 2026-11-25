@@ -1,8 +1,9 @@
 /** The file spool: one atomic JSON file per job, request, cancel marker and heartbeat. */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensurePrivateDir, listJsonFiles, readJsonFile, removeFile, writeJsonAtomic } from './io.js';
-import { JOB_RETENTION_MS, isJobRecord, isSupervisorDiscovery, isSupervisorLock, isTerminal, } from './protocol.js';
+import { JOB_RETENTION_MS, isJobRecord, isSupervisorDiscovery, isSupervisorDrain, isSupervisorLock, isTerminal, } from './protocol.js';
 const LOG_LIMIT = 2 * 1024 * 1024;
 const LOG_KEEP = 1024 * 1024;
 export class JobStore {
@@ -30,6 +31,9 @@ export class JobStore {
     }
     get lockPath() {
         return path.join(this.root, 'supervisor.lock');
+    }
+    get drainPath() {
+        return path.join(this.root, 'supervisor.drain.json');
     }
     get logPath() {
         return path.join(this.root, 'supervisor.log');
@@ -75,20 +79,20 @@ export class JobStore {
     }
     createLock(lock) {
         ensurePrivateDir(this.root);
-        let descriptor;
+        const temporary = `${this.lockPath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
         try {
-            descriptor = fs.openSync(this.lockPath, 'wx', 0o600);
+            fs.writeFileSync(temporary, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+            // link is an atomic publish that also fails if a lock already exists.
+            // The lock file is therefore never visible with a partial body.
+            fs.linkSync(temporary, this.lockPath);
         }
         catch (error) {
             if (error.code === 'EEXIST')
                 return false;
             throw error;
         }
-        try {
-            fs.writeFileSync(descriptor, `${JSON.stringify(lock, null, 2)}\n`);
-        }
         finally {
-            fs.closeSync(descriptor);
+            removeFile(temporary);
         }
         try {
             fs.chmodSync(this.lockPath, 0o600);
@@ -103,11 +107,34 @@ export class JobStore {
         if (current?.instance === instance)
             removeFile(this.lockPath);
     }
-    clearLock() {
-        removeFile(this.lockPath);
+    clearLock(instance) {
+        if (instance === undefined) {
+            removeFile(this.lockPath);
+            return;
+        }
+        if (this.readLock()?.instance === instance)
+            removeFile(this.lockPath);
     }
     ownsLock(instance) {
         return this.readLock()?.instance === instance;
+    }
+    requestDrain(instance) {
+        writeJsonAtomic(this.drainPath, {
+            instance,
+            requestedAt: Date.now(),
+        });
+    }
+    readDrain() {
+        const value = readJsonFile(this.drainPath);
+        return isSupervisorDrain(value) ? value : null;
+    }
+    clearDrain(instance) {
+        if (instance === undefined) {
+            removeFile(this.drainPath);
+            return;
+        }
+        if (this.readDrain()?.instance === instance)
+            removeFile(this.drainPath);
     }
     // ---- requests -----------------------------------------------------------
     createRequest(request) {

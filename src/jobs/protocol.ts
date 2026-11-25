@@ -50,6 +50,7 @@ export interface JobRecord {
   readonly sessionID: string;
   readonly workspace: string;
   readonly directory: string;
+  readonly target?: 'workspace' | 'scratch';
   readonly host: JobHost;
   readonly argv: string[];
   readonly cwd?: string;
@@ -74,6 +75,7 @@ export interface StartRequest {
   readonly sessionID: string;
   readonly workspace: string;
   readonly directory: string;
+  readonly target?: 'workspace' | 'scratch';
   readonly host: JobHost;
   readonly argv: string[];
   readonly cwd?: string;
@@ -97,6 +99,15 @@ export interface SupervisorDiscovery {
   readonly updatedAt: number;
   readonly stateRoot: string;
   readonly activeJobs: number;
+  /** The build understands a graceful drain request. */
+  readonly drain?: boolean;
+  /** The supervisor is finishing accepted work and refuses new requests. */
+  readonly draining?: boolean;
+}
+
+export interface SupervisorDrain {
+  readonly instance: string;
+  readonly requestedAt: number;
 }
 
 export interface SupervisorLock {
@@ -182,6 +193,7 @@ export function isJobRecord(value: unknown): value is JobRecord {
     && isNonEmptyString(value.sessionID)
     && isNonEmptyString(value.workspace)
     && isNonEmptyString(value.directory)
+    && (value.target === undefined || value.target === 'workspace' || value.target === 'scratch')
     && isHost(value.host)
     && isStringArray(value.argv)
     && typeof value.state === 'string'
@@ -207,6 +219,7 @@ export function isStartRequest(value: unknown): value is StartRequest {
     && isNonEmptyString(value.sessionID)
     && isNonEmptyString(value.workspace)
     && isNonEmptyString(value.directory)
+    && (value.target === undefined || value.target === 'workspace' || value.target === 'scratch')
     && isHost(value.host)
     && isStringArray(value.argv)
     && (value.cwd === undefined || typeof value.cwd === 'string')
@@ -229,7 +242,14 @@ export function isSupervisorDiscovery(value: unknown): value is SupervisorDiscov
     && isInteger(value.bootTime)
     && isInteger(value.updatedAt)
     && isNonEmptyString(value.stateRoot)
-    && isInteger(value.activeJobs);
+    && isInteger(value.activeJobs)
+    && (value.drain === undefined || typeof value.drain === 'boolean')
+    && (value.draining === undefined || typeof value.draining === 'boolean');
+}
+
+export function isSupervisorDrain(value: unknown): value is SupervisorDrain {
+  if (!isRecord(value)) return false;
+  return isNonEmptyString(value.instance) && isInteger(value.requestedAt);
 }
 
 export function isSupervisorLock(value: unknown): value is SupervisorLock {

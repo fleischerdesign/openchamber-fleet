@@ -8,6 +8,14 @@ export function replicaState(input) {
             tooltip: 'The last sync was interrupted; open Fleet recovery before syncing again.',
         };
     }
+    if (input.state === 'UNMANAGED') {
+        return {
+            label: 'Unmanaged',
+            tone: 'warning',
+            nextStep: 'Adopt the existing root explicitly, or choose a different root.',
+            tooltip: 'The remote root exists but is not managed by Fleet; a normal sync refuses to overwrite it.',
+        };
+    }
     if (!input.generation || input.generation <= 0) {
         return {
             label: 'Not synced',

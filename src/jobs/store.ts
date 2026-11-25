@@ -1,5 +1,6 @@
 /** The file spool: one atomic JSON file per job, request, cancel marker and heartbeat. */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensurePrivateDir, listJsonFiles, readJsonFile, removeFile, writeJsonAtomic } from './io.js';
@@ -7,11 +8,13 @@ import {
   JOB_RETENTION_MS,
   isJobRecord,
   isSupervisorDiscovery,
+  isSupervisorDrain,
   isSupervisorLock,
   isTerminal,
   type JobRecord,
   type StartRequest,
   type SupervisorDiscovery,
+  type SupervisorDrain,
   type SupervisorLock,
 } from './protocol.js';
 
@@ -47,6 +50,10 @@ export class JobStore {
 
   private get lockPath(): string {
     return path.join(this.root, 'supervisor.lock');
+  }
+
+  private get drainPath(): string {
+    return path.join(this.root, 'supervisor.drain.json');
   }
 
   private get logPath(): string {
@@ -98,17 +105,17 @@ export class JobStore {
 
   createLock(lock: SupervisorLock): boolean {
     ensurePrivateDir(this.root);
-    let descriptor: number;
+    const temporary = `${this.lockPath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
     try {
-      descriptor = fs.openSync(this.lockPath, 'wx', 0o600);
+      fs.writeFileSync(temporary, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+      // link is an atomic publish that also fails if a lock already exists.
+      // The lock file is therefore never visible with a partial body.
+      fs.linkSync(temporary, this.lockPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
       throw error;
-    }
-    try {
-      fs.writeFileSync(descriptor, `${JSON.stringify(lock, null, 2)}\n`);
     } finally {
-      fs.closeSync(descriptor);
+      removeFile(temporary);
     }
     try {
       fs.chmodSync(this.lockPath, 0o600);
@@ -123,12 +130,36 @@ export class JobStore {
     if (current?.instance === instance) removeFile(this.lockPath);
   }
 
-  clearLock(): void {
-    removeFile(this.lockPath);
+  clearLock(instance?: string): void {
+    if (instance === undefined) {
+      removeFile(this.lockPath);
+      return;
+    }
+    if (this.readLock()?.instance === instance) removeFile(this.lockPath);
   }
 
   ownsLock(instance: string): boolean {
     return this.readLock()?.instance === instance;
+  }
+
+  requestDrain(instance: string): void {
+    writeJsonAtomic(this.drainPath, {
+      instance,
+      requestedAt: Date.now(),
+    } satisfies SupervisorDrain);
+  }
+
+  readDrain(): SupervisorDrain | null {
+    const value = readJsonFile(this.drainPath);
+    return isSupervisorDrain(value) ? value : null;
+  }
+
+  clearDrain(instance?: string): void {
+    if (instance === undefined) {
+      removeFile(this.drainPath);
+      return;
+    }
+    if (this.readDrain()?.instance === instance) removeFile(this.drainPath);
   }
 
   // ---- requests -----------------------------------------------------------

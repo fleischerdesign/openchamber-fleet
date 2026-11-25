@@ -65,6 +65,13 @@ export async function openWorkspace(client, workspaceId, root, adopt = false, si
     throwIfAborted(signal);
     return result;
 }
+/** Open a snapshot for reading. Never creates a root, state directory or manifest. */
+export async function openWorkspaceReadOnly(client, workspaceId, root, signal) {
+    throwIfAborted(signal);
+    const result = (await client.request('workspace.open', { workspaceId, root, readOnly: true }));
+    throwIfAborted(signal);
+    return result;
+}
 /** Inspect a workspace without provisioning its root or state. */
 export async function probeWorkspace(client, workspaceId, root, signal) {
     throwIfAborted(signal);
@@ -80,21 +87,24 @@ export async function status(client, workspaceId, root, signal) {
             generation: probe.generation,
             manifestDigest: probe.manifestDigest,
             recovery: probe.recovery,
+            state: probe.state,
         };
     }
-    return { generation: 0, manifestDigest: '', recovery: false };
+    return { generation: 0, manifestDigest: '', recovery: false, state: probe.state };
 }
 /** Bind an apply to host/root, source, generation, policy and the exact plan. */
 export function syncPlanToken(input) {
     const value = JSON.stringify({
         workspaceId: input.workspaceId,
         source: path.resolve(input.source),
+        sourceDigest: input.sourceDigest ?? '',
         root: input.root,
+        hostIdentity: input.hostIdentity ?? '',
+        agentIdentity: input.agentIdentity ?? '',
         generation: input.generation,
         excludes: [...new Set(input.excludes)].sort(),
         planDigest: input.planDigest,
         changes: input.changes.map((change) => `${change.action}\0${change.path}`),
-        needed: [...input.needed].sort(),
     });
     return `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
 }
@@ -111,24 +121,24 @@ async function fetchPlanPages(client, txnId, kind, signal) {
     }
     return items;
 }
+async function fetchPreviewPages(client, txnId, kind, signal) {
+    const items = [];
+    let offset = 0;
+    for (;;) {
+        throwIfAborted(signal);
+        const page = (await client.request('sync.previewPage', { txnId, kind, offset, limit: PAGE }));
+        items.push(...page.items);
+        if (offset + page.items.length >= page.total)
+            break;
+        offset += page.items.length;
+    }
+    return items;
+}
 export async function syncWorkspace(client, matcher, options) {
     if (options.mode === 'plan' && options.adopt === true) {
         throw new AgentError('INVALID_REQUEST', 'adopt is only valid with mode=apply');
     }
     throwIfAborted(options.signal);
-    if (options.mode === 'plan') {
-        const probe = await probeWorkspace(client, options.workspaceId, options.root, options.signal);
-        if (probe.state !== 'READY') {
-            if (probe.state === 'UNMANAGED') {
-                throw new AgentError('WORKSPACE_UNMANAGED', 'the replica exists but is not managed; apply with adopt=true to take it over', false, {
-                    state: probe.state,
-                });
-            }
-            throw new AgentError('WORKSPACE_ABSENT', 'the replica does not exist yet; apply the first sync to create it', false, {
-                state: probe.state,
-            });
-        }
-    }
     await report(options.onProgress, { phase: 'scanning' });
     const scanned = await scanWorkspace(options.source, matcher);
     throwIfAborted(options.signal);
@@ -137,6 +147,78 @@ export async function syncWorkspace(client, matcher, options) {
     for (const entry of scanned.entries) {
         if (entry.type === 'file' && entry.digest) {
             blobs.set(entry.digest, { file: path.join(options.source, entry.path), size: entry.size });
+        }
+    }
+    const policy = { excludes: options.excludes, preserve: [], deleteManaged: true };
+    const agentIdentity = client.info.agent?.installationId ?? '';
+    // A plan is a read-only preview. It may inspect an absent replica, never
+    // creates state or a journal, and cannot be turned into an apply by a
+    // background caller.
+    const preview = async () => {
+        requireCapability(client, 'workspace.preview');
+        let txnId;
+        try {
+            const begin = (await client.request('sync.previewBegin', {
+                workspaceId: options.workspaceId,
+                root: options.root,
+                policy,
+            }));
+            txnId = begin.txnId;
+            for (let offset = 0; offset < scanned.entries.length; offset += PAGE) {
+                throwIfAborted(options.signal);
+                await client.request('sync.previewEntries', {
+                    txnId,
+                    entries: scanned.entries.slice(offset, offset + PAGE),
+                    more: offset + PAGE < scanned.entries.length,
+                });
+            }
+            const plan = (await client.request('sync.previewPlan', { txnId }));
+            const changes = (await fetchPreviewPages(client, txnId, 'changes', options.signal));
+            const needed = (await fetchPreviewPages(client, txnId, 'needed', options.signal));
+            const planToken = syncPlanToken({
+                workspaceId: options.workspaceId,
+                source: options.source,
+                root: options.root,
+                generation: begin.generation,
+                excludes: options.excludes,
+                planDigest: plan.planDigest,
+                changes,
+                needed,
+                ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
+                agentIdentity,
+                sourceDigest: scanned.digest,
+            });
+            return { generation: begin.generation, planDigest: plan.planDigest, planToken, changes, needed };
+        }
+        finally {
+            if (txnId) {
+                try {
+                    await client.request('sync.previewEnd', { txnId });
+                }
+                catch { /* connection gone */ }
+            }
+        }
+    };
+    if (options.mode === 'plan') {
+        const result = await preview();
+        await report(options.onProgress, {
+            phase: 'done',
+            changes: result.changes.length,
+            digest: result.planDigest,
+        });
+        return {
+            planDigest: result.planDigest,
+            planToken: result.planToken,
+            changes: result.changes,
+            needed: result.needed,
+        };
+    }
+    // A stale approval must be rejected before workspace.open can provision or
+    // adopt anything. The post-plan check below closes the remaining race.
+    if (options.planToken !== undefined) {
+        const approved = await preview();
+        if (approved.planToken !== options.planToken) {
+            throw new AgentError('PLAN_STALE', 'the replica or plan changed since it was approved; plan again');
         }
     }
     await report(options.onProgress, { phase: 'opening' });
@@ -174,7 +256,7 @@ export async function syncWorkspace(client, matcher, options) {
             }
             if (txnId) {
                 try {
-                    await client.request('sync.abort', { txnId });
+                    await client.request('sync.abort', { txnId, leaseId: lease });
                 }
                 catch { /* applying, committed or connection gone */ }
             }
@@ -226,14 +308,13 @@ export async function syncWorkspace(client, matcher, options) {
             planDigest: plan.planDigest,
             changes,
             needed,
+            ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
+            agentIdentity,
+            sourceDigest: scanned.digest,
         });
-        if (options.mode === 'plan') {
-            await client.request('sync.abort', { txnId });
-            await report(options.onProgress, { phase: 'done', changes: changes.length, digest: plan.planDigest });
-            return { planDigest: plan.planDigest, planToken, changes, needed };
-        }
         if (options.planToken !== undefined && options.planToken !== planToken) {
-            await client.request('sync.abort', { txnId });
+            await client.request('sync.abort', { txnId, leaseId: lease });
+            txnId = undefined;
             throw new AgentError('PLAN_STALE', 'the replica or plan changed since it was approved; plan again');
         }
         let uploaded = 0;
@@ -257,7 +338,7 @@ export async function syncWorkspace(client, matcher, options) {
             });
         }
         await report(options.onProgress, { phase: 'committing', digest: plan.planDigest });
-        const committed = (await client.request('sync.commit', { txnId, planDigest: plan.planDigest }, 1_800_000));
+        const committed = (await client.request('sync.commit', { txnId, leaseId: lease, planDigest: plan.planDigest }, 1_800_000));
         await report(options.onProgress, {
             phase: 'done',
             changes: changes.length,
@@ -277,7 +358,7 @@ export async function syncWorkspace(client, matcher, options) {
         options.signal?.removeEventListener('abort', onAbort);
         if (txnId) {
             try {
-                await client.request('sync.abort', { txnId });
+                await client.request('sync.abort', { txnId, leaseId: lease });
             }
             catch { /* committed or already aborted */ }
         }
@@ -288,8 +369,9 @@ export async function syncWorkspace(client, matcher, options) {
     }
 }
 export async function inspectRecovery(client, workspaceId, root, signal) {
-    await openWorkspace(client, workspaceId, root, false, signal);
-    const result = (await client.request('sync.inspect', { workspaceId }));
+    // The agent reads the journal for this root directly; a read must never
+    // provision a missing state directory.
+    const result = (await client.request('sync.inspect', { workspaceId, root }));
     throwIfAborted(signal);
     return result;
 }
@@ -300,14 +382,30 @@ export async function recoverWorkspace(client, workspaceId, root, mode = 'recove
     if (!inspected.txnId)
         throw new AgentError('OPERATION_UNKNOWN', 'recovery state has no transaction id');
     throwIfAborted(signal);
-    if (mode === 'abort') {
-        await client.request('sync.abort', { txnId: inspected.txnId });
-        const current = await status(client, workspaceId, root, signal);
-        return { ...inspected, recovered: true, generation: current.generation, manifestDigest: current.manifestDigest, state: 'READY' };
+    await openWorkspace(client, workspaceId, root, false, signal);
+    const lease = operationId();
+    await client.request('workspace.lease', {
+        workspaceId,
+        operationId: lease,
+        ttlMs: 600_000,
+        recovery: true,
+    });
+    try {
+        if (mode === 'abort') {
+            await client.request('sync.abort', { txnId: inspected.txnId, leaseId: lease });
+            const current = await status(client, workspaceId, root, signal);
+            return { ...inspected, recovered: true, generation: current.generation, manifestDigest: current.manifestDigest, state: 'READY' };
+        }
+        const resumed = (await client.request('sync.recover', { txnId: inspected.txnId, leaseId: lease }, 1_800_000));
+        throwIfAborted(signal);
+        return { ...inspected, recovered: true, state: 'READY', generation: resumed.generation, manifestDigest: resumed.manifestDigest };
     }
-    const resumed = (await client.request('sync.recover', { txnId: inspected.txnId }, 1_800_000));
-    throwIfAborted(signal);
-    return { ...inspected, recovered: true, state: 'READY', generation: resumed.generation, manifestDigest: resumed.manifestDigest };
+    finally {
+        try {
+            await client.request('workspace.release', { leaseId: lease });
+        }
+        catch { /* connection gone */ }
+    }
 }
 function appendTail(current, chunk) {
     return (current + chunk.toString('utf8')).slice(-4096);
@@ -456,55 +554,135 @@ export async function execCommand(client, options) {
     throwIfAborted(options.signal);
     return result;
 }
-/** Resolve a local write target and reject symlinks on the destination or its parent. */
-export function canonicalTransferTarget(file) {
-    const absolute = path.resolve(file);
-    const target = canonicalArtifactTarget(path.dirname(absolute), path.basename(absolute));
-    try {
-        if (fs.lstatSync(target).isSymbolicLink()) {
-            throw new AgentError('PATH_UNSAFE', `destination ${target} is a symlink`);
+/**
+ * Reject symlinks in every existing component of a local path and return the
+ * path the I/O will actually open. This is deliberately stricter than
+ * realpath: a symlink may never redirect a transfer outside the approved path.
+ */
+function assertNoSymlinkComponents(absolute) {
+    const parsed = path.parse(absolute);
+    const relative = absolute.slice(parsed.root.length);
+    let current = parsed.root;
+    for (const component of relative.split(path.sep)) {
+        if (component === '')
+            continue;
+        current = path.join(current, component);
+        let metadata;
+        try {
+            metadata = fs.lstatSync(current);
         }
+        catch (error) {
+            if (error.code === 'ENOENT')
+                return;
+            throw error;
+        }
+        if (metadata.isSymbolicLink()) {
+            throw new AgentError('PATH_UNSAFE', `${absolute} contains a symlink at ${current}`);
+        }
+        if (current !== absolute && !metadata.isDirectory()) {
+            throw new AgentError('PATH_UNSAFE', `${absolute} has a non-directory parent at ${current}`);
+        }
+    }
+}
+/** Canonical local source for an upload; the returned path is the one opened. */
+export function canonicalTransferSource(file) {
+    const absolute = path.resolve(file);
+    assertNoSymlinkComponents(absolute);
+    const metadata = fs.lstatSync(absolute);
+    if (!metadata.isFile()) {
+        throw new AgentError('PATH_UNSAFE', `local file ${absolute} must be a regular file`);
+    }
+    return absolute;
+}
+/** Resolve a local write target without following any symlink component. */
+export function canonicalTransferTarget(file, createParent = true) {
+    const absolute = path.resolve(file);
+    assertNoSymlinkComponents(absolute);
+    let metadata;
+    try {
+        metadata = fs.lstatSync(absolute);
     }
     catch (error) {
         if (error.code !== 'ENOENT')
             throw error;
     }
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    return target;
+    if (metadata?.isSymbolicLink()) {
+        throw new AgentError('PATH_UNSAFE', `destination ${absolute} is a symlink`);
+    }
+    if (metadata && !metadata.isFile()) {
+        throw new AgentError('PATH_UNSAFE', `destination ${absolute} is not a regular file`);
+    }
+    if (createParent)
+        fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    // Re-check after mkdir: a concurrently introduced symlink must not slip in.
+    assertNoSymlinkComponents(path.dirname(absolute));
+    return absolute;
+}
+async function sha256Fd(fd) {
+    const hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let position = 0;
+    for (;;) {
+        const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+        if (bytesRead === 0)
+            break;
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+    }
+    return `sha256:${hash.digest('hex')}`;
 }
 export async function uploadFile(client, options) {
     throwIfAborted(options.signal);
     requireCapability(client, 'transfer');
-    let metadata;
+    let source;
     try {
-        metadata = fs.lstatSync(options.source);
+        source = canonicalTransferSource(options.source);
     }
-    catch {
+    catch (error) {
+        if (error instanceof AgentError)
+            throw error;
         throw new AgentError('NOT_FOUND', `local file ${options.source} does not exist`);
     }
-    if (metadata.isSymbolicLink() || !metadata.isFile()) {
-        throw new AgentError('PATH_UNSAFE', `local file ${options.source} must be a regular file`);
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+    const fd = fs.openSync(source, fs.constants.O_RDONLY | noFollow);
+    try {
+        const metadata = fs.fstatSync(fd);
+        if (!metadata.isFile()) {
+            throw new AgentError('PATH_UNSAFE', `local file ${source} must be a regular file`);
+        }
+        const digest = await sha256Fd(fd);
+        throwIfAborted(options.signal);
+        await report(options.onProgress, { phase: 'opening', bytes: 0 });
+        // An upload is a write: scratch has no sync lifecycle, so the agent must
+        // create its root and state before the first file lands.
+        await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
+        const put = (await client.request('transfer.put', {
+            workspaceId: options.workspaceId,
+            path: options.path,
+            size: metadata.size,
+            digest,
+            overwrite: options.overwrite === true,
+        }));
+        await report(options.onProgress, { phase: 'uploading', bytes: 0, digest });
+        await client.uploadFd(put.streamId, fd, options.signal);
+        const after = fs.fstatSync(fd);
+        if (after.size !== metadata.size || after.mtimeMs !== metadata.mtimeMs) {
+            throw new AgentError('BLOB_CORRUPT', `local file ${source} changed during upload`);
+        }
+        await report(options.onProgress, { phase: 'done', bytes: metadata.size, digest });
+        return { bytes: metadata.size, digest, file: options.path };
     }
-    const digest = await sha256File(options.source);
-    throwIfAborted(options.signal);
-    await report(options.onProgress, { phase: 'opening', bytes: 0 });
-    await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
-    const put = (await client.request('transfer.put', {
-        workspaceId: options.workspaceId,
-        path: options.path,
-        size: metadata.size,
-        digest,
-        overwrite: options.overwrite === true,
-    }));
-    await report(options.onProgress, { phase: 'uploading', bytes: 0, digest });
-    await client.uploadFile(put.streamId, options.source);
-    await report(options.onProgress, { phase: 'done', bytes: metadata.size, digest });
-    return { bytes: metadata.size, digest, file: options.path };
+    finally {
+        fs.closeSync(fd);
+    }
 }
 export async function downloadFile(client, options) {
     throwIfAborted(options.signal);
     requireCapability(client, 'transfer');
     const target = canonicalTransferTarget(options.dest);
+    if (options.expectedTarget !== undefined && target !== options.expectedTarget) {
+        throw new AgentError('PATH_UNSAFE', `download target changed after permission check: expected ${options.expectedTarget}, got ${target}`);
+    }
     if (fs.existsSync(target) && options.overwrite !== true) {
         throw new AgentError('DEST_EXISTS', `${target} exists; pass overwrite`);
     }
@@ -514,9 +692,9 @@ export async function downloadFile(client, options) {
             state: probe.state,
         });
     }
-    await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
+    await openWorkspaceReadOnly(client, options.workspaceId, options.root, options.signal);
     const parent = path.dirname(target);
-    const temporary = path.join(parent, `.fleet-download-${process.pid}-${Date.now()}`);
+    const temporary = path.join(parent, `.fleet-download-${process.pid}-${crypto.randomBytes(8).toString('hex')}`);
     await report(options.onProgress, { phase: 'opening', bytes: 0 });
     const opened = (await client.request('transfer.get', {
         workspaceId: options.workspaceId,
@@ -527,7 +705,8 @@ export async function downloadFile(client, options) {
     try {
         await client.collectToFile(opened.streamId, temporary, {
             initialCredit: 8 * 1024 * 1024,
-            timeoutMs: 300_000,
+            timeoutMs: 1_800_000,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         throwIfAborted(options.signal);
         const digest = await sha256File(temporary);
@@ -536,6 +715,11 @@ export async function downloadFile(client, options) {
             throw new AgentError('BLOB_CORRUPT', `download verification failed for ${options.path}`);
         }
         await report(options.onProgress, { phase: 'writing', bytes: size, digest });
+        // The approved path may not become a symlink while the bytes are in flight.
+        const finalTarget = canonicalTransferTarget(target, false);
+        if (finalTarget !== target) {
+            throw new AgentError('PATH_UNSAFE', `download target changed while writing: expected ${target}, got ${finalTarget}`);
+        }
         if (options.overwrite === true) {
             fs.renameSync(temporary, target);
         }
@@ -596,7 +780,7 @@ export function canonicalArtifactTarget(dest, artifact) {
 export async function fetchArtifact(client, options) {
     throwIfAborted(options.signal);
     await report(options.onProgress, { phase: 'opening', bytes: 0 });
-    await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
+    await openWorkspaceReadOnly(client, options.workspaceId, options.root, options.signal);
     const opened = (await client.request('artifact.open', {
         workspaceId: options.workspaceId,
         path: options.artifact,
@@ -606,7 +790,8 @@ export async function fetchArtifact(client, options) {
     let lastProgress = 0;
     const bytes = await client.collect(opened.streamId, {
         initialCredit: 8 * 1024 * 1024,
-        timeoutMs: 300_000,
+        timeoutMs: 1_800_000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
         onData: (chunk) => {
             received += chunk.length;
             const now = Date.now();

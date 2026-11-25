@@ -11,11 +11,13 @@ function acquireLock(store, lock, now) {
     if (store.createLock(lock))
         return true;
     const existing = store.readLock();
+    const existingInstance = existing?.instance;
     if (existing && lockActive(existing, now)) {
         store.log(`another supervisor is active: pid ${existing.pid}, instance ${existing.instance}`);
         return false;
     }
-    store.clearLock();
+    if (existingInstance !== undefined)
+        store.clearLock(existingInstance);
     if (store.createLock(lock))
         return true;
     store.log('could not acquire the supervisor lock');
@@ -65,6 +67,8 @@ export async function runSupervisor() {
                 updatedAt: Date.now(),
                 stateRoot,
                 activeJobs: core.pendingCount(),
+                drain: true,
+                draining: core.isDraining(),
             });
             return true;
         }
@@ -103,6 +107,7 @@ export async function runSupervisor() {
             store.log(`shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         store.removeSupervisor(instance);
+        store.clearDrain(instance);
         store.releaseLock(instance);
         process.exit(0);
     };
@@ -116,14 +121,21 @@ export async function runSupervisor() {
             void stop('lock lost');
             return;
         }
+        if (store.readDrain()?.instance === instance)
+            core.beginDrain();
+        if (core.isDraining() && core.idle()) {
+            void stop('drained');
+            return;
+        }
         checkService();
-    }, 5000));
+    }, 1000));
     process.on('SIGTERM', () => { void stop('SIGTERM'); });
     process.on('SIGINT', () => { void stop('SIGINT'); });
     process.on('SIGHUP', () => { });
     process.on('exit', () => {
         try {
             store.removeSupervisor(instance);
+            store.clearDrain(instance);
             store.releaseLock(instance);
         }
         catch {

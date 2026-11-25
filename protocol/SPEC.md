@@ -63,27 +63,32 @@ Identifiers are strings.
 |---|---|---|
 | `session.initialize` | C→A | handshake |
 | `session.shutdown` | C→A | graceful close |
-| `workspace.open` | C→A | register a replica root |
+| `workspace.open` | C→A | register or read a replica root (`readOnly` never provisions) |
 | `workspace.status` | C→A | generation, lock, recovery state |
-| `workspace.close` | C→A | forget a workspace (keeps files) |
 | `workspace.lease` | C→A | acquire the workspace lease |
 | `workspace.release` | C→A | release the lease |
 | `sync.begin` | C→A | open a transaction |
 | `sync.entries` | C→A | stream the desired manifest |
 | `sync.plan` | C→A | compute the diff; returns the digest and counts |
 | `sync.planPage` | C→A | page through changes or needed digests |
+| `sync.previewBegin` | C→A | start an in-memory, read-only plan |
+| `sync.previewEntries` | C→A | add entries to a preview |
+| `sync.previewPlan` | C→A | compute a preview diff without a journal |
+| `sync.previewPage` | C→A | page preview changes or needed digests |
+| `sync.previewEnd` | C→A | discard a preview |
 | `blob.put` | C→A | upload one blob, then DATA frames |
-| `sync.commit` | C→A | apply the plan atomically per §7.6 |
-| `sync.abort` | C→A | abandon a transaction before apply |
-| `sync.recover` | C→A | complete an interrupted apply |
-| `sync.inspect` | C→A | transaction state after a crash |
+| `sync.commit` | C→A | apply the plan under the lease per §7.6 |
+| `sync.abort` | C→A | abandon a transaction before apply; requires its lease |
+| `sync.recover` | C→A | complete an interrupted apply; requires the recovery lease |
+| `sync.inspect` | C→A | transaction state after a crash; accepts `root` without opening |
 | `exec.start` | C→A | start a command |
 | `exec.status` | C→A | inspect a job |
 | `exec.cancel` | C→A | request cancellation |
 | `exec.list` | C→A | jobs of this agent instance |
 | `artifact.open` | C→A | stream one file out |
 | `stream.credit` | C→A | grant N bytes of output credit |
-| `stream.close` | C→A | close a stream early |
+| `transfer.put` | C→A | upload one file below a workspace root |
+| `transfer.get` | C→A | stream one file below a workspace root |
 | `doctor` | C→A | environment facts and limits |
 
 A response carries exactly one of `result` or `error`.
@@ -104,8 +109,8 @@ The result:
 
 ```json
 {"protocol":{"major":1,"minor":0},
- "agent":{"version":"0.1.0","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
- "capabilities":{"workspace.sync":1,"exec":1,"artifact":1},
+ "agent":{"version":"0.11.0","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
+ "capabilities":{"workspace.sync":1,"workspace.probe":1,"workspace.preview":1,"exec":1,"artifact":1,"transfer":1},
  "limits":{"maxFrame":16777216,"maxChunk":1048576,"maxControl":1048576,"maxStreams":32,
            "maxManifestEntries":500000,"defaultLeaseMs":300000}}
 ```
@@ -123,15 +128,17 @@ Rules:
 
 ### 6.1 Registration
 
-`workspace.open {workspaceId, root, stateRoot?}`
+`workspace.open {workspaceId, root, adopt?, readOnly?}`
 
 - `workspaceId` matches `^[a-z0-9][a-z0-9._-]*$`.
-- `root` MUST be inside one of the configured allowed bases (agent configuration) and MUST pass
-  the root guard: not `/`, not a system directory, not the user's home, at least two segments.
+- `root` MUST pass the root guard: not `/`, not a system directory, not the user's home, at least
+  two segments. It is canonicalized before use.
 - The agent owns `<stateRoot>/<workspaceId>/` (default `~/.local/state/fleet-agent`), containing the
   manifest, generation, journal, blob store and job records. It MUST be `0700`.
 - `workspace.open` on an unknown root creates it `0700`. On a root that exists but is not managed,
-  it refuses unless `adopt: true` is passed.
+  it refuses unless `adopt: true` is passed. `readOnly: true` loads a snapshot and never creates a
+  root, state directory or manifest; an absent workspace is returned with generation 0.
+- One real root MUST NOT be bound to two workspace ids; a conflict is `WORKSPACE_ROOT_CONFLICT`.
 
 ### 6.2 Generation
 
@@ -147,11 +154,14 @@ One lease per workspace covers every mutation (`sync.*`, `exec.start`).
 
 - The node is the authority: a second lease attempt while one is held returns `WORKSPACE_BUSY`
   with the holder's `operationId` and remaining TTL.
-- A lease expires only if its holder stopped renewing. The agent checks liveness of the connection
-  that acquired it; a lease from a closed connection is reclaimed immediately.
+- A lease has an advertised `expiresAt`. The agent checks it lazily on every lease use; an expired
+  lease is released and the caller receives `LEASE_UNKNOWN`/`LEASE_EXPIRED`. A lease from a closed
+  connection is reclaimed immediately.
 - `workspace.release {leaseId}`. A command with an unknown, expired or foreign lease returns
-  `LEASE_UNKNOWN`/`LEASE_EXPIRED` and MUST NOT mutate anything.
-- `exec.status`, `exec.cancel`, `sync.inspect`, `artifact.open` and `doctor` do not need a lease.
+  `LEASE_UNKNOWN`/`LEASE_EXPIRED` and MUST NOT mutate anything. Release is refused with
+  `WORKSPACE_BUSY` while a transaction or job of that workspace is still active.
+- `sync.commit`, `sync.abort` and `sync.recover` require the lease that owns the transaction.
+  `exec.status`, `exec.cancel`, `sync.inspect`, `artifact.open` and `doctor` do not need a lease.
 
 ## 7. Synchronization
 
@@ -215,8 +225,19 @@ Policy per transaction:
 4. For every needed blob: `blob.put {txnId, digest, size}` → `{streamId}`; DATA frames; the agent
    verifies the digest and size and stores it in the content-addressed store. A mismatch is
    `BLOB_CORRUPT`; the transaction is aborted.
-5. `sync.commit {txnId, planDigest}` → `{generation, manifestDigest}`.
-6. `sync.abort {txnId}` discards the journal and leaves the previous generation intact.
+5. `sync.commit {txnId, leaseId, planDigest}` → `{generation, manifestDigest}`. A no-op plan keeps
+   the generation unchanged.
+6. `sync.abort {txnId, leaseId}` discards a journal that has not started applying and leaves the
+   previous generation intact. An applying transaction needs `sync.recover`.
+
+#### Read-only preview
+
+`sync.previewBegin {workspaceId, root, policy}` → `{txnId, generation, state}` loads the current
+manifest without opening or creating the workspace. `sync.previewEntries` and `sync.previewPlan`
+mirror the transaction steps but keep the result in memory. `sync.previewEnd` discards it. No
+journal, blob, root or generation is written. A preview works for an absent replica; an unmanaged
+root and a recovery journal are refused. The controller uses this for `mode=plan` and for checking a
+plan approval before provisioning.
 
 ### 7.5 Filesystem hazards
 
@@ -254,8 +275,9 @@ generation precondition.
 On startup, a workspace with an unfinished journal is `RECOVERY`:
 
 - `sync.inspect {workspaceId}` → `{state:"RECOVERY"|"READY", txnId?, planDigest?, startedAt?}`
-- `sync.abort {txnId}` clears a transaction that has not started applying.
-- `sync.recover {txnId}` completes an apply that was interrupted; the apply is idempotent.
+- `sync.abort {txnId, leaseId}` clears a transaction that has not started applying.
+- `sync.recover {txnId, leaseId}` completes an apply that was interrupted; the apply is idempotent.
+  A lease acquired with `recovery: true` is allowed while the workspace is in `RECOVERY`.
 - Until resolved, `workspace.lease` returns `RECOVERY_REQUIRED`.
 
 ## 8. Execution
@@ -285,11 +307,18 @@ On startup, a workspace with an unfinished journal is `RECOVERY`:
   record is never rewritten to a guess.
 - Exit codes are the process's own. The agent maps a signal to `signal` and `exitCode: null`.
 
-## 9. Artifacts
+## 9. Artifacts and transfers
 
 `artifact.open {workspaceId, path}` → `{streamId, size, digest}`; DATA frames; `stream.end`.
 Paths obey §7.5. A symlink is rejected unless `follow:true`, which the agent refuses for links
 outside the workspace. The controller verifies the digest itself.
+
+`transfer.put {workspaceId, path, size, digest, overwrite}` → `{streamId}`; DATA frames;
+`stream.end` verifies size and digest, fsyncs the temporary file and publishes it atomically.
+`overwrite:false` uses an atomic no-clobber link and returns `DEST_EXISTS` if the target appeared.
+`transfer.get {workspaceId, path}` hashes and streams one regular file; symlinks and special files
+are refused. The controller decides which root is scratch; the agent enforces the root boundary,
+not a scratch identity.
 
 ## 10. Errors
 
@@ -301,10 +330,11 @@ Every error response uses a stable code, a human message and optional details:
 ```
 
 Codes: `INVALID_FRAME`, `INVALID_REQUEST`, `NOT_INITIALIZED`, `UNSUPPORTED_PROTOCOL`,
-`UNSUPPORTED_CAPABILITY`, `WORKSPACE_UNKNOWN`, `WORKSPACE_BUSY`, `RECOVERY_REQUIRED`,
-`GENERATION_MISMATCH`, `LEASE_UNKNOWN`, `LEASE_EXPIRED`, `PATH_UNSAFE`, `UNSUPPORTED_METADATA`,
-`PLAN_MISMATCH`, `BLOB_MISSING`, `BLOB_CORRUPT`, `DISK_FULL`, `PERMISSION_DENIED`,
-`RESOURCE_EXHAUSTED`, `OPERATION_UNKNOWN`, `CANCELLED`, `INTERNAL`.
+`UNSUPPORTED_CAPABILITY`, `WORKSPACE_UNKNOWN`, `WORKSPACE_BUSY`, `WORKSPACE_UNMANAGED`,
+`WORKSPACE_ROOT_CONFLICT`, `RECOVERY_REQUIRED`, `GENERATION_MISMATCH`, `LEASE_UNKNOWN`,
+`LEASE_MISMATCH`, `LEASE_EXPIRED`, `PATH_UNSAFE`, `UNSUPPORTED_METADATA`, `PLAN_MISMATCH`,
+`BLOB_MISSING`, `BLOB_CORRUPT`, `DISK_FULL`, `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`,
+`OPERATION_UNKNOWN`, `CANCELLED`, `INTERNAL`.
 
 `retryable` is advice, never an instruction to replay a mutation.
 
@@ -326,7 +356,7 @@ Codes: `INVALID_FRAME`, `INVALID_REQUEST`, `NOT_INITIALIZED`, `UNSUPPORTED_PROTO
 | manifest entries | 500 000 | reject the transaction |
 | streams per session | 32 | reject |
 | spool per stream | 8 MiB | block or truncate per job policy |
-| lease TTL | 300 000 ms | expire |
+| lease TTL | 300 000 ms | lazy check on lease use |
 | operation record TTL | 24 h | prune |
 
 ## 13. Conformance

@@ -34,7 +34,16 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Optional project files and derived identity | WS-07…WS-10 | `test/unit/config.test.js` |
 | Host operation allowances | HOST-01, HOST-02 | `test/unit/config.test.js` |
 | Supervisor version handover policy | HOST-03 | `test/unit/health.test.js` |
+| Draining supervisor defers replacement | HOST-08 | `test/unit/health.test.js` |
 | Read-only probes, lease binding, cwd safety | CTX-01…CTX-05 | `test/v1/protocol.test.js`, `test/unit/operations.test.js`, `test/unit/run.test.js` |
+| Read-only preview, no journal, absent base | SYNC-11 | `test/v1/protocol.test.js`, `test/unit/operations.test.js` |
+| Plan approval binds host, agent and source content | SYNC-12 | `test/unit/operations.test.js` |
+| No-op apply keeps the generation | SYNC-13 | `test/v1/protocol.test.js` |
+| One root per workspace id | WS-11 | `test/v1/protocol.test.js` |
+| Read-only open never provisions | WS-12 | `test/v1/protocol.test.js` |
+| Empty host allowlist, policy preservation, legacy policy | HOST-04…HOST-06 | `test/unit/config.test.js` |
+| Upload/download permission paths | XFR-06, XFR-07 | `test/unit/plugin.test.js` |
+| Supervisor drain refuses new claims | HOST-07 | `test/unit/supervisor.test.js` |
 | Scratch and single-file transfer | CTX-06, XFR-01…XFR-05 | `test/unit/scratch.test.js`, `test/v1/protocol.test.js`, `test/unit/jobs.test.js`, `test/unit/supervised.test.js` |
 | Default workspace for projectless chats | PROJ-01…PROJ-04, SEL-09 | `test/unit/config.test.js`, `test/unit/cli.test.js`, `test/unit/service.test.js` |
 | Detached job store, locks, retention | — | `test/unit/job-store.test.js` |

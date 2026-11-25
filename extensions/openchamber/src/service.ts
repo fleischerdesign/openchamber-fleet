@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   compileExcludes,
+  hostAllows,
   isOpenChamberInternalDirectory,
   loadConfigDocuments,
   loadDefaults,
@@ -12,7 +13,7 @@ import {
   saveDefaults,
   workspaceLabel,
 } from '../../../src/config.js';
-import type { HostConfig, WorkspaceConfig } from '../../../src/config.js';
+import type { HostConfig, HostOperation, WorkspaceConfig } from '../../../src/config.js';
 import { FleetError, friendlyErrorMessage } from '../../../src/errors.js';
 import {
   configuredStateRoot,
@@ -139,12 +140,16 @@ function configDirectoryOf(directory: string): string {
   }
 }
 
-function hostOf(config: WorkspaceConfig, value: Record<string, unknown>): HostConfig {
+function hostOf(config: WorkspaceConfig, value: Record<string, unknown>, operation: HostOperation): HostConfig {
   const alias = value.host;
   if (typeof alias !== 'string' || !config.hosts[alias]) {
     throw new AgentError('INVALID_REQUEST', `unknown host ${JSON.stringify(alias)}`);
   }
-  return config.hosts[alias]!;
+  const host = config.hosts[alias]!;
+  if (!hostAllows(host, operation)) {
+    throw new AgentError('HOST_NOT_ALLOWED', `host ${JSON.stringify(alias)} is not allowed for ${operation}`);
+  }
+  return host;
 }
 
 function agentPath(): string {
@@ -178,7 +183,15 @@ async function refresh(directory: string): Promise<GuestStatusView> {
     return view;
   }
 
-  const aliases = Object.keys(config.hosts).slice(0, 12);
+  const rows: GuestStatusRow[] = fallback
+    ? [{ kind: 'note', id: 'default', text: `Default workspace: ${workspaceLabel(config)} (no project selected).`, tone: 'muted' }]
+    : [];
+  const aliases = Object.keys(config.hosts)
+    .filter((alias) => hostAllows(config.hosts[alias]!, 'workspace'))
+    .slice(0, 12);
+  if (aliases.length === 0) {
+    rows.push({ kind: 'note', id: 'host-policy', text: 'No configured host is allowed for workspace operations.', tone: 'warning' });
+  }
   const results = await Promise.allSettled(aliases.map(async (alias) => {
     const host = config.hosts[alias]!;
     const client = await connectSsh(host, { agentPath: agentPath() });
@@ -188,9 +201,6 @@ async function refresh(directory: string): Promise<GuestStatusView> {
       client.close();
     }
   }));
-  const rows: GuestStatusRow[] = fallback
-    ? [{ kind: 'note', id: 'default', text: `Default workspace: ${workspaceLabel(config)} (no project selected).`, tone: 'muted' }]
-    : [];
   results.forEach((result, index) => {
     const alias = aliases[index]!;
     if (result.status === 'fulfilled') {
@@ -261,8 +271,21 @@ const server = http.createServer(async (request, response) => {
 
     const body = await readBody(request);
     if (url.pathname === '/default') {
-      const value = typeof body.directory === 'string' && body.directory.length > 0 ? body.directory : null;
+      if (!Object.prototype.hasOwnProperty.call(body, 'directory')) {
+        return reply(response, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'directory is required; send null to clear the default' } });
+      }
+      if (body.directory !== null && (typeof body.directory !== 'string' || body.directory.length === 0)) {
+        return reply(response, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'directory must be an absolute project path or null' } });
+      }
       try {
+        let value: string | null = null;
+        if (typeof body.directory === 'string') {
+          const resolved = path.resolve(body.directory);
+          if (isOpenChamberInternalDirectory(resolved)) {
+            throw new AgentError('INVALID_REQUEST', 'an internal OpenChamber chat directory cannot be the default workspace');
+          }
+          value = fs.realpathSync(resolved);
+        }
         const saved = saveDefaults(value);
         cache.clear();
         return reply(response, 200, { ok: true, result: saved });
@@ -282,7 +305,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     const config = loadSessionConfig(directory).config;
-    const host = hostOf(config, body);
+    const host = hostOf(config, body, 'workspace');
 
     if (url.pathname === '/status') {
       const client = await connectSsh(host, { agentPath: agentPath() });
@@ -302,6 +325,7 @@ const server = http.createServer(async (request, response) => {
           workspaceId: config.name,
           source: config.dir,
           root: host.root,
+          hostIdentity: `${host.ssh}:${host.port}`,
           excludes,
           mode: 'plan',
         });
@@ -313,6 +337,7 @@ const server = http.createServer(async (request, response) => {
             host: host.alias,
             mode: 'plan',
             planDigest: result.planDigest,
+            planToken: result.planToken ?? null,
             changes: result.changes.length,
             needed: result.needed.length,
             items: result.changes.slice(0, 200),

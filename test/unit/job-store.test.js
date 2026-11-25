@@ -100,6 +100,8 @@ describe('detached job store', () => {
     assert.deepEqual(store.readLock(), lock);
     store.releaseLock('not-the-owner');
     assert.deepEqual(store.readLock(), lock);
+    store.clearLock('not-the-owner');
+    assert.deepEqual(store.readLock(), lock);
     store.releaseLock('one');
     assert.equal(store.readLock(), null);
   });

@@ -73,6 +73,7 @@ export class SupervisedJobRegistry {
             sessionID: input.sessionID,
             workspace: input.config.name,
             directory: this.ctx.location?.directory ?? input.config.dir,
+            ...(input.target === undefined ? {} : { target: input.target }),
             host: {
                 alias: input.host.alias,
                 ssh: input.host.ssh,
@@ -453,6 +454,7 @@ export class SupervisedJobRegistry {
             sessionID: record.sessionID,
             workspace: record.workspace,
             directory: record.directory,
+            ...(record.target === undefined ? {} : { target: record.target }),
             host: record.host.alias,
             argv: [...record.argv],
             state: record.state,

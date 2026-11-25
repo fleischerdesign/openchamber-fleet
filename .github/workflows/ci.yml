@@ -33,11 +33,14 @@ jobs:
       - run: npm test
         env:
           FLEET_AGENT_BIN: agent/target/debug/fleet-agent
+      - name: Bundles match the TypeScript sources
+        run: git diff --exit-code extensions/openchamber/plugin/dist extensions/openchamber/service extensions/openchamber/supervisor
 
   nix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v32
-      - name: Build the Nix controller package
-        run: nix build .#controller --print-build-logs
+      - name: Run the declared flake gate
+        run: nix flake check --max-jobs 1 --print-build-logs
+

@@ -70,6 +70,7 @@ export class SupervisorCore {
   private queued: string[] = [];
   private ticking = false;
   private stopping = false;
+  private draining = false;
 
   constructor(options: SupervisorCoreOptions) {
     this.store = options.store;
@@ -104,13 +105,21 @@ export class SupervisorCore {
       this.failPending(jobId, value, 'The supervisor restarted before the job started.');
       this.store.deleteClaimed(jobId);
     }
-    for (const jobId of this.store.listRequestIds()) {
-      const value = this.store.readRequest(jobId);
-      this.failPending(jobId, value, 'The supervisor restarted before the job started.');
-      this.store.deleteRequest(jobId);
-    }
+    // Unclaimed requests are safe to process: no client was told they started.
+    // A draining supervisor leaves exactly this state for its successor.
     for (const jobId of this.store.listCancelIds()) this.store.deleteCancel(jobId);
     this.store.prune(now);
+  }
+
+  /** Stop accepting new spool requests; accepted work still finishes. */
+  beginDrain(): void {
+    if (this.draining || this.stopping) return;
+    this.draining = true;
+    this.log('drain requested: refusing new jobs until accepted work is finished');
+  }
+
+  isDraining(): boolean {
+    return this.draining;
   }
 
   /** Process cancellations and start requests, then fill free execution slots. */
@@ -119,7 +128,7 @@ export class SupervisorCore {
     this.ticking = true;
     try {
       await this.processCancels();
-      this.processRequests();
+      if (!this.draining) this.processRequests();
       this.pump();
     } catch (error) {
       this.log(`tick failed: ${messageOf(error)}`);
@@ -414,6 +423,7 @@ export class SupervisorCore {
       sessionID: request.sessionID,
       workspace: request.workspace,
       directory: request.directory,
+      ...(request.target === undefined ? {} : { target: request.target }),
       host: request.host,
       argv: [...request.argv],
       ...(request.cwd === undefined ? {} : { cwd: request.cwd }),

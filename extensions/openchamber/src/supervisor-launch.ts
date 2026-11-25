@@ -42,22 +42,25 @@ async function retireStale(
   record: SupervisorDiscovery,
   options: EnsureSupervisorOptions,
 ): Promise<boolean> {
-  options.log(`retiring supervisor ${record.pid} version ${record.version} for ${options.version}`);
-  try {
-    process.kill(record.pid, 'SIGTERM');
-  } catch {
-    // The process may already be gone; the discovery check below decides.
+  if (record.drain !== true) {
+    options.log(
+      `supervisor ${record.pid} version ${record.version} does not support drain; restart required`,
+    );
+    return false;
   }
-  const deadline = Date.now() + 6000;
+  options.log(`draining supervisor ${record.pid} version ${record.version} for ${options.version}`);
+  store.requestDrain(record.instance);
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const current = readHealthySupervisor(store);
-    if (!current || current.pid !== record.pid) {
+    if (!current || current.instance !== record.instance) {
       store.removeSupervisor(record.instance);
+      store.clearDrain(record.instance);
       return true;
     }
     await delay(100);
   }
-  options.log(`supervisor ${record.pid} did not retire within 6s`);
+  options.log(`supervisor ${record.pid} is still draining; the successor starts when it is idle`);
   return false;
 }
 
@@ -77,29 +80,36 @@ async function ensure(options: EnsureSupervisorOptions): Promise<SupervisorState
     return 'healthy';
   }
   if (decision === 'defer') {
+    if (healthy?.drain === true) store.requestDrain(healthy.instance);
     if (deferredPid !== healthy?.pid) {
       deferredPid = healthy?.pid ?? null;
       options.log(
-        `supervisor ${healthy?.pid} runs ${healthy?.version} with active work; handover deferred until it is idle`,
+        healthy?.drain === true
+          ? `supervisor ${healthy?.pid} runs ${healthy?.version}; draining accepted work before replacement`
+          : `supervisor ${healthy?.pid} runs ${healthy?.version} without drain support; restart required`,
       );
     }
     return 'healthy';
   }
   if (decision === 'replace' && healthy) {
     const retired = await retireStale(store, healthy, options);
-    if (!retired) return 'healthy';
+    // An old build without drain must not be signalled: report that a manual
+    // restart is required instead of pretending the handover happened.
+    if (!retired) return healthy.drain === true ? 'healthy' : 'unavailable';
   }
   deferredPid = null;
 
   const lock = store.readLock();
+  const lockInstance = lock?.instance;
   if (lock && lockActive(lock)) {
     // Another supervisor is starting; give it a moment instead of spawning a second.
     if (await waitForHealthy(store, 3000)) return 'healthy';
     options.log(`supervisor pid ${lock.pid} holds the lock but did not become healthy`);
     return 'unavailable';
   }
-  if (lock) store.clearLock();
+  if (lockInstance !== undefined) store.clearLock(lockInstance);
   store.removeSupervisor();
+  store.clearDrain();
 
   const entry = options.entry ?? fileURLToPath(new URL('../supervisor/main.js', import.meta.url));
   if (!fs.existsSync(entry)) {

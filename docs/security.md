@@ -26,7 +26,8 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   against a safe character set before it becomes part of the SSH command.
 - The handshake reports protocol, agent version, installation id and capabilities; a required
   capability the agent lacks aborts the session. A capability is advertised only after its handler
-  exists.
+  exists. Read-only planning negotiates `workspace.preview`; an older agent fails the plan instead
+  of silently using the mutating transaction path.
 
 ## Files and paths
 
@@ -36,7 +37,10 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 - Files are written to a temporary name in the destination directory, `fsync`ed and renamed; no
   partial file is visible under a final name.
 - The root guard refuses `/`, system directories, the home directory and paths with fewer than two
-  segments, because commit deletes managed paths.
+  segments, because commit deletes managed paths. Roots are canonicalized before use, and one real
+  root may be bound to only one workspace id.
+- `workspace.open` and `sync.inspect` have read-only forms that never create a root, state directory
+  or journal. Status, plan, recovery inspection and artifact download use them.
 
 ## Execution
 
@@ -50,6 +54,10 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 
 - Workspace state is `0700`; files `0600`.
 - The lease is a kernel `flock`: it disappears with the process, so a crash cannot leave a lock.
+  `sync.commit`, `sync.abort` and `sync.recover` require the lease that owns the transaction; a
+  release is refused while a transaction or job is still active.
+- A read-only plan is an in-memory preview. It creates no journal, so a cancelled preview cannot
+  leave `RECOVERY` behind.
 - Job records and the transaction journal are written before the effect and updated after it.
   `unknown` is recorded, never rewritten to a guess.
 
@@ -66,9 +74,12 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   environment.
 - The `fleet.run` / `fleet.exec` / `shell` approvals are evaluated before the request is written.
   The supervisor executes only that approved argv; it is not a second policy engine.
-- A supervisor crash, an OpenChamber service stop or a machine reboot is reported as `interrupted`.
-  The remote agent kills its process group when the SSH session closes, so the interruption does not
-  leave an orphan. A detached job does not survive a machine reboot.
+- A supervisor of another version is drained, not killed: it stops claiming new requests, finishes
+  accepted work and exits; the successor starts afterwards. An older supervisor without drain
+  support is reported as `restart required` instead of pretending a safe handover. A supervisor
+  crash, an OpenChamber service stop or a machine reboot is reported as `interrupted`. The remote
+  agent kills its process group when the SSH session closes, so the interruption does not leave an
+  orphan. A detached job does not survive a machine reboot.
 
 ## What is not protected
 
@@ -80,9 +91,15 @@ would need a separate identity and a broker; v1 does not pretend to have one.
 - Secrets inside the workspace are replicated. Exclude them or keep them out of the tree.
 - OpenCode permissions are policy checks, not a sandbox. `fleet_exec` evaluates a host/cwd/env-key
   descriptor under `fleet.exec` and the exact argv under `shell`; execution-sensitive environment
-  overrides must be declared in the project configuration. `fleet_fetch` canonicalizes the final local path and
-  evaluates it under `edit` and `external_directory`; `fleet_sync` apply and `fleet_recover` use
-  dedicated actions. Planning never adopts a directory.
+  overrides must be declared in the project configuration. `fleet_upload` evaluates the canonical
+  source under `read`, `external_directory` and `fleet.upload`; `fleet_download` evaluates the same
+  canonical local target under `edit`, `external_directory` and `fleet.download`. `fleet_fetch`
+  canonicalizes the final local path and evaluates it under `edit` and `external_directory`;
+  `fleet_sync` apply, `fleet_recover` and `fleet.job.cancel` use dedicated actions. Planning never
+  adopts a directory; `adopt` is CLI-only.
+- `allow` is controller policy, not an agent sandbox. The agent's transfer handler writes below the
+  workspace root it was given; "uploads only into scratch" follows from the controller choosing the
+  scratch root, not from a second agent-side identity.
 - The detached supervisor runs with the user's full privileges, like the extension service and the
   OpenCode plugin. It is inside the same trust boundary, not a sandbox.
 - Without the extension service (the npm-only plugin path), background jobs stay in the OpenCode

@@ -58,7 +58,7 @@ describe('recovery after a dead controller (FAIL-01)', { skip: !available && `ag
     });
     await first.request('sync.plan', { txnId: begin.txnId });
     first.close();
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     const second = await connectProcess(binary);
     try {
@@ -70,7 +70,9 @@ describe('recovery after a dead controller (FAIL-01)', { skip: !available && `ag
       assert.equal(inspected.state, 'RECOVERY');
       assert.equal(inspected.txnId, begin.txnId);
 
-      await second.request('sync.abort', { txnId: begin.txnId });
+      const recoveryLease = await second.request('workspace.lease', { workspaceId: 'fail-demo', operationId: 'op-recover', ttlMs: 60_000, recovery: true });
+      await second.request('sync.abort', { txnId: begin.txnId, leaseId: recoveryLease.leaseId });
+      await second.request('workspace.release', { leaseId: recoveryLease.leaseId });
       const status = await second.request('workspace.status', { workspaceId: 'fail-demo' });
       assert.equal(status.recovery, false);
       assert.equal(status.generation, workspace.generation);
@@ -92,10 +94,10 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
       await client.request('sync.entries', { txnId: begin.txnId, entries: [] });
       await client.request('sync.plan', { txnId: begin.txnId });
       await assert.rejects(
-        client.request('sync.commit', { txnId: begin.txnId, planDigest: 'sha256:' + '0'.repeat(64) }),
+        client.request('sync.commit', { txnId: begin.txnId, leaseId: 'op-plan', planDigest: 'sha256:' + '0'.repeat(64) }),
         (error) => error instanceof AgentError && error.code === 'PLAN_MISMATCH',
       );
-      await client.request('sync.abort', { txnId: begin.txnId });
+      await client.request('sync.abort', { txnId: begin.txnId, leaseId: 'op-plan' });
     } finally {
       client.close();
     }
@@ -115,7 +117,7 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
       await client.request('sync.plan', { txnId: begin.txnId });
       const put = await client.request('blob.put', { txnId: begin.txnId, digest, size: 3 });
       await assert.rejects(client.upload(put.streamId, Buffer.from('abc')), (error) => error instanceof AgentError && error.code === 'BLOB_CORRUPT');
-      await client.request('sync.abort', { txnId: begin.txnId });
+      await client.request('sync.abort', { txnId: begin.txnId, leaseId: 'op-blob' });
     } finally {
       client.close();
     }
@@ -159,7 +161,7 @@ async function stageTransaction(client, workspaceId, rootDir, content) {
   await client.request('sync.plan', { txnId: begin.txnId });
   const put = await client.request('blob.put', { txnId: begin.txnId, digest, size: content.length });
   await client.upload(put.streamId, content);
-  return { txnId: begin.txnId };
+  return { txnId: begin.txnId, lease };
 }
 
 describe('crash during apply (SYNC-08)', { skip: !available && `agent binary not built at ${binary}` }, () => {
@@ -169,11 +171,12 @@ describe('crash during apply (SYNC-08)', { skip: !available && `agent binary not
     process.env.FLEET_AGENT_FAULT = 'crash:applying';
     let first;
     let txnId;
+    let lease;
     try {
       first = await connectProcess(binary);
-      ({ txnId } = await stageTransaction(first, 'fail-crash', crashRoot, content));
+      ({ txnId, lease } = await stageTransaction(first, 'fail-crash', crashRoot, content));
       const plan = await first.request('sync.inspect', { workspaceId: 'fail-crash' });
-      await assert.rejects(first.request('sync.commit', { txnId, planDigest: plan.planDigest }));
+      await assert.rejects(first.request('sync.commit', { txnId, leaseId: lease, planDigest: plan.planDigest }));
     } finally {
       first?.close();
       delete process.env.FLEET_AGENT_FAULT;
@@ -191,10 +194,12 @@ describe('crash during apply (SYNC-08)', { skip: !available && `agent binary not
         second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-after', ttlMs: 60_000 }),
         (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',
       );
+      const recoveryLease = await second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-crash-recover', ttlMs: 60_000, recovery: true });
       await assert.rejects(
-        second.request('sync.abort', { txnId }),
+        second.request('sync.abort', { txnId, leaseId: recoveryLease.leaseId }),
         (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',
       );
+      await second.request('workspace.release', { leaseId: recoveryLease.leaseId });
       const resumed = await recoverWorkspace(second, 'fail-crash', crashRoot, 'recover');
       assert.equal(resumed.generation, 1);
       assert.equal(resumed.recovered, true);
@@ -214,12 +219,13 @@ describe('disk full during apply', { skip: !available && `agent binary not built
     process.env.FLEET_AGENT_FAULT = 'disk-full:applying';
     let first;
     let txnId;
+    let lease;
     try {
       first = await connectProcess(binary);
-      ({ txnId } = await stageTransaction(first, 'fail-full', fullRoot, content));
+      ({ txnId, lease } = await stageTransaction(first, 'fail-full', fullRoot, content));
       const plan = await first.request('sync.inspect', { workspaceId: 'fail-full' });
       await assert.rejects(
-        first.request('sync.commit', { txnId, planDigest: plan.planDigest }),
+        first.request('sync.commit', { txnId, leaseId: lease, planDigest: plan.planDigest }),
         (error) => error instanceof AgentError && error.code === 'DISK_FULL',
       );
     } finally {
@@ -232,7 +238,7 @@ describe('disk full during apply', { skip: !available && `agent binary not built
     try {
       const reopened = await openWorkspace(second, 'fail-full', fullRoot, true);
       assert.equal(reopened.recovery, true);
-      const resumed = await second.request('sync.recover', { txnId });
+      const resumed = await recoverWorkspace(second, 'fail-full', fullRoot, 'recover');
       assert.equal(resumed.generation, 1);
       assert.equal(fs.readFileSync(path.join(fullRoot, 'file.txt'), 'utf8'), 'full payload');
     } finally {

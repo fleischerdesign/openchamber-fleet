@@ -13,11 +13,12 @@ const DEFAULT_IDLE_MS = 90_000;
 function acquireLock(store: JobStore, lock: SupervisorLock, now: number): boolean {
   if (store.createLock(lock)) return true;
   const existing = store.readLock();
+  const existingInstance = existing?.instance;
   if (existing && lockActive(existing, now)) {
     store.log(`another supervisor is active: pid ${existing.pid}, instance ${existing.instance}`);
     return false;
   }
-  store.clearLock();
+  if (existingInstance !== undefined) store.clearLock(existingInstance);
   if (store.createLock(lock)) return true;
   store.log('could not acquire the supervisor lock');
   return false;
@@ -69,6 +70,8 @@ export async function runSupervisor(): Promise<void> {
         updatedAt: Date.now(),
         stateRoot,
         activeJobs: core.pendingCount(),
+        drain: true,
+        draining: core.isDraining(),
       });
       return true;
     } catch (error) {
@@ -103,6 +106,7 @@ export async function runSupervisor(): Promise<void> {
       store.log(`shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     store.removeSupervisor(instance);
+    store.clearDrain(instance);
     store.releaseLock(instance);
     process.exit(0);
   };
@@ -118,8 +122,13 @@ export async function runSupervisor(): Promise<void> {
       void stop('lock lost');
       return;
     }
+    if (store.readDrain()?.instance === instance) core.beginDrain();
+    if (core.isDraining() && core.idle()) {
+      void stop('drained');
+      return;
+    }
     checkService();
-  }, 5000));
+  }, 1000));
 
   process.on('SIGTERM', () => { void stop('SIGTERM'); });
   process.on('SIGINT', () => { void stop('SIGINT'); });
@@ -127,6 +136,7 @@ export async function runSupervisor(): Promise<void> {
   process.on('exit', () => {
     try {
       store.removeSupervisor(instance);
+      store.clearDrain(instance);
       store.releaseLock(instance);
     } catch {
       // Best effort.

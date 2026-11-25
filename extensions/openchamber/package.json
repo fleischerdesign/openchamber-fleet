@@ -1,6 +1,6 @@
 {
   "name": "@fleischerdesign/openchamber-fleet-extension",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "openchamber": {
@@ -41,7 +41,7 @@
           "match": "fleet_status",
           "name": "Fleet status",
           "icon": "server",
-          "title": "Fleet status · {input.host}",
+          "title": "Fleet status \u00b7 {input.host}",
           "output": "card",
           "card": {
             "label": "{output.host}",
@@ -55,8 +55,14 @@
               }
             },
             "fields": [
-              { "label": "Workspace", "value": "{output.workspace}" },
-              { "label": "Next step", "value": "{output.nextStep}" }
+              {
+                "label": "Workspace",
+                "value": "{output.workspace}"
+              },
+              {
+                "label": "Next step",
+                "value": "{output.nextStep}"
+              }
             ]
           }
         },
@@ -64,17 +70,20 @@
           "match": "fleet_sync",
           "name": "Fleet sync",
           "icon": "git-commit",
-          "title": "Fleet sync · {input.host}",
-          "subtitle": "{output.changes} change(s) · {output.modeLabel}",
+          "title": "Fleet sync \u00b7 {input.host}",
+          "subtitle": "{output.changes} change(s) \u00b7 {output.modeLabel}",
           "output": "table",
-          "columns": ["action", "path"]
+          "columns": [
+            "action",
+            "path"
+          ]
         },
         {
           "match": "fleet_exec",
           "name": "Fleet exec",
           "icon": "terminal",
-          "title": "Fleet exec · {input.host}",
-          "subtitle": "{output.stateLabel} · job {output.jobId}",
+          "title": "Fleet exec \u00b7 {input.host}",
+          "subtitle": "{output.stateLabel} \u00b7 job {output.jobId}",
           "output": "card",
           "card": {
             "label": "{output.host}",
@@ -93,8 +102,14 @@
               }
             },
             "fields": [
-              { "label": "Exit", "value": "{output.exitLabel}" },
-              { "label": "Mode", "value": "{output.modeLabel}" }
+              {
+                "label": "Exit",
+                "value": "{output.exitLabel}"
+              },
+              {
+                "label": "Mode",
+                "value": "{output.modeLabel}"
+              }
             ]
           }
         },
@@ -102,8 +117,8 @@
           "match": "fleet_run",
           "name": "Fleet run",
           "icon": "play",
-          "title": "Fleet run · {output.host}",
-          "subtitle": "{output.syncLabel} · {output.stateLabel}",
+          "title": "Fleet run \u00b7 {output.host}",
+          "subtitle": "{output.syncLabel} \u00b7 {output.stateLabel}",
           "output": "card",
           "card": {
             "label": "{output.host}",
@@ -123,9 +138,18 @@
               }
             },
             "fields": [
-              { "label": "Sync", "value": "{output.syncLabel}" },
-              { "label": "Exit", "value": "{output.exitLabel}" },
-              { "label": "Mode", "value": "{output.modeLabel}" }
+              {
+                "label": "Sync",
+                "value": "{output.syncLabel}"
+              },
+              {
+                "label": "Exit",
+                "value": "{output.exitLabel}"
+              },
+              {
+                "label": "Mode",
+                "value": "{output.modeLabel}"
+              }
             ]
           }
         },
@@ -133,9 +157,12 @@
           "match": "fleet_hosts",
           "name": "Fleet hosts",
           "icon": "server",
-          "title": "Fleet hosts · {output.workspace}",
+          "title": "Fleet hosts \u00b7 {output.workspace}",
           "output": "table",
-          "columns": ["alias", "tagsLabel"]
+          "columns": [
+            "alias",
+            "tagsLabel"
+          ]
         },
         {
           "match": "fleet_jobs",
@@ -143,13 +170,19 @@
           "icon": "time",
           "title": "Fleet jobs",
           "output": "table",
-          "columns": ["host", "commandLabel", "stateLabel", "runLabel", "exitLabel"]
+          "columns": [
+            "host",
+            "commandLabel",
+            "stateLabel",
+            "runLabel",
+            "exitLabel"
+          ]
         },
         {
           "match": "fleet_fetch",
           "name": "Fleet fetch",
           "icon": "download",
-          "title": "Fleet fetch · {input.host}",
+          "title": "Fleet fetch \u00b7 {input.host}",
           "output": "card",
           "card": {
             "label": "{output.artifact}",
@@ -161,8 +194,14 @@
               }
             },
             "fields": [
-              { "label": "Size", "value": "{output.bytes} bytes" },
-              { "label": "SHA-256", "value": "{output.digest}" }
+              {
+                "label": "Size",
+                "value": "{output.bytes} bytes"
+              },
+              {
+                "label": "SHA-256",
+                "value": "{output.digest}"
+              }
             ]
           }
         },
@@ -170,16 +209,20 @@
           "match": "fleet_upload",
           "name": "Fleet upload",
           "icon": "upload",
-          "title": "Fleet upload · {input.host}",
-          "subtitle": "{output.bytes} bytes · {output.statusLabel}",
+          "title": "Fleet upload \u00b7 {input.host}",
+          "subtitle": "{output.bytes} bytes \u00b7 {output.statusLabel}",
           "output": "table",
-          "columns": ["source", "destination", "digest"]
+          "columns": [
+            "source",
+            "destination",
+            "digest"
+          ]
         },
         {
           "match": "fleet_download",
           "name": "Fleet download",
           "icon": "download",
-          "title": "Fleet download · {input.host}",
+          "title": "Fleet download \u00b7 {input.host}",
           "output": "card",
           "card": {
             "label": "{output.source}",
@@ -191,9 +234,18 @@
               }
             },
             "fields": [
-              { "label": "Target", "value": "{output.target}" },
-              { "label": "Size", "value": "{output.bytes} bytes" },
-              { "label": "SHA-256", "value": "{output.digest}" }
+              {
+                "label": "Target",
+                "value": "{output.target}"
+              },
+              {
+                "label": "Size",
+                "value": "{output.bytes} bytes"
+              },
+              {
+                "label": "SHA-256",
+                "value": "{output.digest}"
+              }
             ]
           }
         },
@@ -201,8 +253,8 @@
           "match": "fleet_job_status",
           "name": "Fleet job",
           "icon": "time",
-          "title": "Fleet job · {input.host}",
-          "subtitle": "{output.stateLabel} · {output.jobId}",
+          "title": "Fleet job \u00b7 {input.host}",
+          "subtitle": "{output.stateLabel} \u00b7 {output.jobId}",
           "output": "card",
           "card": {
             "label": "{output.host}",
@@ -222,10 +274,22 @@
               }
             },
             "fields": [
-              { "label": "Run", "value": "{output.runLabel}" },
-              { "label": "Exit", "value": "{output.exitLabel}" },
-              { "label": "stdout", "value": "{output.stdoutBytes} bytes" },
-              { "label": "stderr", "value": "{output.stderrBytes} bytes" }
+              {
+                "label": "Run",
+                "value": "{output.runLabel}"
+              },
+              {
+                "label": "Exit",
+                "value": "{output.exitLabel}"
+              },
+              {
+                "label": "stdout",
+                "value": "{output.stdoutBytes} bytes"
+              },
+              {
+                "label": "stderr",
+                "value": "{output.stderrBytes} bytes"
+              }
             ]
           }
         },
@@ -233,8 +297,8 @@
           "match": "fleet_job_cancel",
           "name": "Fleet job cancel",
           "icon": "close-circle",
-          "title": "Fleet cancel · {input.host}",
-          "subtitle": "{output.stateLabel} · {output.jobId}",
+          "title": "Fleet cancel \u00b7 {input.host}",
+          "subtitle": "{output.stateLabel} \u00b7 {output.jobId}",
           "output": "card",
           "card": {
             "label": "{output.host}",
@@ -254,8 +318,14 @@
               }
             },
             "fields": [
-              { "label": "Run", "value": "{output.runLabel}" },
-              { "label": "Exit", "value": "{output.exitLabel}" }
+              {
+                "label": "Run",
+                "value": "{output.runLabel}"
+              },
+              {
+                "label": "Exit",
+                "value": "{output.exitLabel}"
+              }
             ]
           }
         },
@@ -263,7 +333,7 @@
           "match": "fleet_recover",
           "name": "Fleet recovery",
           "icon": "refresh",
-          "title": "Fleet recovery · {input.host}",
+          "title": "Fleet recovery \u00b7 {input.host}",
           "output": "card",
           "card": {
             "label": "{output.host}",
@@ -278,7 +348,10 @@
               }
             },
             "fields": [
-              { "label": "Next step", "value": "{output.nextStep}" }
+              {
+                "label": "Next step",
+                "value": "{output.nextStep}"
+              }
             ]
           }
         }

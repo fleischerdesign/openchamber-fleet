@@ -22,6 +22,7 @@ connection is gone.
 
 ```
 UNMANAGED ──open──▶ READY ──begin──▶ SYNCING ──commit/abort──▶ READY
+ABSENT ──preview──▶ ABSENT (no state, no journal)
                        │                  │
                        │                  └──agent crash──▶ RECOVERY
                        └──startup finds journal──▶ RECOVERY
@@ -51,7 +52,8 @@ BEGIN ──entries──▶ PLANNING ──plan──▶ PLANNED ──blobs─
   touched.
 - `PLANNING` refuses a second `sync.begin` for the same workspace.
 - `TRANSFERRING` accepts blobs in any order; duplicates are idempotent.
-- `commit` requires the exact `planDigest`; a mismatch is `PLAN_MISMATCH` and leaves the transaction
+- `commit` requires the owning lease and the exact `planDigest`; a mismatch is `PLAN_MISMATCH` and
+  leaves the transaction
   open for inspection.
 - `ABORTED` removes temporary blobs; content-addressed blobs already committed are retained for a
   later transaction.

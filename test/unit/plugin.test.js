@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { after, describe, test } from 'node:test';
 import plugin from '../../dist/plugin/index.js';
 import fs from 'node:fs';
@@ -90,7 +91,7 @@ describe('OpenCode plugin surface', () => {
     try {
       const result = tool(tools, 'fleet_job_status');
       await assert.rejects(
-        result.execute({ host: 'node', jobId: 'missing' }, context),
+        result.execute({ jobId: 'missing' }, context),
         /unknown job missing/,
       );
     } finally {
@@ -180,7 +181,7 @@ describe('OpenCode plugin surface', () => {
     try {
       const result = tool(tools, 'fleet_job_cancel');
       await assert.rejects(
-        result.execute({ host: 'node', jobId: 'missing' }, context),
+        result.execute({ jobId: 'missing' }, context),
         /unknown job/,
       );
       assert.equal(permissions.length, 0);
@@ -215,7 +216,50 @@ describe('OpenCode plugin surface', () => {
       await assert.rejects(result.execute({ host: 'node', mode: 'apply' }, context));
       assert.equal(permissions.length, 1);
       assert.equal(permissions[0].action, 'fleet.sync');
-      assert.deepEqual(permissions[0].resources, ['plugin-tests@node']);
+      const descriptor = JSON.parse(permissions[0].resources[0]);
+      assert.equal(descriptor.workspaceId, 'plugin-tests');
+      assert.equal(descriptor.host, 'node');
+      assert.equal(descriptor.ssh, 'test@127.0.0.1');
+      assert.equal(descriptor.root, '~/.cache/openchamber-fleet/plugin-tests');
+      assert.equal(descriptor.mode, 'apply');
+      assert.equal(descriptor.planToken, null);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('upload asks for read and the transfer permission on the canonical source', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    const source = path.join(workspace, 'upload-source.txt');
+    fs.writeFileSync(source, 'payload');
+    try {
+      await assert.rejects(tool(tools, 'fleet_upload').execute({
+        host: 'node',
+        target: 'scratch',
+        localPath: 'upload-source.txt',
+        remotePath: 'upload.txt',
+      }, context));
+      assert.deepEqual(permissions.map((entry) => entry.action), ['read', 'fleet.upload']);
+      assert.deepEqual(permissions[0].resources, [source]);
+      assert.deepEqual(permissions[1].resources, [`node@test@127.0.0.1:1:~/.cache/openchamber-fleet/scratch/${crypto.createHash('sha256').update(context.sessionID).digest('hex').slice(0,16)}:${source}->upload.txt`]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('download binds edit and the transfer permission to the same canonical target', async () => {
+    const { tools, cleanup, permissions } = await register(workspace);
+    try {
+      await assert.rejects(tool(tools, 'fleet_download').execute({
+        host: 'node',
+        target: 'scratch',
+        remotePath: 'remote.txt',
+        localPath: 'download-target.txt',
+      }, context));
+      assert.deepEqual(permissions.map((entry) => entry.action), ['edit', 'fleet.download']);
+      const target = path.join(workspace, 'download-target.txt');
+      assert.deepEqual(permissions[0].resources, [target]);
+      assert.deepEqual(permissions[1].resources, [`node@test@127.0.0.1:1:~/.cache/openchamber-fleet/scratch/${crypto.createHash('sha256').update(context.sessionID).digest('hex').slice(0,16)}:remote.txt->${target}`]);
     } finally {
       await cleanup();
     }

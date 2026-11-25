@@ -58,6 +58,7 @@ export interface StoredJob {
   sessionID: string;
   workspace: string;
   directory: string;
+  target?: 'workspace' | 'scratch';
   host: string;
   argv: string[];
   state: string;
