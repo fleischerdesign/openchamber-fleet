@@ -24,6 +24,7 @@ export class SupervisorCore {
     now;
     log;
     maxActive;
+    requireLock;
     supervisor;
     active = new Map();
     starting = new Set();
@@ -38,6 +39,7 @@ export class SupervisorCore {
         this.now = options.now ?? (() => Date.now());
         this.log = options.log ?? (() => { });
         this.maxActive = options.maxActive ?? MAX_ACTIVE_JOBS;
+        this.requireLock = options.requireLock === true;
         this.supervisor = {
             pid: process.pid,
             instance: options.instance,
@@ -85,6 +87,11 @@ export class SupervisorCore {
     async tick() {
         if (this.ticking || this.stopping)
             return;
+        if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+            this.stopping = true;
+            this.log('lock lost; refusing every new claim');
+            return;
+        }
         this.ticking = true;
         try {
             await this.processCancels();
@@ -189,7 +196,13 @@ export class SupervisorCore {
             }
             catch (error) {
                 const restored = this.store.restoreClaimed(jobId);
-                this.log(`could not persist request ${jobId}: ${messageOf(error)}${restored ? '; restored for retry' : '; claim retained for recovery'}`);
+                if (!restored) {
+                    this.store.deleteClaimed(jobId);
+                    this.log(`could not persist request ${jobId}: ${messageOf(error)}; claim dropped so it cannot start after a reported failure`);
+                }
+                else {
+                    this.log(`could not persist request ${jobId}: ${messageOf(error)}; restored for retry`);
+                }
                 continue;
             }
             this.store.deleteClaimed(jobId);

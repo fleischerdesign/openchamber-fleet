@@ -964,6 +964,9 @@ export default {
           } catch (error) {
             throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
           }
+          if (targetIdentity.dev === null || targetIdentity.ino === null) {
+            throw new AgentError('INVALID_REQUEST', `destination parent for ${targetIdentity.path} does not exist`);
+          }
           const target = targetIdentity.path;
           await assertPermission(ctx, context, 'edit', [target], {
             workspace: workspaceLabel(config),
@@ -1131,6 +1134,9 @@ export default {
             targetIdentity = transferTargetIdentity(path.resolve(config.dir, input.localPath));
           } catch (error) {
             throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
+          }
+          if (targetIdentity.dev === null || targetIdentity.ino === null) {
+            throw new AgentError('INVALID_REQUEST', `destination parent for ${targetIdentity.path} does not exist`);
           }
           const destination = targetIdentity.path;
           await assertPermission(ctx, context, 'edit', [destination], {

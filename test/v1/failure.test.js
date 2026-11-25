@@ -45,10 +45,10 @@ describe('recovery after a dead controller (FAIL-01)', { skip: !available && `ag
   test('an unfinished transaction is reported and can be aborted after a restart', async () => {
     const first = await connectProcess(binary);
     const workspace = await openWorkspace(first, 'fail-demo', root, true);
-    await lease(first, 'op-crash');
+    const crashLease = await lease(first, 'op-crash');
     const begin = await first.request('sync.begin', {
       workspaceId: 'fail-demo',
-      leaseId: 'op-crash',
+      leaseId: crashLease.leaseId,
       baseGeneration: workspace.generation,
       policy: {},
     });
@@ -89,15 +89,15 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
     const client = await connectProcess(binary);
     try {
       const workspace = await openWorkspace(client, 'fail-demo', root, true);
-      await lease(client, 'op-plan');
-      const begin = await client.request('sync.begin', { workspaceId: 'fail-demo', leaseId: 'op-plan', baseGeneration: workspace.generation, policy: {} });
+      const planLease = await lease(client, 'op-plan');
+      const begin = await client.request('sync.begin', { workspaceId: 'fail-demo', leaseId: planLease.leaseId, baseGeneration: workspace.generation, policy: {} });
       await client.request('sync.entries', { txnId: begin.txnId, entries: [] });
       await client.request('sync.plan', { txnId: begin.txnId });
       await assert.rejects(
-        client.request('sync.commit', { txnId: begin.txnId, leaseId: 'op-plan', planDigest: 'sha256:' + '0'.repeat(64) }),
+        client.request('sync.commit', { txnId: begin.txnId, leaseId: planLease.leaseId, planDigest: 'sha256:' + '0'.repeat(64) }),
         (error) => error instanceof AgentError && error.code === 'PLAN_MISMATCH',
       );
-      await client.request('sync.abort', { txnId: begin.txnId, leaseId: 'op-plan' });
+      await client.request('sync.abort', { txnId: begin.txnId, leaseId: planLease.leaseId });
     } finally {
       client.close();
     }
@@ -107,9 +107,9 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
     const client = await connectProcess(binary);
     try {
       const workspace = await openWorkspace(client, 'fail-demo', root, true);
-      await lease(client, 'op-blob');
+      const blobLease = await lease(client, 'op-blob');
       const digest = 'sha256:' + '1'.repeat(64);
-      const begin = await client.request('sync.begin', { workspaceId: 'fail-demo', leaseId: 'op-blob', baseGeneration: workspace.generation, policy: {} });
+      const begin = await client.request('sync.begin', { workspaceId: 'fail-demo', leaseId: blobLease.leaseId, baseGeneration: workspace.generation, policy: {} });
       await client.request('sync.entries', {
         txnId: begin.txnId,
         entries: [{ path: 'blob.txt', type: 'file', mode: '0644', size: 3, mtimeMs: 0, digest }],
@@ -117,7 +117,7 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
       await client.request('sync.plan', { txnId: begin.txnId });
       const put = await client.request('blob.put', { txnId: begin.txnId, digest, size: 3 });
       await assert.rejects(client.upload(put.streamId, Buffer.from('abc')), (error) => error instanceof AgentError && error.code === 'BLOB_CORRUPT');
-      await client.request('sync.abort', { txnId: begin.txnId, leaseId: 'op-blob' });
+      await client.request('sync.abort', { txnId: begin.txnId, leaseId: blobLease.leaseId });
     } finally {
       client.close();
     }
@@ -127,11 +127,11 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
     const client = await connectProcess(binary);
     try {
       await openWorkspace(client, 'fail-demo', root, true);
-      await lease(client, 'op-gen');
+      const genLease = await lease(client, 'op-gen');
       await assert.rejects(
         client.request('exec.start', {
           workspaceId: 'fail-demo',
-          leaseId: 'op-gen',
+          leaseId: genLease.leaseId,
           expectedGeneration: 999,
           argv: ['true'],
         }),
@@ -145,8 +145,12 @@ describe('refusals (SYNC-06, SYNC-07, WS-04)', { skip: !available && `agent bina
 
 async function stageTransaction(client, workspaceId, rootDir, content) {
   const workspace = await openWorkspace(client, workspaceId, rootDir, true);
-  const lease = `op-${workspaceId}`;
-  await client.request('workspace.lease', { workspaceId, operationId: lease, ttlMs: 60_000 });
+  const granted = await client.request('workspace.lease', {
+    workspaceId,
+    operationId: `op-${workspaceId}`,
+    ttlMs: 60_000,
+  });
+  const lease = granted.leaseId;
   const begin = await client.request('sync.begin', {
     workspaceId,
     leaseId: lease,

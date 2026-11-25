@@ -55,6 +55,8 @@ pub struct Workspace {
     pub generation: u64,
     pub manifest: Manifest,
     pub recovery: Option<String>,
+    /// State at the moment the metadata was read under the registry lock.
+    pub state_label: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,7 +228,10 @@ fn assert_root_unowned(id: &str, root: &Path) -> Result<(), String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(io_message(error)),
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("WORKSPACE_ROOT_CONFLICT cannot read the workspace registry: {error}")
+        })?;
         let other = entry.file_name().to_string_lossy().to_string();
         if other == id || !entry.path().is_dir() {
             continue;
@@ -297,6 +302,11 @@ pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
         Some("applying".into())
     } else {
         None
+    };
+    workspace.state_label = if workspace.recovery.is_some() {
+        "RECOVERY"
+    } else {
+        "READY"
     };
     Ok(())
 }
@@ -460,6 +470,11 @@ pub fn open_workspace(
             &manifest.digest,
             &root,
         )?;
+        let state_label = if recovery.is_some() {
+            "RECOVERY"
+        } else {
+            "READY"
+        };
         return Ok(Workspace {
             id: id.to_string(),
             root,
@@ -467,6 +482,7 @@ pub fn open_workspace(
             generation: value.generation,
             manifest,
             recovery,
+            state_label,
         });
     }
 
@@ -475,6 +491,12 @@ pub fn open_workspace(
             "{} exists and is not managed; pass adopt=true to take it over",
             root.display()
         ));
+    }
+    if exists && expected_manifest.is_some() {
+        return Err(
+            "PLAN_STALE an unmanaged root cannot be approved by a manifest token; adopt explicitly first"
+                .into(),
+        );
     }
     expected_matches(
         if exists { "UNMANAGED" } else { "ABSENT" },
@@ -511,6 +533,7 @@ pub fn open_workspace(
         generation: 0,
         manifest,
         recovery: None,
+        state_label: "READY",
     })
 }
 
@@ -539,6 +562,7 @@ pub fn preview_workspace(id: &str, root_input: &str) -> Result<Workspace, String
             generation: 0,
             manifest: Manifest::empty(),
             recovery: None,
+            state_label: "ABSENT",
         });
     }
     let value: WorkspaceState =
@@ -559,6 +583,11 @@ pub fn preview_workspace(id: &str, root_input: &str) -> Result<Workspace, String
     } else {
         None
     };
+    let state_label = if recovery.is_some() {
+        "RECOVERY"
+    } else {
+        "READY"
+    };
     Ok(Workspace {
         id: id.to_string(),
         root,
@@ -566,6 +595,7 @@ pub fn preview_workspace(id: &str, root_input: &str) -> Result<Workspace, String
         generation: value.generation,
         manifest,
         recovery,
+        state_label,
     })
 }
 

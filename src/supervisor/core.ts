@@ -31,6 +31,8 @@ export interface SupervisorCoreOptions {
   readonly now?: () => number;
   readonly log?: (message: string) => void;
   readonly maxActive?: number;
+  /** Production supervisors own the lock; tests exercise the core without it. */
+  readonly requireLock?: boolean;
 }
 
 interface ActiveJob {
@@ -63,6 +65,7 @@ export class SupervisorCore {
   private readonly now: () => number;
   private readonly log: (message: string) => void;
   private readonly maxActive: number;
+  private readonly requireLock: boolean;
   private readonly supervisor: JobRecord['supervisor'];
   private readonly active = new Map<string, ActiveJob>();
   private readonly starting = new Set<string>();
@@ -78,6 +81,7 @@ export class SupervisorCore {
     this.now = options.now ?? (() => Date.now());
     this.log = options.log ?? (() => {});
     this.maxActive = options.maxActive ?? MAX_ACTIVE_JOBS;
+    this.requireLock = options.requireLock === true;
     this.supervisor = {
       pid: process.pid,
       instance: options.instance,
@@ -125,6 +129,11 @@ export class SupervisorCore {
   /** Process cancellations and start requests, then fill free execution slots. */
   async tick(): Promise<void> {
     if (this.ticking || this.stopping) return;
+    if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+      this.stopping = true;
+      this.log('lock lost; refusing every new claim');
+      return;
+    }
     this.ticking = true;
     try {
       await this.processCancels();
@@ -225,9 +234,14 @@ export class SupervisorCore {
         this.store.writeJob(record);
       } catch (error) {
         const restored = this.store.restoreClaimed(jobId);
-        this.log(
-          `could not persist request ${jobId}: ${messageOf(error)}${restored ? '; restored for retry' : '; claim retained for recovery'}`,
-        );
+        if (!restored) {
+          this.store.deleteClaimed(jobId);
+          this.log(
+            `could not persist request ${jobId}: ${messageOf(error)}; claim dropped so it cannot start after a reported failure`,
+          );
+        } else {
+          this.log(`could not persist request ${jobId}: ${messageOf(error)}; restored for retry`);
+        }
         continue;
       }
       this.store.deleteClaimed(jobId);

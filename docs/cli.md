@@ -58,8 +58,9 @@ OpenCode plugin keys scratch by session instead. It has no source and no sync; `
 file, verify a SHA-256 digest, stream without loading the file into memory and refuse to overwrite
 unless `--overwrite` is given.
 
-Flag values are fail-closed: `--apply=false` is not an apply, `--plan-token` needs a token, and
-`--sync` cannot be combined with `--plan`/`--apply`. `fleet sync --plan`, `fleet status`, recovery
+Flag values are fail-closed: `--apply=false` is not an apply, `--plan-token` needs a token,
+`fleet sync` rejects `--sync`/positionals, duplicate flags are refused, and `--sync` cannot be
+combined with `--plan`/`--apply`. `fleet sync --plan`, `fleet status`, recovery
 inspection and `fleet fetch` are read-only: they never
 create a replica root, state entry or transaction journal. A plan works before the first apply. It
 prints a `plan-token`; `fleet sync --apply --plan-token TOKEN` refuses a different host, agent
@@ -118,7 +119,9 @@ $ fleet fetch --host workstation --dest ./out -- target/release/app
 fetched ./out/app (4.1 MB) sha256:…
 ```
 
-The digest is verified against the agent's report before the file is written.
+The digest is verified against the agent's report before the file is written. The destination
+parent directory must already exist; this lets the permission bind the directory that is actually
+used.
 
 ## Status
 

@@ -57,6 +57,10 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | 200k benchmark | FAIL-04 | `bench/workspace.mjs`, see `docs/benchmarks.md` |
 | Large artifact (5 MiB, multi-frame) | — | `test/v1/protocol.test.js` |
 | Manifest larger than one control frame | SYNC-15 | `test/v1/protocol.test.js` |
+| Approved first apply provisions and commits | SYNC-16 | `test/v1/protocol.test.js` |
+| Generated lease ids cannot collide | WS-13 | `test/v1/protocol.test.js` |
+| Directory-to-non-directory transition is refused | SYNC-17 | `agent/src/sync.rs` tests |
+| CLI rejects --sync/positionals/duplicates | CLI-02 | `test/unit/cli.test.js` |
 | Symlink apply, symlinked parent refused | SYNC-10 | `agent/src/sync.rs` symlink tests |
 
 ## Planned (the failure suite)

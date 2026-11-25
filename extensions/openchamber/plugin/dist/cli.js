@@ -51,6 +51,7 @@ export async function main(argv) {
 function parse(argv) {
     const positional = [];
     const flags = new Map();
+    const seen = new Set();
     const rest = [];
     let command = '';
     let index = 0;
@@ -68,6 +69,9 @@ function parse(argv) {
             continue;
         }
         const [name, inline] = token.slice(2).split('=', 2);
+        if (seen.has(name))
+            throw new FleetError('usage', `--${name} is given more than once`);
+        seen.add(name);
         if (inline !== undefined) {
             if (BOOLEAN_FLAGS.has(name)) {
                 if (inline === 'true')
@@ -305,6 +309,12 @@ async function cmdSync(parsed) {
     if (plan && parsed.flags.has('adopt')) {
         throw new FleetError('usage', '--adopt is only valid with sync --apply');
     }
+    if (parsed.flags.has('sync')) {
+        throw new FleetError('usage', 'fleet sync uses --plan or --apply, not --sync');
+    }
+    if (parsed.positional.length > 0) {
+        throw new FleetError('usage', `fleet sync does not take positional arguments: ${parsed.positional.join(' ')}`);
+    }
     const config = configOf(parsed.flags);
     const host = hostOf(config, parsed.flags, 'workspace');
     const excludes = excludesOf(config, parsed.flags);
@@ -352,6 +362,24 @@ function timeoutMsOf(flags) {
     return typeof timeout === 'string' ? Number(timeout) * 1000 : undefined;
 }
 async function cmdRun(parsed) {
+    const planFlag = parsed.flags.get('plan');
+    const applyFlag = parsed.flags.get('apply');
+    if ((planFlag !== undefined && planFlag !== true) || (applyFlag !== undefined && applyFlag !== true)) {
+        throw new FleetError('usage', '--plan and --apply are boolean flags');
+    }
+    if (planFlag && applyFlag) {
+        throw new FleetError('usage', '--plan and --apply are mutually exclusive');
+    }
+    if (parsed.flags.has('plan-token')) {
+        throw new FleetError('usage', '--plan-token is only valid for fleet sync --apply');
+    }
+    const syncFlag = parsed.flags.get('sync');
+    if (syncFlag !== undefined && syncFlag !== 'auto' && syncFlag !== 'never' && syncFlag !== 'plan' && syncFlag !== 'apply') {
+        throw new FleetError('usage', '--sync must be one of auto, never, plan or apply');
+    }
+    if (syncFlag !== undefined && (planFlag === true || applyFlag === true)) {
+        throw new FleetError('usage', 'use either --sync or --plan/--apply, not both');
+    }
     const config = executionConfigOf(parsed.flags);
     const host = selectHost(config, {
         ...(typeof parsed.flags.get('host') === 'string' ? { host: String(parsed.flags.get('host')) } : {}),
@@ -361,21 +389,6 @@ async function cmdRun(parsed) {
     const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
     if (argv.length === 0)
         throw new FleetError('usage', 'run needs a command after --');
-    const planFlag = parsed.flags.get('plan');
-    const applyFlag = parsed.flags.get('apply');
-    if ((planFlag !== undefined && planFlag !== true) || (applyFlag !== undefined && applyFlag !== true)) {
-        throw new FleetError('usage', '--plan and --apply are boolean flags');
-    }
-    if (planFlag && applyFlag) {
-        throw new FleetError('usage', '--plan and --apply are mutually exclusive');
-    }
-    const syncFlag = parsed.flags.get('sync');
-    if (syncFlag !== undefined && syncFlag !== 'auto' && syncFlag !== 'never' && syncFlag !== 'plan' && syncFlag !== 'apply') {
-        throw new FleetError('usage', '--sync must be one of auto, never, plan or apply');
-    }
-    if (syncFlag !== undefined && (planFlag === true || applyFlag === true)) {
-        throw new FleetError('usage', 'use either --sync or --plan/--apply, not both');
-    }
     const sync = syncFlag === 'never' || syncFlag === 'plan' || syncFlag === 'apply'
         ? syncFlag
         : planFlag === true

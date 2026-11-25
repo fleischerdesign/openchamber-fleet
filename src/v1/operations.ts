@@ -22,7 +22,7 @@ export interface ConnectOptions {
 }
 
 const PAGE = 5000;
-const CHANGE_PAGE = 200;
+const CHANGE_PAGE = 50;
 const MAX_ENTRY_BYTES = 700 * 1024;
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'unknown']);
 const DEFAULT_EXEC_WAIT_MS = 24 * 60 * 60 * 1000;
@@ -455,12 +455,13 @@ export async function syncWorkspace(
     throw new AgentError('RECOVERY_REQUIRED', 'workspace has an unfinished transaction; inspect it with fleet recover', true);
   }
   throwIfAborted(options.signal);
-  const lease = operationId();
+  const operation = operationId();
   const leaseInfo = (await client.request('workspace.lease', {
     workspaceId: options.workspaceId,
-    operationId: lease,
+    operationId: operation,
     ttlMs: 600_000,
-  })) as { generation: number };
+  })) as { leaseId: string; generation: number };
+  const lease = leaseInfo.leaseId;
   let txnId: string | undefined;
   let beginPromise: Promise<{ txnId: string }> | undefined;
   const onAbort = () => {
@@ -535,9 +536,9 @@ export async function syncWorkspace(
       ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
       agentIdentity,
       sourceDigest: scanned.digest,
-      ...(workspace.root === undefined ? {} : { resolvedRoot: workspace.root }),
-      baseManifestDigest: workspace.manifestDigest,
-      ...(workspace.state === undefined ? {} : { baseState: workspace.state }),
+      resolvedRoot: approvedPreview?.root ?? workspace.root ?? options.root,
+      baseManifestDigest: approvedPreview?.manifestDigest ?? workspace.manifestDigest,
+      baseState: approvedPreview?.state ?? workspace.state ?? 'READY',
     });
 
     if (options.planToken !== undefined && options.planToken !== planToken) {
@@ -630,13 +631,14 @@ export async function recoverWorkspace(
   if (!inspected.txnId) throw new AgentError('OPERATION_UNKNOWN', 'recovery state has no transaction id');
   throwIfAborted(signal);
   await openWorkspace(client, workspaceId, root, false, signal);
-  const lease = operationId();
-  await client.request('workspace.lease', {
+  const operation = operationId();
+  const leaseInfo = (await client.request('workspace.lease', {
     workspaceId,
-    operationId: lease,
+    operationId: operation,
     ttlMs: 600_000,
     recovery: true,
-  });
+  })) as { leaseId: string };
+  const lease = leaseInfo.leaseId;
   try {
     if (mode === 'abort') {
       await client.request('sync.abort', { txnId: inspected.txnId, leaseId: lease });
@@ -713,12 +715,13 @@ export async function startExecCommand(client: AgentClient, options: ExecOptions
     phase: 'starting', stdoutBytes: 0, stderrBytes: 0, stdoutTail: '', stderrTail: '',
   });
   await openWorkspace(client, options.workspaceId, options.root, false, options.signal);
-  const lease = operationId();
+  const operation = operationId();
   const leaseInfo = (await client.request('workspace.lease', {
     workspaceId: options.workspaceId,
-    operationId: lease,
+    operationId: operation,
     ttlMs: 600_000,
-  })) as { generation: number };
+  })) as { leaseId: string; generation: number };
+  const lease = leaseInfo.leaseId;
 
   let start: { jobId: string; stdoutStream: number; stderrStream: number };
   try {
@@ -1033,25 +1036,32 @@ export async function uploadFile(client: AgentClient, options: UploadOptions): P
 export async function downloadFile(client: AgentClient, options: DownloadOptions): Promise<TransferResult> {
   throwIfAborted(options.signal);
   requireCapability(client, 'transfer');
-  const target = canonicalTransferTarget(options.dest);
+  const target = canonicalTransferTarget(options.dest, false);
   if (options.expectedTarget !== undefined && target !== options.expectedTarget) {
     throw new AgentError('PATH_UNSAFE', `download target changed after permission check: expected ${options.expectedTarget}, got ${target}`);
+  }
+  const parentPath = path.dirname(target);
+  let parentIdentity: fs.Stats;
+  try {
+    parentIdentity = fs.lstatSync(parentPath);
+  } catch {
+    throw new AgentError('INVALID_REQUEST', `destination parent ${parentPath} does not exist`);
+  }
+  if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink()) {
+    throw new AgentError('PATH_UNSAFE', `destination parent ${parentPath} is not a real directory`);
   }
   if (fs.existsSync(target) && options.overwrite !== true) {
     throw new AgentError('DEST_EXISTS', `${target} exists; pass overwrite`);
   }
-  const parentIdentity = options.expectedParentDev === undefined
-    ? null
-    : fs.lstatSync(path.dirname(target));
   const probe = await probeWorkspace(client, options.workspaceId, options.root, options.signal);
   if (probe.state !== 'READY') {
     throw new AgentError('WORKSPACE_ABSENT', 'the source workspace does not exist on this host yet', false, {
       state: probe.state,
     });
   }
-  if (parentIdentity !== null
+  if (options.expectedParentDev !== undefined
     && (parentIdentity.dev !== options.expectedParentDev || parentIdentity.ino !== options.expectedParentIno)) {
-    throw new AgentError('PATH_UNSAFE', `download parent changed after permission check: ${path.dirname(target)}`);
+    throw new AgentError('PATH_UNSAFE', `download parent changed after permission check: ${parentPath}`);
   }
   await openWorkspaceReadOnly(client, options.workspaceId, options.root, options.signal);
   const parent = path.dirname(target);
@@ -1066,6 +1076,10 @@ export async function downloadFile(client: AgentClient, options: DownloadOptions
   })) as { streamId: number; size: number; digest: string };
   throwIfAborted(options.signal);
   await report(options.onProgress, { phase: 'downloading', bytes: 0, digest: opened.digest });
+  const currentParent = fs.lstatSync(parent);
+  if (currentParent.dev !== parentIdentity.dev || currentParent.ino !== parentIdentity.ino) {
+    throw new AgentError('PATH_UNSAFE', `download parent changed before writing: ${parent}`);
+  }
   try {
     await client.collectToFile(opened.streamId, temporary, {
       initialCredit: 8 * 1024 * 1024,

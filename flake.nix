@@ -17,7 +17,7 @@
         pkgs:
         pkgs.rustPlatform.buildRustPackage {
           pname = "fleet-agent";
-          version = "0.11.2";
+          version = "0.11.3";
           src = ./agent;
           cargoLock.lockFile = ./agent/Cargo.lock;
           # The handshake fixture creates the installation identity in the state root.
@@ -41,7 +41,7 @@
           pname = "openchamber-fleet";
           version = packageVersion;
           src = self;
-          npmDepsHash = "sha256-pYiBJ+6SlXPbodHU4eIsVYcNdbOvfwJKjNBhEIte0rc=";
+          npmDepsHash = "sha256-iJ/1M7zbUiUaZ2zxgj1oCzVcTG/aFKTZ/5uA7OyShOU=";
           buildPhase = ''
             npm run build
           '';
@@ -89,7 +89,7 @@
           version = packageVersion;
           src = self;
           doCheck = true;
-          npmDepsHash = "sha256-pYiBJ+6SlXPbodHU4eIsVYcNdbOvfwJKjNBhEIte0rc=";
+          npmDepsHash = "sha256-iJ/1M7zbUiUaZ2zxgj1oCzVcTG/aFKTZ/5uA7OyShOU=";
           nativeBuildInputs = with pkgs; [
             openssh
             git

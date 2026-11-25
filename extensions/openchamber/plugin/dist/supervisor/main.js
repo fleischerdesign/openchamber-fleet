@@ -47,7 +47,7 @@ export async function runSupervisor() {
     if (!acquireLock(store, lock, startedAt))
         return;
     store.log(`started instance ${instance} (pid ${process.pid})`);
-    const core = new SupervisorCore({ store, instance, startedAt, version });
+    const core = new SupervisorCore({ store, instance, startedAt, version, requireLock: true });
     await core.recover();
     let stopping = false;
     let sawService = false;
@@ -117,12 +117,14 @@ export async function runSupervisor() {
     timers.push(setInterval(() => { void core.tick(); }, 250));
     timers.push(setInterval(() => { core.persistActive(); }, 2000));
     timers.push(setInterval(() => {
+        // Decide drain before publishing discovery, so a successor never sees
+        // `draining: false` for a process that has already stopped claiming.
+        if (store.readDrain()?.instance === instance)
+            core.beginDrain();
         if (!writeDiscovery()) {
             void stop('lock lost');
             return;
         }
-        if (store.readDrain()?.instance === instance)
-            core.beginDrain();
         if (core.isDraining() && core.idle()) {
             void stop('drained');
             return;
