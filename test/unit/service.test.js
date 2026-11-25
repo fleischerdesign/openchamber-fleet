@@ -150,6 +150,29 @@ describe('Fleet service configuration route', () => {
     }
   });
 
+  test('reads and writes the default workspace', async () => {
+    const service = await startService();
+    const project = fs.mkdtempSync(path.join(tmp, 'default-route-project-'));
+    try {
+      const empty = await request(service, 'GET', '/default');
+      assert.equal(empty.status, 200);
+      assert.equal(empty.body.result.directory, undefined);
+
+      const saved = await request(service, 'POST', '/default', { directory: project });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.body.result.directory, fs.realpathSync(project));
+
+      const current = await request(service, 'GET', '/default');
+      assert.equal(current.body.result.directory, fs.realpathSync(project));
+
+      const cleared = await request(service, 'POST', '/default', { directory: null });
+      assert.equal(cleared.status, 200);
+      assert.equal(cleared.body.result.directory, undefined);
+    } finally {
+      service.child.kill();
+    }
+  });
+
   test('reads and saves the split documents outside the project', async () => {
     const service = await startService();
     const workspace = fs.mkdtempSync(path.join(tmp, 'workspace-'));

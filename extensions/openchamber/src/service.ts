@@ -9,6 +9,8 @@ import {
   loadDefaults,
   loadSessionConfig,
   saveConfigDocuments,
+  saveDefaults,
+  workspaceLabel,
 } from '../../../src/config.js';
 import type { HostConfig, WorkspaceConfig } from '../../../src/config.js';
 import { FleetError, friendlyErrorMessage } from '../../../src/errors.js';
@@ -187,7 +189,7 @@ async function refresh(directory: string): Promise<GuestStatusView> {
     }
   }));
   const rows: GuestStatusRow[] = fallback
-    ? [{ kind: 'note', id: 'default', text: `Default workspace: ${config.name} (no project selected).`, tone: 'muted' }]
+    ? [{ kind: 'note', id: 'default', text: `Default workspace: ${workspaceLabel(config)} (no project selected).`, tone: 'muted' }]
     : [];
   results.forEach((result, index) => {
     const alias = aliases[index]!;
@@ -250,11 +252,24 @@ const server = http.createServer(async (request, response) => {
         return reply(response, 400, { ok: false, error: fields });
       }
     }
+    if (request.method === 'GET' && url.pathname === '/default') {
+      return reply(response, 200, { ok: true, result: loadDefaults() });
+    }
     if (request.method !== 'POST') {
       return reply(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'unknown service route' } });
     }
 
     const body = await readBody(request);
+    if (url.pathname === '/default') {
+      const value = typeof body.directory === 'string' && body.directory.length > 0 ? body.directory : null;
+      try {
+        const saved = saveDefaults(value);
+        cache.clear();
+        return reply(response, 200, { ok: true, result: saved });
+      } catch (error) {
+        return reply(response, 400, { ok: false, error: errorFields(error) });
+      }
+    }
     const directory = directoryOf(body);
     lastDirectory = directory;
 
@@ -274,7 +289,7 @@ const server = http.createServer(async (request, response) => {
       try {
         const info = await status(client, config.name, host.root);
         cache.delete(directory);
-        return reply(response, 200, { ok: true, result: { workspace: config.name, host: host.alias, ...info } });
+        return reply(response, 200, { ok: true, result: { workspace: workspaceLabel(config), host: host.alias, ...info } });
       } finally {
         client.close();
       }
@@ -294,7 +309,7 @@ const server = http.createServer(async (request, response) => {
         return reply(response, 200, {
           ok: true,
           result: {
-            workspace: config.name,
+            workspace: workspaceLabel(config),
             host: host.alias,
             mode: 'plan',
             planDigest: result.planDigest,
@@ -311,7 +326,7 @@ const server = http.createServer(async (request, response) => {
       const client = await connectSsh(host, { agentPath: agentPath() });
       try {
         const result = await inspectRecovery(client, config.name, host.root);
-        return reply(response, 200, { ok: true, result: { workspace: config.name, host: host.alias, ...result } });
+        return reply(response, 200, { ok: true, result: { workspace: workspaceLabel(config), host: host.alias, ...result } });
       } finally {
         client.close();
       }

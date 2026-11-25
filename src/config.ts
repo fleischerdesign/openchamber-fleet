@@ -16,11 +16,15 @@ import { assertAlias, assertRemoteRoot, assertSshTarget, assertTag, assertWorksp
 const LEGACY_KEYS = new Set(['name', 'hosts', 'excludes', 'env', 'shell']);
 const LEGACY_HOST_KEYS = new Set(['ssh', 'port', 'root', 'tags']);
 const HOST_REGISTRY_KEYS = new Set(['version', 'hosts']);
-const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags']);
+const HOST_ENTRY_KEYS = new Set(['ssh', 'port', 'tags', 'allow']);
 const PROJECT_KEYS = new Set(['version', 'name', 'hosts', 'requires', 'roots', 'excludes', 'env', 'shell']);
 const DEFAULTS_KEYS = new Set(['version', 'directory']);
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh']);
 const CONFIG_VERSION = 1;
+
+export function workspaceLabel(config: Pick<WorkspaceConfig, 'name' | 'label'>): string {
+  return config.label ?? config.name;
+}
 
 export interface HostConfig {
   readonly alias: string;
@@ -28,6 +32,11 @@ export interface HostConfig {
   readonly port: number;
   readonly root: string;
   readonly tags: readonly string[];
+  readonly allow?: readonly HostOperation[];
+}
+
+export function hostAllows(host: Pick<HostConfig, 'allow'>, operation: HostOperation): boolean {
+  return host.allow === undefined || host.allow.includes(operation);
 }
 
 export interface ExcludeMatcher {
@@ -35,9 +44,12 @@ export interface ExcludeMatcher {
 }
 
 export type Shell = 'bash' | 'sh' | 'dash' | 'zsh';
+export type HostOperation = 'workspace' | 'scratch' | 'transfer';
+const HOST_OPERATIONS: readonly HostOperation[] = ['workspace', 'scratch', 'transfer'];
 
 export interface WorkspaceConfig {
   readonly name: string;
+  readonly label?: string;
   readonly dir: string;
   readonly file: string;
   readonly hosts: Readonly<Record<string, HostConfig>>;
@@ -46,13 +58,14 @@ export interface WorkspaceConfig {
   readonly shell: Shell;
   readonly excludeMatcher: ExcludeMatcher;
   readonly projectId?: string;
-  readonly source?: 'legacy' | 'project';
+  readonly source?: 'legacy' | 'project' | 'derived';
 }
 
 export interface HostRegistryEntry {
   readonly ssh: string;
   readonly port?: number;
   readonly tags?: string[];
+  readonly allow?: HostOperation[];
 }
 
 export interface HostRegistry {
@@ -81,6 +94,8 @@ export interface ConfigDocuments {
   readonly hosts: HostRegistry;
   readonly project: ProjectConfigFile;
   readonly legacy: boolean;
+  /** file: an explicit project file; derived: computed safe defaults; legacy: fleet.json. */
+  readonly configSource?: 'file' | 'derived' | 'legacy';
   /** Content hash of both local documents; a save must present the revision it loaded. */
   readonly revision: string;
 }
@@ -242,10 +257,12 @@ export function loadHostsOnlyConfig(directory: string = process.cwd(), options: 
       port: entry.port ?? 22,
       root: defaultRemoteRoot(alias),
       tags: entry.tags ?? [],
+      ...(entry.allow === undefined ? {} : { allow: entry.allow }),
     };
   }
   return {
     name: 'no project',
+    label: 'no project',
     dir: paths.workspaceRoot,
     file: paths.hostsFile,
     hosts,
@@ -337,10 +354,20 @@ export function loadConfigDocuments(
   const hosts = fs.existsSync(paths.hostsFile)
     ? readHostRegistry(paths.hostsFile, false)
     : emptyHostRegistry();
-  const project = fs.existsSync(paths.projectFile)
+  const hasProject = fs.existsSync(paths.projectFile);
+  const project = hasProject
     ? readProjectConfig(paths.projectFile, false, name)
-    : defaultProjectConfig(name);
-  return { ...paths, hosts, project, legacy: false, revision: configRevision(paths) };
+    : Object.keys(hosts.hosts).length > 0 && !isOpenChamberInternalDirectory(paths.workspaceRoot)
+      ? derivedProjectConfig(paths)
+      : defaultProjectConfig(name);
+  return {
+    ...paths,
+    hosts,
+    project,
+    legacy: false,
+    configSource: hasProject ? 'file' : Object.keys(hosts.hosts).length > 0 ? 'derived' : 'file',
+    revision: configRevision(paths),
+  };
 }
 
 export function saveConfigDocuments(
@@ -367,6 +394,7 @@ export function saveConfigDocuments(
     hosts: registry,
     project: projectConfig,
     legacy: false,
+    configSource: 'file',
     revision: configRevision(paths),
   };
 }
@@ -470,6 +498,7 @@ export function initProjectConfig(cwd: string, options: InitProjectOptions): Con
     hosts,
     project: projectConfig,
     legacy: false,
+    configSource: 'file',
     revision: configRevision(paths),
   };
 }
@@ -557,20 +586,55 @@ function selectedAliases(project: ProjectConfigFile, registry: HostRegistry): st
   });
 }
 
+function derivedWorkspaceName(paths: ConfigPaths): string {
+  const base = defaultWorkspaceName(paths.workspaceRoot).slice(0, 48);
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${paths.projectId}\0${path.resolve(paths.workspaceRoot)}`)
+    .digest('hex')
+    .slice(0, 10);
+  return `${base}-${digest}`;
+}
+
+/** A project that was never explicitly configured still gets safe, isolated defaults. */
+function derivedProjectConfig(paths: ConfigPaths): ProjectConfigFile {
+  return {
+    version: CONFIG_VERSION,
+    name: derivedWorkspaceName(paths),
+    roots: {},
+    excludes: ['.git', '.direnv/', 'result*'],
+    env: {},
+    shell: 'bash',
+  };
+}
+
 function loadSplitConfig(paths: ConfigPaths): WorkspaceConfig {
   const registry = readHostRegistry(paths.hostsFile, false);
-  const project = readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot));
+  const explicit = fs.existsSync(paths.projectFile);
+  const project = explicit
+    ? readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot))
+    : isOpenChamberInternalDirectory(paths.workspaceRoot)
+      ? readProjectConfig(paths.projectFile, false, defaultWorkspaceName(paths.workspaceRoot))
+      : derivedProjectConfig(paths);
   validateProjectSelection(project, registry, paths);
 
   const hosts: Record<string, HostConfig> = {};
   for (const alias of selectedAliases(project, registry)) {
     const entry = registry.hosts[alias]!;
     const root = project.roots[alias] ?? defaultRemoteRoot(project.name);
-    hosts[alias] = { alias, ssh: entry.ssh, port: entry.port ?? 22, root, tags: entry.tags ?? [] };
+    hosts[alias] = {
+      alias,
+      ssh: entry.ssh,
+      port: entry.port ?? 22,
+      root,
+      tags: entry.tags ?? [],
+      ...(entry.allow === undefined ? {} : { allow: entry.allow }),
+    };
   }
 
   return {
     name: project.name,
+    label: explicit ? project.name : defaultWorkspaceName(paths.workspaceRoot),
     dir: paths.workspaceRoot,
     file: paths.projectFile,
     hosts,
@@ -579,7 +643,7 @@ function loadSplitConfig(paths: ConfigPaths): WorkspaceConfig {
     shell: project.shell,
     excludeMatcher: compileExcludes(project.excludes),
     projectId: paths.projectId,
-    source: 'project',
+    source: explicit ? 'project' : 'derived',
   };
 }
 
@@ -617,6 +681,7 @@ function loadLegacyConfig(file: string): WorkspaceConfig {
 
   return {
     name,
+    label: name,
     dir,
     file,
     hosts,
@@ -663,10 +728,12 @@ function parseHostRegistry(value: unknown, file: string): HostRegistry {
     const ssh = assertSshTarget(requireString(entry, 'ssh', `hosts.${alias}`));
     const port = entry.port === undefined ? undefined : requirePort(entry.port, `hosts.${alias}.port`);
     const tags = readTags(entry.tags, `hosts.${alias}.tags`);
+    const allow = readAllow(entry.allow, `hosts.${alias}.allow`);
     hosts[alias] = {
       ssh,
       ...(port === undefined ? {} : { port }),
       ...(tags.length === 0 ? {} : { tags }),
+      ...(allow.length === 0 ? {} : { allow }),
     };
   }
   if (Object.keys(hosts).length === 0) {
@@ -789,6 +856,7 @@ function documentsFromConfig(config: WorkspaceConfig, paths: ConfigPaths, source
       ssh: host.ssh,
       ...(host.port === 22 ? {} : { port: host.port }),
       ...(host.tags.length === 0 ? {} : { tags: [...host.tags] }),
+      ...(host.allow === undefined ? {} : { allow: [...host.allow] }),
     };
     if (host.root !== defaultRemoteRoot(config.name)) roots[alias] = host.root;
   }
@@ -805,6 +873,7 @@ function documentsFromConfig(config: WorkspaceConfig, paths: ConfigPaths, source
       shell: config.shell,
     },
     legacy: config.source === 'legacy' || (sourceFile !== null && path.basename(sourceFile) === 'fleet.json'),
+    configSource: config.source === 'legacy' ? 'legacy' : 'file',
     revision: configRevision(paths),
   };
 }
@@ -852,6 +921,21 @@ function writeJson(file: string, value: unknown): void {
 
 function readExcludes(top: Record<string, unknown>): string[] {
   return top.excludes === undefined ? [] : requireStringArray(top.excludes, 'excludes');
+}
+
+function readAllow(value: unknown, where: string): HostOperation[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new FleetError('config-invalid', `${where} must be an array`);
+  const allow = value.map((entry) => {
+    if (typeof entry !== 'string' || !HOST_OPERATIONS.includes(entry as HostOperation)) {
+      throw new FleetError('config-invalid', `${where} entries must be one of ${HOST_OPERATIONS.join(', ')}`);
+    }
+    return entry as HostOperation;
+  });
+  if (new Set(allow).size !== allow.length) {
+    throw new FleetError('config-invalid', `${where} must not contain duplicates`);
+  }
+  return allow;
 }
 
 function readTags(value: unknown, where: string): string[] {

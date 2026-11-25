@@ -1,7 +1,7 @@
 /** Command line interface on top of fleet.agent.v1. */
 import fs from 'node:fs';
 import path from 'node:path';
-import { compileExcludes, configPaths, defaultWorkspaceName, initProjectConfig, loadDefaults, loadHostsOnlyConfig, loadSessionConfig, saveDefaults, } from './config.js';
+import { compileExcludes, configPaths, defaultWorkspaceName, initProjectConfig, loadDefaults, loadHostsOnlyConfig, loadSessionConfig, saveDefaults, hostAllows, workspaceLabel, } from './config.js';
 import { FleetError, friendlyErrorMessage } from './errors.js';
 import { hostViews, selectHost } from './hosts.js';
 import { runWorkspace } from './run.js';
@@ -137,13 +137,16 @@ function cmdDefault(parsed) {
     else
         process.stdout.write(`default workspace ${value.directory}\n`);
 }
-function hostOf(config, flags) {
+function hostOf(config, flags, operation) {
     const alias = flags.get('host');
     if (typeof alias !== 'string')
         throw new FleetError('usage', '--host <alias> is required');
     const host = config.hosts[alias];
     if (!host) {
         throw new FleetError('usage', `unknown host ${JSON.stringify(alias)}`, { known: Object.keys(config.hosts).join(', ') });
+    }
+    if (operation !== undefined && !hostAllows(host, operation)) {
+        throw new FleetError('usage', `host ${JSON.stringify(alias)} is not allowed for ${operation}`);
     }
     return host;
 }
@@ -221,7 +224,7 @@ async function cmdDoctor(parsed) {
 }
 async function cmdStatus(parsed) {
     const config = executionConfigOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, parsed.flags.has('scratch') ? 'scratch' : 'workspace');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
         const info = await status(client, config.name, host.root);
@@ -229,7 +232,7 @@ async function cmdStatus(parsed) {
             process.stdout.write(JSON.stringify(info, null, 2) + '\n');
         }
         else {
-            process.stdout.write(`${config.name}: generation ${info.generation} ${info.manifestDigest}${info.recovery ? ' RECOVERY' : ''}\n`);
+            process.stdout.write(`${workspaceLabel(config)}: generation ${info.generation} ${info.manifestDigest}${info.recovery ? ' RECOVERY' : ''}\n`);
         }
     }
     finally {
@@ -238,7 +241,7 @@ async function cmdStatus(parsed) {
 }
 async function cmdRecover(parsed) {
     const config = configOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, 'workspace');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
         const result = await recoverWorkspace(client, config.name, host.root, parsed.flags.has('abort') ? 'abort' : 'recover');
@@ -247,10 +250,10 @@ async function cmdRecover(parsed) {
             return;
         }
         if (result.state === 'READY' && !result.recovered) {
-            process.stdout.write(`${config.name}@${host.alias}: READY\n`);
+            process.stdout.write(`${workspaceLabel(config)}@${host.alias}: READY\n`);
             return;
         }
-        process.stdout.write(`${config.name}@${host.alias}: recovered generation ${result.generation ?? 'unknown'} ${result.manifestDigest ?? ''}\n`);
+        process.stdout.write(`${workspaceLabel(config)}@${host.alias}: recovered generation ${result.generation ?? 'unknown'} ${result.manifestDigest ?? ''}\n`);
     }
     finally {
         client.close();
@@ -265,7 +268,7 @@ function excludesOf(config, flags) {
 }
 async function cmdSync(parsed) {
     const config = configOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, 'workspace');
     const excludes = excludesOf(config, parsed.flags);
     const matcher = compileExcludes(excludes);
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
@@ -311,6 +314,7 @@ async function cmdRun(parsed) {
     const host = selectHost(config, {
         ...(typeof parsed.flags.get('host') === 'string' ? { host: String(parsed.flags.get('host')) } : {}),
         tags: tagsOf(parsed.flags),
+        operation: parsed.flags.has('scratch') ? 'scratch' : 'workspace',
     });
     const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
     if (argv.length === 0)
@@ -397,7 +401,7 @@ function cmdHosts(parsed) {
         }
     }
     if (parsed.flags.has('json')) {
-        process.stdout.write(`${JSON.stringify({ workspace: config.name, hosts: views, selected }, null, 2)}\n`);
+        process.stdout.write(`${JSON.stringify({ workspace: workspaceLabel(config), hosts: views, selected }, null, 2)}\n`);
         return;
     }
     for (const view of views) {
@@ -410,7 +414,7 @@ function cmdHosts(parsed) {
 }
 async function cmdExec(parsed) {
     const config = executionConfigOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, parsed.flags.has('scratch') ? 'scratch' : 'workspace');
     const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
     if (argv.length === 0)
         throw new FleetError('usage', 'exec needs a command after --');
@@ -440,7 +444,7 @@ async function cmdExec(parsed) {
 }
 async function cmdFetch(parsed) {
     const config = executionConfigOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, 'transfer');
     const dest = parsed.flags.get('dest');
     if (typeof dest !== 'string')
         throw new FleetError('usage', '--dest <dir> is required');
@@ -470,7 +474,7 @@ async function cmdUpload(parsed) {
     }
     // Uploads always land in the private scratch space, never in a replica root.
     const config = scratchConfig({ seed: process.cwd(), directory: process.cwd() });
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, 'transfer');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
         const result = await uploadFile(client, {
@@ -493,7 +497,7 @@ async function cmdDownload(parsed) {
         throw new FleetError('usage', 'download needs <remote-path> and --dest <local-path>');
     }
     const config = executionConfigOf(parsed.flags);
-    const host = hostOf(config, parsed.flags);
+    const host = hostOf(config, parsed.flags, 'transfer');
     const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
     try {
         const result = await downloadFile(client, {

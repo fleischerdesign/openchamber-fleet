@@ -19,6 +19,7 @@ export function scratchConfig(options) {
     return {
         ...base,
         name: identity.workspaceId,
+        label: 'scratch',
         dir: options.directory,
         hosts,
         excludes: [],
