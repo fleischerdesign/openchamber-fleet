@@ -83,8 +83,8 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     const manyReplica = path.join(base, 'many-replica');
     fs.mkdirSync(many, { recursive: true });
     const prefix = 'x'.repeat(20);
-    const target = 't'.repeat(900);
-    for (let index = 0; index < 900; index += 1) {
+    const target = 't'.repeat(1000);
+    for (let index = 0; index < 1300; index += 1) {
       fs.symlinkSync(target, path.join(many, `${prefix}-${String(index).padStart(4, '0')}`));
     }
     const result = await syncWorkspace(client, compileExcludes([]), {
@@ -94,8 +94,8 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
       excludes: [],
       mode: 'apply',
     });
-    assert.equal(result.changes.length, 900);
-    assert.equal(fs.readlinkSync(path.join(manyReplica, `${prefix}-0899`)), target);
+    assert.equal(result.changes.length, 1300);
+    assert.equal(fs.readlinkSync(path.join(manyReplica, `${prefix}-1299`)), target);
   });
 
   test('plan previews an absent replica without creating root or state', async () => {
@@ -233,6 +233,7 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
       timeoutMs: 30_000,
     });
     const dest = path.join(base, 'download');
+    fs.mkdirSync(dest, { recursive: true });
     const fetched = await fetchArtifact(client, {
       workspaceId: 'v1-test',
       source,
@@ -379,6 +380,29 @@ describe('fleet.agent.v1 controller', { skip: !available && `agent binary not bu
     }
   });
 
+  test('one lease cannot start two jobs in the same workspace', async () => {
+    const root = path.join(base, 'parallel-exec-replica');
+    await client.request('workspace.open', { workspaceId: 'parallel-exec', root, adopt: false });
+    const granted = await client.request('workspace.lease', { workspaceId: 'parallel-exec', operationId: 'parallel', ttlMs: 60_000 });
+    const first = await client.request('exec.start', {
+      workspaceId: 'parallel-exec',
+      leaseId: granted.leaseId,
+      expectedGeneration: 0,
+      argv: ['sh', '-c', 'sleep 1'],
+    });
+    await assert.rejects(
+      client.request('exec.start', {
+        workspaceId: 'parallel-exec',
+        leaseId: granted.leaseId,
+        expectedGeneration: 0,
+        argv: ['true'],
+      }),
+      (error) => error.code === 'WORKSPACE_BUSY',
+    );
+    await client.request('exec.cancel', { jobId: first.jobId, graceMs: 1000 });
+    await client.request('workspace.release', { leaseId: granted.leaseId }).catch(() => {});
+  });
+
   test('leases are agent-generated and cannot collide across workspaces', async () => {
     const rootA = path.join(base, 'lease-a-replica');
     const rootB = path.join(base, 'lease-b-replica');
@@ -466,6 +490,8 @@ describe('large artifact', { skip: !available && `agent binary not built at ${bi
     });
     const big = crypto.randomBytes(5 * 1024 * 1024);
     fs.writeFileSync(path.join(replica, 'big.bin'), big);
+    const bigDest = path.join(base, 'download-big');
+    fs.mkdirSync(bigDest, { recursive: true });
     const fetched = await fetchArtifact(client, {
       workspaceId: 'v1-test',
       root: replica,

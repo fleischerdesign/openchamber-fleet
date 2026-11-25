@@ -95,6 +95,11 @@ export class SupervisorCore {
         this.ticking = true;
         try {
             await this.processCancels();
+            if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+                this.stopping = true;
+                this.log('lock lost while processing cancellations; refusing every new claim');
+                return;
+            }
             if (!this.draining)
                 this.processRequests();
             this.pump();
@@ -177,6 +182,10 @@ export class SupervisorCore {
         this.pending.clear();
     }
     processRequests() {
+        if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+            this.stopping = true;
+            return;
+        }
         for (const jobId of this.store.listRequestIds()) {
             if (this.active.has(jobId) || this.starting.has(jobId) || this.pending.has(jobId) || this.store.readJob(jobId)) {
                 this.store.deleteRequest(jobId);
@@ -231,6 +240,10 @@ export class SupervisorCore {
         }
     }
     async startJob(record, request) {
+        if (this.requireLock && !this.store.ownsLock(this.supervisor.instance)) {
+            this.stopping = true;
+            return;
+        }
         const now = this.now();
         this.write({ ...record, state: 'starting', updatedAt: now });
         let client;
@@ -241,7 +254,7 @@ export class SupervisorCore {
                 ...(request.sshEnv === undefined ? {} : { env: request.sshEnv }),
                 ...(request.sshPath === undefined ? {} : { sshPath: request.sshPath }),
             });
-            if (this.stopping) {
+            if (this.stopping || (this.requireLock && !this.store.ownsLock(this.supervisor.instance))) {
                 client.close();
                 return;
             }

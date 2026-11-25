@@ -61,6 +61,10 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Generated lease ids cannot collide | WS-13 | `test/v1/protocol.test.js` |
 | Directory-to-non-directory transition is refused | SYNC-17 | `agent/src/sync.rs` tests |
 | CLI rejects --sync/positionals/duplicates | CLI-02 | `test/unit/cli.test.js` |
+| --apply=false never falls back to auto | CLI-03 | `test/unit/cli.test.js` |
+| Real unmanaged directory is never replaced | SYNC-18 | `agent/src/sync.rs` tests |
+| One lease cannot start two jobs | EXEC-09 | `test/v1/protocol.test.js` |
+| Lock loss stops supervisor claims | HOST-10 | `test/unit/supervisor.test.js` |
 | Symlink apply, symlinked parent refused | SYNC-10 | `agent/src/sync.rs` symlink tests |
 
 ## Planned (the failure suite)

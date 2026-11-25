@@ -109,7 +109,7 @@ The result:
 
 ```json
 {"protocol":{"major":1,"minor":1},
- "agent":{"version":"0.11.3","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
+ "agent":{"version":"0.11.4","build":"2026-11-23","installationId":"…","os":"linux","arch":"x86_64"},
  "capabilities":{"workspace.sync":1,"workspace.probe":1,"workspace.preview":1,"exec":1,"artifact":1,"transfer":1},
  "limits":{"maxFrame":16777216,"maxChunk":1048576,"maxControl":1048576,"maxStreams":32,
            "maxManifestEntries":500000,"defaultLeaseMs":300000}}
@@ -174,7 +174,7 @@ while a journal exists.
   `LEASE_UNKNOWN`/`LEASE_EXPIRED` and MUST NOT mutate anything. Release is refused with
   `WORKSPACE_BUSY` while a transaction or job of that workspace is still active.
 - `sync.commit`, `sync.abort` and `sync.recover` require the lease that owns the transaction. A
-  journal without a live in-memory owner needs an explicit recovery lease. `exec.status`,
+  journal without a live in-memory owner needs an explicit recovery lease bound to its `txnId`. `exec.status`,
   `exec.cancel`, `sync.inspect`, `artifact.open` and `doctor` do not need a lease. `exec.start` and
   `sync.begin` refuse while the workspace has an active job or transaction.
 

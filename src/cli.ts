@@ -92,13 +92,16 @@ function parse(argv: readonly string[]): Parsed {
       else positional.push(token);
       continue;
     }
-    const [name, inline] = token.slice(2).split('=', 2) as [string, string | undefined];
+    const equals = token.indexOf('=');
+    const name = (equals === -1 ? token.slice(2) : token.slice(2, equals)) as string;
+    const inline = equals === -1 ? undefined : token.slice(equals + 1);
     if (seen.has(name)) throw new FleetError('usage', `--${name} is given more than once`);
     seen.add(name);
     if (inline !== undefined) {
       if (BOOLEAN_FLAGS.has(name)) {
         if (inline === 'true') flags.set(name, true);
-        else if (inline !== 'false') throw new FleetError('usage', `--${name} accepts only true or false`);
+        else if (inline === 'false') flags.set(name, false);
+        else throw new FleetError('usage', `--${name} accepts only true or false`);
       } else {
         flags.set(name, inline);
       }

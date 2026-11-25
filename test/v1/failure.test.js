@@ -70,7 +70,7 @@ describe('recovery after a dead controller (FAIL-01)', { skip: !available && `ag
       assert.equal(inspected.state, 'RECOVERY');
       assert.equal(inspected.txnId, begin.txnId);
 
-      const recoveryLease = await second.request('workspace.lease', { workspaceId: 'fail-demo', operationId: 'op-recover', ttlMs: 60_000, recovery: true });
+      const recoveryLease = await second.request('workspace.lease', { workspaceId: 'fail-demo', operationId: 'op-recover', ttlMs: 60_000, recovery: true, txnId: begin.txnId });
       await second.request('sync.abort', { txnId: begin.txnId, leaseId: recoveryLease.leaseId });
       await second.request('workspace.release', { leaseId: recoveryLease.leaseId });
       const status = await second.request('workspace.status', { workspaceId: 'fail-demo' });
@@ -198,7 +198,7 @@ describe('crash during apply (SYNC-08)', { skip: !available && `agent binary not
         second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-after', ttlMs: 60_000 }),
         (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',
       );
-      const recoveryLease = await second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-crash-recover', ttlMs: 60_000, recovery: true });
+      const recoveryLease = await second.request('workspace.lease', { workspaceId: 'fail-crash', operationId: 'op-crash-recover', ttlMs: 60_000, recovery: true, txnId });
       await assert.rejects(
         second.request('sync.abort', { txnId, leaseId: recoveryLease.leaseId }),
         (error) => error instanceof AgentError && error.code === 'RECOVERY_REQUIRED',

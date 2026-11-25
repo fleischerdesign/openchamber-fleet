@@ -5,6 +5,7 @@ import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { JobStore } from '../../dist/jobs/store.js';
 import { SupervisorCore } from '../../dist/supervisor/core.js';
+import { currentBootTime } from '../../dist/jobs/health.js';
 
 const roots = [];
 after(() => {
@@ -156,6 +157,34 @@ describe('detached supervisor core', () => {
     assert.equal(store.readJob(claimedId).state, 'interrupted');
     assert.deepEqual(store.listRequestIds(), [pendingId]);
     assert.deepEqual(store.listClaimedIds(), []);
+  });
+
+  test('lock loss stops claims before a request is taken', async () => {
+    const store = new JobStore(root());
+    store.ensure();
+    const lock = {
+      protocol: 1,
+      version: 'test',
+      instance: 'locked',
+      pid: process.pid,
+      startedAt: 1,
+      bootTime: currentBootTime(),
+    };
+    assert.equal(store.createLock(lock), true);
+    const core = new SupervisorCore({
+      store,
+      instance: 'locked',
+      startedAt: 1,
+      version: 'test',
+      executor: fakeExecutor('unused', deferred()).executor,
+      requireLock: true,
+    });
+    const jobId = 'job-999999999999999999999999';
+    store.createRequest(request(jobId));
+    store.releaseLock('locked');
+    await core.tick();
+    assert.equal(store.readJob(jobId), null);
+    assert.deepEqual(store.listRequestIds(), [jobId]);
   });
 
   test('drain finishes accepted work but never claims a new request', async () => {

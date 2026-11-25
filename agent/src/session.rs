@@ -112,6 +112,7 @@ struct LeaseBinding {
     workspace_id: String,
     lease_id: String,
     recovery: bool,
+    recovery_txn: Option<String>,
     handle: LeaseHandle,
 }
 
@@ -405,6 +406,11 @@ impl Session {
             .get("recovery")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let recovery_txn = request
+            .params
+            .get("txnId")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
         let Some(workspace) = self.registry.get(id) else {
             return Action::Reply(rpc::error(&request.id, "WORKSPACE_UNKNOWN", id, false));
         };
@@ -420,11 +426,11 @@ impl Session {
                 true,
             ));
         }
-        if recovery_lease && workspace.recovery.is_none() {
+        if recovery_lease && (workspace.recovery.is_none() || recovery_txn.is_none()) {
             return Action::Reply(rpc::error(
                 &request.id,
                 "INVALID_REQUEST",
-                "workspace is not in recovery",
+                "a recovery lease needs a workspace journal and its txnId",
                 false,
             ));
         }
@@ -465,7 +471,12 @@ impl Session {
                         recovered,
                     ));
                 }
-                let lease_id = format!("lease-{}", identity_fragment());
+                let lease_id = loop {
+                    let candidate = format!("lease-{}", identity_fragment());
+                    if !self.leases.contains_key(&candidate) {
+                        break candidate;
+                    }
+                };
                 let result = json!({
                     "leaseId": lease_id,
                     "generation": generation,
@@ -477,6 +488,7 @@ impl Session {
                         workspace_id: id.to_string(),
                         lease_id,
                         recovery: recovery_lease,
+                        recovery_txn,
                         handle,
                     },
                 );
@@ -1392,15 +1404,19 @@ impl Session {
                     false,
                 ));
             }
-        } else if !recovery_lease {
+        } else if !recovery_lease
+            || binding
+                .recovery_txn
+                .as_deref()
+                .is_some_and(|expected| expected != txn_id)
+        {
             return Action::Reply(rpc::error(
                 &request.id,
                 "RECOVERY_REQUIRED",
-                "an orphan journal needs an explicit recovery lease",
+                "an orphan journal needs a recovery lease bound to its txnId",
                 true,
             ));
         }
-        self.transactions.remove(txn_id);
         let Some(mut workspace) = self.registry.get(&workspace_id).cloned() else {
             return Action::Reply(rpc::error(
                 &request.id,
@@ -1425,13 +1441,17 @@ impl Session {
         };
         match sync::resume(&mut record, &mut workspace) {
             Ok((generation, manifest_digest)) => {
+                self.transactions.remove(txn_id);
                 self.registry.insert(workspace);
                 Action::Reply(rpc::response(
                     &request.id,
                     json!({"generation": generation, "manifestDigest": manifest_digest}),
                 ))
             }
-            Err(error) => Action::Reply(error_response(&request.id, &error)),
+            Err(error) => {
+                self.transactions.insert(txn_id.to_string(), record);
+                Action::Reply(error_response(&request.id, &error))
+            }
         }
     }
 
@@ -1489,15 +1509,19 @@ impl Session {
                     false,
                 ));
             }
-        } else if !recovery_lease {
+        } else if !recovery_lease
+            || binding
+                .recovery_txn
+                .as_deref()
+                .is_some_and(|expected| expected != txn_id)
+        {
             return Action::Reply(rpc::error(
                 &request.id,
                 "RECOVERY_REQUIRED",
-                "an orphan journal needs an explicit recovery lease",
+                "an orphan journal needs a recovery lease bound to its txnId",
                 true,
             ));
         }
-        self.transactions.remove(txn_id);
         let Some(workspace) = self.registry.get(&workspace_id).cloned() else {
             return Action::Reply(rpc::error(
                 &request.id,
@@ -1508,8 +1532,10 @@ impl Session {
         };
         match sync::abort(&workspace) {
             Ok(()) => {
+                self.transactions.remove(txn_id);
                 if let Some(entry) = self.registry.get_mut(&workspace_id) {
                     entry.recovery = None;
+                    entry.state_label = "READY";
                 }
                 Action::Reply(rpc::response(&request.id, json!({"ok": true})))
             }
@@ -1532,7 +1558,7 @@ impl Session {
         } else {
             None
         };
-        let Some(workspace) = workspace else {
+        let Some(mut workspace) = workspace else {
             return Action::Reply(rpc::error(
                 &request.id,
                 "WORKSPACE_UNKNOWN",
@@ -1544,6 +1570,11 @@ impl Session {
             Ok(lock) => lock,
             Err(error) => return Action::Reply(error_response(&request.id, &error)),
         };
+        if workspace.state.join("state.json").exists() {
+            if let Err(error) = workspace::reload_workspace_unlocked(&mut workspace) {
+                return Action::Reply(error_response(&request.id, &error));
+            }
+        }
         match sync::inspect(&workspace) {
             Ok(Some(record)) => Action::Reply(rpc::response(
                 &request.id,
@@ -1704,6 +1735,17 @@ impl Session {
                 &request.id,
                 "WORKSPACE_BUSY",
                 "workspace still has an active transaction",
+                true,
+            ));
+        }
+        if self.jobs.values().any(|job| {
+            let record = job.status();
+            record.workspace == workspace_id && !record.is_terminal()
+        }) {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_BUSY",
+                "workspace still has an active job",
                 true,
             ));
         }

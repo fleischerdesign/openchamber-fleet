@@ -68,7 +68,9 @@ function parse(argv) {
                 positional.push(token);
             continue;
         }
-        const [name, inline] = token.slice(2).split('=', 2);
+        const equals = token.indexOf('=');
+        const name = (equals === -1 ? token.slice(2) : token.slice(2, equals));
+        const inline = equals === -1 ? undefined : token.slice(equals + 1);
         if (seen.has(name))
             throw new FleetError('usage', `--${name} is given more than once`);
         seen.add(name);
@@ -76,7 +78,9 @@ function parse(argv) {
             if (BOOLEAN_FLAGS.has(name)) {
                 if (inline === 'true')
                     flags.set(name, true);
-                else if (inline !== 'false')
+                else if (inline === 'false')
+                    flags.set(name, false);
+                else
                     throw new FleetError('usage', `--${name} accepts only true or false`);
             }
             else {

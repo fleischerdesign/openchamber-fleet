@@ -33,7 +33,7 @@ describe('fail-closed command flags', () => {
     const { root, configDir } = configured();
     const result = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--apply=false', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 2);
-    assert.match(result.stderr, /exactly one of --plan or --apply/);
+    assert.match(result.stderr, /boolean flags/);
   });
 
   test('a plan token without a value is refused before SSH', () => {
@@ -54,6 +54,13 @@ describe('fail-closed command flags', () => {
     const duplicate = spawnSync(process.execPath, [cli, 'sync', '--host', 'mob', '--plan', '--plan', '--config-dir', configDir], { cwd: root, encoding: 'utf8' });
     assert.equal(duplicate.status, 2);
     assert.match(duplicate.stderr, /more than once/);
+  });
+
+  test('run treats --apply=false as invalid instead of falling back to auto', () => {
+    const { root, configDir } = configured();
+    const result = spawnSync(process.execPath, [cli, 'run', '--host', 'mob', '--apply=false', '--config-dir', configDir, '--', 'true'], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /boolean flags/);
   });
 
   test('run rejects conflicting plan flags and adopt', () => {
