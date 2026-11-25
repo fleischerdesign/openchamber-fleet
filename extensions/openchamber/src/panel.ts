@@ -220,7 +220,8 @@ function renderHosts(documents: ConfigDocuments): void {
     const actions = document.createElement('div');
     actions.className = 'row';
     actions.style.marginTop = '8px';
-    if (entry) {
+    const allowsWorkspace = entry === undefined || entry.allow === undefined || entry.allow.includes('workspace');
+    if (entry && allowsWorkspace) {
       for (const [label, action] of [['Status', 'status'], ['Plan', 'plan'], ['Inspect recovery', 'recovery']] as const) {
         const button = document.createElement('button');
         button.textContent = label;
@@ -228,6 +229,10 @@ function renderHosts(documents: ConfigDocuments): void {
         button.dataset.host = alias;
         actions.append(button);
       }
+    } else if (entry) {
+      const note = document.createElement('small');
+      note.textContent = 'Not allowed for workspace operations.';
+      actions.append(note);
     }
     row.append(title, actions);
     hostsView.append(row);

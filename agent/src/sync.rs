@@ -30,6 +30,8 @@ pub struct TxnRecord {
     pub base_generation: u64,
     pub phase: String,
     pub policy: Policy,
+    #[serde(default, rename = "leaseId")]
+    pub lease_id: String,
     #[serde(default)]
     pub entries: Vec<Entry>,
     #[serde(default, rename = "planDigest")]
@@ -47,6 +49,7 @@ pub fn begin(
     policy: Policy,
     base_generation: u64,
     txn_id: &str,
+    lease_id: &str,
 ) -> Result<TxnRecord, String> {
     if ws.recovery.is_some() || workspace::read_journal(&ws.state)?.is_some() {
         return Err("RECOVERY_REQUIRED workspace has an unfinished transaction".into());
@@ -67,6 +70,7 @@ pub fn begin(
         base_generation,
         phase: "entries".into(),
         policy,
+        lease_id: lease_id.to_string(),
         entries: Vec::new(),
         plan_digest: None,
         changes: Vec::new(),
@@ -573,7 +577,7 @@ mod tests {
         let (root, state) = temp_workspace("commit");
         fs::create_dir_all(state.join("test")).unwrap();
         let mut ws = workspace(&root, &state);
-        let mut txn = begin(&ws, Policy::default(), 0, "txn1").unwrap();
+        let mut txn = begin(&ws, Policy::default(), 0, "txn1", "lease").unwrap();
         let (entry, digest) = file_entry("src/app.txt", "hello\n");
         add_entries(&mut txn, vec![entry], &ws).unwrap();
         let result = plan(&mut txn, &ws).unwrap();
@@ -587,7 +591,7 @@ mod tests {
             "hello\n"
         );
 
-        let mut txn2 = begin(&ws, Policy::default(), 1, "txn2").unwrap();
+        let mut txn2 = begin(&ws, Policy::default(), 1, "txn2", "lease").unwrap();
         let (entry2, _) = file_entry("src/app.txt", "hello\n");
         add_entries(&mut txn2, vec![entry2], &ws).unwrap();
         let result2 = plan(&mut txn2, &ws).unwrap();
@@ -599,7 +603,7 @@ mod tests {
     fn generation_mismatch_is_refused() {
         let (root, state) = temp_workspace("generation");
         let ws = workspace(&root, &state);
-        let error = begin(&ws, Policy::default(), 5, "txn").unwrap_err();
+        let error = begin(&ws, Policy::default(), 5, "txn", "lease").unwrap_err();
         assert!(error.contains("GENERATION_MISMATCH"));
     }
 
@@ -608,7 +612,7 @@ mod tests {
         let (root, state) = temp_workspace("delete");
         fs::create_dir_all(state.join("test")).unwrap();
         let mut ws = workspace(&root, &state);
-        let mut txn = begin(&ws, Policy::default(), 0, "t1").unwrap();
+        let mut txn = begin(&ws, Policy::default(), 0, "t1", "lease").unwrap();
         let (a, da) = file_entry("a.txt", "a\n");
         let (b, db) = file_entry("target/keep.bin", "keep\n");
         add_entries(&mut txn, vec![a, b], &ws).unwrap();
@@ -622,7 +626,7 @@ mod tests {
             preserve: vec!["target/".into()],
             delete_managed: true,
         };
-        let mut txn2 = begin(&ws, policy, 1, "t2").unwrap();
+        let mut txn2 = begin(&ws, policy, 1, "t2", "lease").unwrap();
         add_entries(&mut txn2, vec![], &ws).unwrap();
         let planned2 = plan(&mut txn2, &ws).unwrap();
         let deleted: Vec<_> = planned2
@@ -640,7 +644,7 @@ mod tests {
     fn unsafe_entry_paths_are_rejected_before_apply() {
         let (root, state) = temp_workspace("unsafe");
         let ws = workspace(&root, &state);
-        let mut txn = begin(&ws, Policy::default(), 0, "t").unwrap();
+        let mut txn = begin(&ws, Policy::default(), 0, "t", "lease").unwrap();
         let mut entry = file_entry("ok.txt", "x").0;
         entry.path = "../escape".into();
         assert!(add_entries(&mut txn, vec![entry], &ws).is_err());
@@ -672,7 +676,7 @@ mod symlink_tests {
             manifest: Manifest::empty(),
             recovery: None,
         };
-        let mut txn = begin(&ws, Policy::default(), 0, "t1").unwrap();
+        let mut txn = begin(&ws, Policy::default(), 0, "t1", "lease").unwrap();
         let entry = Entry {
             path: "link".into(),
             kind: "symlink".into(),
@@ -691,7 +695,7 @@ mod symlink_tests {
         );
 
         // A file below a symlinked directory must be refused, never followed.
-        let mut txn2 = begin(&ws, Policy::default(), 1, "t2").unwrap();
+        let mut txn2 = begin(&ws, Policy::default(), 1, "t2", "lease").unwrap();
         let digest = format!("sha256:{}", sha256_hex(b"x"));
         let file = Entry {
             path: "linkdir/file".into(),

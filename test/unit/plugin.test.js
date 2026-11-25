@@ -270,9 +270,10 @@ describe('OpenCode plugin surface', () => {
     try {
       const result = tool(tools, 'fleet_fetch');
       await assert.rejects(result.execute({ host: 'node', artifact: 'out.txt', dest: path.join(workspace, 'out') }, context));
-      assert.equal(permissions.length, 1);
-      assert.equal(permissions[0].action, 'edit');
-      assert.deepEqual(permissions[0].resources, [path.join(workspace, 'out', 'out.txt')]);
+      assert.deepEqual(permissions.map((entry) => entry.action), ['edit', 'fleet.download']);
+      const target = path.join(workspace, 'out', 'out.txt');
+      assert.deepEqual(permissions[0].resources, [target]);
+      assert.deepEqual(permissions[1].resources, [`node@test@127.0.0.1:1:~/.cache/openchamber-fleet/plugin-tests:out.txt->${target}`]);
     } finally {
       await cleanup();
     }

@@ -198,6 +198,27 @@ fn same_root(value: &str, root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Serializes root reservation across agent processes. The flock is released
+/// when the handle drops or the process dies.
+pub fn registry_lock() -> Result<File, String> {
+    let root = state_root();
+    ensure_dir(&root)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(root.join(".registry.lock"))
+        .map_err(io_message)?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if result != 0 {
+        return Err(format!(
+            "could not lock the workspace registry: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(file)
+}
+
 fn assert_root_unowned(id: &str, root: &Path) -> Result<(), String> {
     let base = state_root();
     let entries = match fs::read_dir(&base) {
@@ -211,16 +232,30 @@ fn assert_root_unowned(id: &str, root: &Path) -> Result<(), String> {
             continue;
         }
         let state_file = entry.path().join("state.json");
-        let Ok(text) = fs::read_to_string(&state_file) else {
+        if !state_file.exists() {
             continue;
-        };
-        let Ok(value) = serde_json::from_str::<WorkspaceState>(&text) else {
-            continue;
-        };
-        if same_root(&value.root, root) {
+        }
+        let text = fs::read_to_string(&state_file).map_err(|error| {
+            format!(
+                "WORKSPACE_ROOT_CONFLICT cannot verify workspace {other} at {}: {error}",
+                state_file.display()
+            )
+        })?;
+        let value = serde_json::from_str::<WorkspaceState>(&text).map_err(|error| {
+            format!(
+                "WORKSPACE_ROOT_CONFLICT workspace {other} has a corrupt state file {}: {error}",
+                state_file.display()
+            )
+        })?;
+        let other_root = canonicalize_lenient(Path::new(&value.root))?;
+        if same_root(&value.root, root)
+            || root.starts_with(&other_root)
+            || other_root.starts_with(root)
+        {
             return Err(format!(
-                "WORKSPACE_ROOT_CONFLICT root {} is already bound to workspace {other}; use a distinct root per workspace",
-                root.display()
+                "WORKSPACE_ROOT_CONFLICT root {} overlaps workspace {other} at {}; use a distinct, non-nested root per workspace",
+                root.display(),
+                other_root.display()
             ));
         }
     }
@@ -240,6 +275,7 @@ pub fn state_root() -> PathBuf {
 /// Refresh a workspace from disk after its lease was acquired, so the caller
 /// reads the generation and journal under the lease rather than a stale cache.
 pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
+    let _lock = registry_lock()?;
     let state_file = workspace.state.join("state.json");
     let manifest_file = workspace.state.join("manifest.json");
     let value: WorkspaceState =
@@ -268,6 +304,7 @@ pub fn reload_workspace(workspace: &mut Workspace) -> Result<(), String> {
 /// Inspect a workspace without creating its root, state directory or manifest.
 pub fn probe_workspace(id: &str, root_input: &str) -> Result<WorkspaceProbe, String> {
     validate_workspace_id(id)?;
+    let _lock = registry_lock()?;
     let root = resolve_root(root_input)?;
     assert_root_unowned(id, &root)?;
     let state = state_root().join(id);
@@ -354,16 +391,46 @@ pub fn safe_directory(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspace, String> {
+pub fn open_workspace(
+    id: &str,
+    root_input: &str,
+    adopt: bool,
+    expected_root: Option<&str>,
+    expected_manifest: Option<&str>,
+    expected_state: Option<&str>,
+) -> Result<Workspace, String> {
     validate_workspace_id(id)?;
+    let _lock = registry_lock()?;
     let root = resolve_root(root_input)?;
     assert_root_unowned(id, &root)?;
     let state = state_root().join(id);
-    ensure_dir(&state)?;
     let state_file = state.join("state.json");
     let manifest_file = state.join("manifest.json");
     let journal_file = state.join("journal.json");
 
+    let expected_matches = |state: &str, manifest_digest: &str, actual_root: &Path| {
+        if let Some(expected) = expected_root {
+            if expected != actual_root.to_string_lossy() {
+                return Err(format!(
+                    "PLAN_STALE root changed from {expected} to {}",
+                    actual_root.display()
+                ));
+            }
+        }
+        if let Some(expected) = expected_state {
+            if expected != state {
+                return Err(format!(
+                    "PLAN_STALE workspace state changed from {expected} to {state}"
+                ));
+            }
+        }
+        if let Some(expected) = expected_manifest {
+            if expected != manifest_digest {
+                return Err("PLAN_STALE base manifest changed since it was approved".into());
+            }
+        }
+        Ok(())
+    };
     let exists = root.exists();
     if state_file.exists() {
         let value: WorkspaceState =
@@ -384,6 +451,15 @@ pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspa
         } else {
             None
         };
+        expected_matches(
+            if recovery.is_some() {
+                "RECOVERY"
+            } else {
+                "READY"
+            },
+            &manifest.digest,
+            &root,
+        )?;
         return Ok(Workspace {
             id: id.to_string(),
             root,
@@ -400,6 +476,12 @@ pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspa
             root.display()
         ));
     }
+    expected_matches(
+        if exists { "UNMANAGED" } else { "ABSENT" },
+        &Manifest::empty().digest,
+        &root,
+    )?;
+    ensure_dir(&state)?;
     fs::create_dir_all(&root).map_err(io_message)?;
     set_mode(&root, 0o700)?;
 
@@ -408,13 +490,20 @@ pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspa
     } else {
         Manifest::empty()
     };
+    expected_matches(
+        if exists { "UNMANAGED" } else { "ABSENT" },
+        &manifest.digest,
+        &root,
+    )?;
     let value = WorkspaceState {
         root: root.to_string_lossy().to_string(),
         generation: 0,
         manifest_digest: manifest.digest.clone(),
     };
-    write_json_atomic(&state_file, &value)?;
+    // The manifest is published before the state file. A crash between the
+    // two leaves an unmanaged root, never a state file without a manifest.
     write_json_atomic(&manifest_file, &manifest)?;
+    write_json_atomic(&state_file, &value)?;
     Ok(Workspace {
         id: id.to_string(),
         root,
@@ -429,6 +518,7 @@ pub fn open_workspace(id: &str, root_input: &str, adopt: bool) -> Result<Workspa
 /// An absent state and an absent root produce the empty-base manifest.
 pub fn preview_workspace(id: &str, root_input: &str) -> Result<Workspace, String> {
     validate_workspace_id(id)?;
+    let _lock = registry_lock()?;
     let root = resolve_root(root_input)?;
     assert_root_unowned(id, &root)?;
     let state = state_root().join(id);

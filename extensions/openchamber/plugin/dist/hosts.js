@@ -20,7 +20,7 @@ export function selectHost(config, query = {}) {
     const candidates = Object.values(config.hosts).filter(matches);
     if (candidates.length === 0) {
         throw new AgentError('INVALID_REQUEST', `no configured host matches tags ${tags.join(', ')}${query.operation === undefined ? '' : ` for ${query.operation}`}; hosts: ${Object.entries(config.hosts)
-            .map(([alias, host]) => `${alias} [${host.tags.join(', ') || 'no tags'}${host.allow === undefined ? '' : `; ${host.allow.join(', ')}`}]`)
+            .map(([alias, host]) => `${alias} [${host.tags.join(', ') || 'no tags'}${host.allow === undefined ? '' : `; ${host.allow.length === 0 ? 'no operations' : host.allow.join(', ')}`}]`)
             .join(', ')}`);
     }
     return candidates[0];
@@ -34,7 +34,7 @@ export function hostViews(config) {
             tags: [...host.tags],
             tagsLabel: host.tags.join(', ') || 'no tags',
             operations: [...operations],
-            operationsLabel: operations.join(', '),
+            operationsLabel: operations.length === 0 ? 'none' : operations.join(', '),
         };
     });
 }

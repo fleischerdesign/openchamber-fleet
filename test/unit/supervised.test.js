@@ -262,6 +262,17 @@ describe('supervised Fleet jobs', () => {
     registry.cleanup();
   });
 
+  test('a draining supervisor is present but not available for new jobs', async () => {
+    const store = new JobStore(root());
+    store.ensure();
+    discovery(store, { draining: true });
+    const { ctx } = harness(store);
+    const registry = new SupervisedJobRegistry(ctx, { store, pollMs: 10 });
+    assert.equal(await registry.available(0), false);
+    discovery(store, { draining: false });
+    assert.equal(await registry.available(0), true);
+  });
+
   test('returns null when no supervisor is available, so the caller can fall back', async () => {
     const store = new JobStore(root());
     store.ensure();

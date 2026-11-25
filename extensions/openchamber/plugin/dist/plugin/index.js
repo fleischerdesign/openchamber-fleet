@@ -10,7 +10,7 @@ import { runWorkspace, syncForRun, syncOnlyState } from '../run.js';
 import { scratchConfig } from '../scratch.js';
 import { replicaState } from '../status.js';
 import { AgentError } from '../v1/errors.js';
-import { canonicalArtifactTarget, canonicalTransferSource, canonicalTransferTarget, connectSsh, downloadFile, execCommand, recoverWorkspace, status, syncWorkspace, uploadFile, } from '../v1/operations.js';
+import { transferSourceIdentity, transferTargetIdentity, connectSsh, downloadFile, execCommand, recoverWorkspace, status, syncWorkspace, uploadFile, } from '../v1/operations.js';
 import { BackgroundJobs } from './background.js';
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
@@ -306,6 +306,7 @@ function runOutput(config, host, argv, background, state, sync, exec, jobId, sup
         syncChanges: sync?.changes ?? 0,
         syncGeneration: sync?.generation ?? null,
         syncPlanDigest: sync?.planDigest ?? null,
+        syncPlanToken: sync?.planToken ?? null,
         syncItems: sync?.items ?? [],
         syncTruncated: sync?.changesTruncated ?? false,
         stdout: exec ? truncated(exec.stdout.toString('utf8')) : '',
@@ -437,6 +438,9 @@ export default {
                     const host = hostOf(config, input, 'workspace');
                     if (input.mode !== 'plan' && input.mode !== 'apply') {
                         throw new AgentError('INVALID_REQUEST', 'mode must be plan or apply');
+                    }
+                    if (input.planToken !== undefined && (typeof input.planToken !== 'string' || input.planToken.length === 0)) {
+                        throw new AgentError('INVALID_REQUEST', 'planToken must be a non-empty string');
                     }
                     const mode = input.mode;
                     const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
@@ -611,6 +615,7 @@ export default {
                     syncChanges: { type: 'number' },
                     syncGeneration: { type: ['number', 'null'] },
                     syncPlanDigest: { type: ['string', 'null'] },
+                    syncPlanToken: { type: ['string', 'null'] },
                     syncItems: { type: 'array', items: schema({ action: string, path: string }, ['action', 'path']) },
                     syncTruncated: boolean,
                     stdout: string,
@@ -777,27 +782,30 @@ export default {
                 output: output({
                     jobs: { type: 'array', items: schema({
                             jobId: string,
+                            target: string,
                             host: string,
                             commandLabel: string,
                             state: string,
                             stateLabel: string,
                             runLabel: string,
                             exitLabel: string,
-                        }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
+                        }, ['jobId', 'target', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
                     items: { type: 'array', items: schema({
                             jobId: string,
+                            target: string,
                             host: string,
                             commandLabel: string,
                             state: string,
                             stateLabel: string,
                             runLabel: string,
                             exitLabel: string,
-                        }, ['jobId', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
+                        }, ['jobId', 'target', 'host', 'commandLabel', 'state', 'stateLabel', 'runLabel', 'exitLabel']) },
                 }, ['jobs', 'items']),
                 async execute(_input, context) {
                     const jobs = await registry.list(sessionIDOf(context));
                     const rows = jobs.map((record) => ({
                         jobId: record.jobId,
+                        target: record.target ?? 'workspace',
                         host: record.host,
                         commandLabel: commandLabelOf(record.argv),
                         state: record.state,
@@ -838,7 +846,14 @@ export default {
                     }
                     const artifact = input.artifact;
                     const dest = path.resolve(config.dir, input.dest);
-                    const target = canonicalArtifactTarget(dest, artifact);
+                    let targetIdentity;
+                    try {
+                        targetIdentity = transferTargetIdentity(path.join(dest, path.basename(artifact)));
+                    }
+                    catch (error) {
+                        throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
+                    }
+                    const target = targetIdentity.path;
                     await assertPermission(ctx, context, 'edit', [target], {
                         workspace: workspaceLabel(config),
                         target: selected,
@@ -846,6 +861,13 @@ export default {
                         artifact,
                         destination: target,
                     }, [`${path.dirname(target)}/*`]);
+                    await assertPermission(ctx, context, 'fleet.download', [`${host.alias}@${host.ssh}:${host.port}:${host.root}:${artifact}->${target}`], {
+                        workspace: workspaceLabel(config),
+                        target: selected,
+                        host: host.alias,
+                        artifact,
+                        destination: target,
+                    });
                     const relative = path.relative(config.dir, target);
                     if (relative.startsWith('..') || path.isAbsolute(relative)) {
                         await assertPermission(ctx, context, 'external_directory', [`${path.dirname(target)}/*`], {
@@ -861,6 +883,9 @@ export default {
                         root: host.root,
                         path: artifact,
                         dest: target,
+                        expectedTarget: target,
+                        ...(targetIdentity.dev === null ? {} : { expectedParentDev: targetIdentity.dev }),
+                        ...(targetIdentity.ino === null ? {} : { expectedParentIno: targetIdentity.ino }),
                         overwrite: input.overwrite === true,
                         signal: context?.signal,
                         onProgress: (update) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
@@ -894,13 +919,14 @@ export default {
                     }
                     const config = await workspaceOfTarget(ctx, context, 'scratch');
                     const host = hostOf(config, input, 'transfer');
-                    let source;
+                    let sourceIdentity;
                     try {
-                        source = canonicalTransferSource(path.resolve(config.dir, input.localPath));
+                        sourceIdentity = transferSourceIdentity(path.resolve(config.dir, input.localPath));
                     }
                     catch (error) {
                         throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
                     }
+                    const source = sourceIdentity.path;
                     let remotePath;
                     try {
                         remotePath = assertRelativePath(input.remotePath);
@@ -937,6 +963,8 @@ export default {
                         root: host.root,
                         path: remotePath,
                         source,
+                        expectedDev: sourceIdentity.dev,
+                        expectedIno: sourceIdentity.ino,
                         overwrite: input.overwrite === true,
                         signal: context?.signal,
                         onProgress: (update) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
@@ -988,13 +1016,14 @@ export default {
                     catch (error) {
                         throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
                     }
-                    let destination;
+                    let targetIdentity;
                     try {
-                        destination = canonicalTransferTarget(path.resolve(config.dir, input.localPath), false);
+                        targetIdentity = transferTargetIdentity(path.resolve(config.dir, input.localPath));
                     }
                     catch (error) {
                         throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
                     }
+                    const destination = targetIdentity.path;
                     await assertPermission(ctx, context, 'edit', [destination], {
                         workspace: workspaceLabel(config),
                         target: selected,
@@ -1025,6 +1054,8 @@ export default {
                         path: remotePath,
                         dest: destination,
                         expectedTarget: destination,
+                        ...(targetIdentity.dev === null ? {} : { expectedParentDev: targetIdentity.dev }),
+                        ...(targetIdentity.ino === null ? {} : { expectedParentIno: targetIdentity.ino }),
                         overwrite: input.overwrite === true,
                         signal: context?.signal,
                         onProgress: (update) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),

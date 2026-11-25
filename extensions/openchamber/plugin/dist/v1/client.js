@@ -44,12 +44,12 @@ export class AgentClient {
             limits: { maxControl: 0, maxData: 0, maxStreams: 0 },
         });
         const result = (await provisional.request('session.initialize', {
-            protocol: { major: 1, minor: 0 },
+            protocol: { major: 1, minor: 1 },
             client: { name: 'fleet', version: FLEET_VERSION, instance: `${process.pid}-${Date.now()}` },
             capabilities: options.capabilities ?? [],
         }, options.timeoutMs ?? 15_000));
-        if (!result?.protocol || result.protocol.major !== 1) {
-            throw new AgentError('UNSUPPORTED_PROTOCOL', 'agent did not accept protocol major 1');
+        if (!result?.protocol || result.protocol.major !== 1 || result.protocol.minor < 1) {
+            throw new AgentError('UNSUPPORTED_PROTOCOL', 'agent does not provide protocol 1.1');
         }
         const maxData = result.limits?.maxData;
         if (typeof maxData !== 'number' || !Number.isFinite(maxData) || maxData <= DATA_HEADER_BYTES) {

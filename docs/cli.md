@@ -58,7 +58,9 @@ OpenCode plugin keys scratch by session instead. It has no source and no sync; `
 file, verify a SHA-256 digest, stream without loading the file into memory and refuse to overwrite
 unless `--overwrite` is given.
 
-`fleet sync --plan`, `fleet status`, recovery inspection and `fleet fetch` are read-only: they never
+Flag values are fail-closed: `--apply=false` is not an apply, `--plan-token` needs a token, and
+`--sync` cannot be combined with `--plan`/`--apply`. `fleet sync --plan`, `fleet status`, recovery
+inspection and `fleet fetch` are read-only: they never
 create a replica root, state entry or transaction journal. A plan works before the first apply. It
 prints a `plan-token`; `fleet sync --apply --plan-token TOKEN` refuses a different host, agent
 installation, source content, policy, generation or file set with `PLAN_STALE`, and checks the
@@ -91,7 +93,8 @@ $ fleet sync --host workstation --apply --exclude target/
 generation 7 sha256:41ab…
 ```
 
-`--plan` never mutates: it computes an in-memory preview and writes no journal. `--apply` commits
+`--plan` never mutates: it computes an in-memory preview and writes no journal. The approval binds
+the resolved root and base manifest, not only the configured root string. `--apply` commits
 and prints the new generation; a no-op apply keeps the generation unchanged. `--adopt` takes over an
 existing unmanaged directory; without it the agent refuses. It is deliberately CLI-only.
 

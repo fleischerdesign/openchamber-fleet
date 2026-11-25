@@ -39,7 +39,11 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Read-only preview, no journal, absent base | SYNC-11 | `test/v1/protocol.test.js`, `test/unit/operations.test.js` |
 | Plan approval binds host, agent and source content | SYNC-12 | `test/unit/operations.test.js` |
 | No-op apply keeps the generation | SYNC-13 | `test/v1/protocol.test.js` |
-| One root per workspace id | WS-11 | `test/v1/protocol.test.js` |
+| One root per workspace id, nested and concurrent process opens | WS-11 | `test/v1/protocol.test.js` |
+| Protocol 1.0 is refused before mutation | PROTO-07 | `agent/src/session.rs` tests |
+| Approved root and base manifest are checked before provisioning | SYNC-14 | `src/v1/operations.ts`, `agent/src/workspace.rs` |
+| CLI mutation flags are fail-closed | CLI-01 | `test/unit/cli.test.js` |
+| Draining supervisor is not available for new jobs | HOST-09 | `test/unit/supervised.test.js` |
 | Read-only open never provisions | WS-12 | `test/v1/protocol.test.js` |
 | Empty host allowlist, policy preservation, legacy policy | HOST-04…HOST-06 | `test/unit/config.test.js` |
 | Upload/download permission paths | XFR-06, XFR-07 | `test/unit/plugin.test.js` |

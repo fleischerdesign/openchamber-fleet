@@ -173,7 +173,7 @@ export class SupervisedJobRegistry {
             throw new AgentError('PERMISSION_DENIED', 'job belongs to another session');
         if (isTerminal(record.state))
             return this.stored(record);
-        if (!this.healthy()) {
+        if (!this.present()) {
             const now = this.now();
             const interrupted = {
                 ...record,
@@ -217,7 +217,7 @@ export class SupervisedJobRegistry {
         catch {
             return;
         }
-        const healthy = this.healthy();
+        const healthy = this.present();
         for (const record of jobs) {
             if (record.sessionID !== sessionID || isTerminal(record.state))
                 continue;
@@ -271,7 +271,7 @@ export class SupervisedJobRegistry {
             return;
         this.ticking = true;
         try {
-            const healthy = this.healthy();
+            const healthy = this.present();
             let jobs;
             try {
                 jobs = this.store.listJobs();
@@ -427,9 +427,19 @@ export class SupervisedJobRegistry {
         }
         return 0;
     }
-    healthy() {
+    present() {
         try {
             return readHealthySupervisor(this.store, this.now()) !== null;
+        }
+        catch {
+            return false;
+        }
+    }
+    /** A draining supervisor accepts no new jobs, even though it is alive. */
+    healthy() {
+        try {
+            const record = readHealthySupervisor(this.store, this.now());
+            return record !== null && record.draining !== true;
         }
         catch {
             return false;
