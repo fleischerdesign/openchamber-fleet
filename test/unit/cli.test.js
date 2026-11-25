@@ -89,6 +89,15 @@ describe('fleet init', () => {
     assert.equal(legacy.hosts.mob.ssh, 'u@h');
   });
 
+  test('--clear=false does not clear the default', () => {
+    const configDir = fs.mkdtempSync(path.join(tmp, 'false-clear-config-'));
+    const project = fs.mkdtempSync(path.join(tmp, 'false-clear-project-'));
+    execFileSync(process.execPath, [cli, 'init', '--host', 'mob', '--ssh', 'u@h', '--name', 'keep', '--config-dir', configDir], { cwd: project, stdio: 'pipe' });
+    execFileSync(process.execPath, [cli, 'default', project, '--config-dir', configDir], { stdio: 'pipe' });
+    const shown = JSON.parse(execFileSync(process.execPath, [cli, 'default', '--clear=false', '--json', '--config-dir', configDir], { encoding: 'utf8' }));
+    assert.equal(shown.directory, fs.realpathSync(project));
+  });
+
   test('fleet hosts reports tags and auto-selection', () => {
     const { root } = repository();
     const configDir = fs.mkdtempSync(path.join(tmp, 'tags-config-'));

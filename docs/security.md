@@ -62,7 +62,8 @@ would need a separate identity and a broker; v1 does not pretend to have one.
   workspaces. A journal without a live owner needs an explicit recovery lease. `ttlMs` is advisory:
   a lease lives with its connection, so a long accepted job cannot lose its fence halfway through.
   Metadata reads and the short journal/manifest publish sections share a registry lock, so a reader
-  never sees a generation from one commit with a manifest from another. Recovery publishes
+  never sees a generation from one commit with a manifest from another. The lock does not cover the
+  whole file-tree apply; a process that changes the replica outside Fleet can still force recovery. Recovery publishes
   `baseGeneration + 1`, so a crash after the state rename replays idempotently.
 - A read-only plan is an in-memory preview. It creates no journal, so a cancelled preview cannot
   leave `RECOVERY` behind.

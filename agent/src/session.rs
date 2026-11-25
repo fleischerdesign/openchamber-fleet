@@ -1449,6 +1449,7 @@ impl Session {
                 ))
             }
             Err(error) => {
+                record.lease_id = lease_operation.clone();
                 self.transactions.insert(txn_id.to_string(), record);
                 Action::Reply(error_response(&request.id, &error))
             }

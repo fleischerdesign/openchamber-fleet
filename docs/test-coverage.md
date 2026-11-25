@@ -65,6 +65,8 @@ tests run with `npm test` and need `FLEET_AGENT_BIN` pointing at the built agent
 | Real unmanaged directory is never replaced | SYNC-18 | `agent/src/sync.rs` tests |
 | One lease cannot start two jobs | EXEC-09 | `test/v1/protocol.test.js` |
 | Lock loss stops supervisor claims | HOST-10 | `test/unit/supervisor.test.js` |
+| Boolean false is an opt-out, not consent | CLI-04 | `test/unit/cli.test.js` |
+| Ownership is rechecked before the remote start | HOST-11 | `src/v1/operations.ts`, `src/supervisor/core.ts` |
 | Symlink apply, symlinked parent refused | SYNC-10 | `agent/src/sync.rs` symlink tests |
 
 ## Planned (the failure suite)
