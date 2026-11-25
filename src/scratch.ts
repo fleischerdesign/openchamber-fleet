@@ -18,6 +18,8 @@ export interface ScratchOptions {
   readonly seed: string;
   /** Local directory shown in metadata; never synchronized. */
   readonly directory: string;
+  /** Shared registry location; defaults to the process configuration. */
+  readonly configDir?: string;
 }
 
 export function scratchIdentity(seed: string): ScratchIdentity {
@@ -31,7 +33,7 @@ export function scratchIdentity(seed: string): ScratchIdentity {
 
 export function scratchConfig(options: ScratchOptions): WorkspaceConfig {
   const identity = scratchIdentity(options.seed);
-  const base = loadHostsOnlyConfig(options.directory);
+  const base = loadHostsOnlyConfig(options.directory, options.configDir === undefined ? {} : { configDir: options.configDir });
   const hosts: Record<string, HostConfig> = {};
   for (const host of Object.values(base.hosts)) {
     hosts[host.alias] = { ...host, root: identity.root };
@@ -46,6 +48,7 @@ export function scratchConfig(options: ScratchOptions): WorkspaceConfig {
     env: {},
     shell: 'bash',
     excludeMatcher: compileExcludes([]),
+    source: 'scratch',
   };
 }
 

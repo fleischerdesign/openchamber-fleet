@@ -128,7 +128,12 @@ function configOf(flags: Map<string, string | boolean>, hostsOnly = false): Work
 /** Project config by default; `--scratch` gives a remote-only session space. */
 function executionConfigOf(flags: Map<string, string | boolean>): WorkspaceConfig {
   if (!flags.has('scratch')) return configOf(flags);
-  return scratchConfig({ seed: process.cwd(), directory: process.cwd() });
+  const configDir = flags.get('config-dir');
+  return scratchConfig({
+    seed: process.cwd(),
+    directory: process.cwd(),
+    ...(typeof configDir === 'string' ? { configDir } : {}),
+  });
 }
 
 function cmdDefault(parsed: Parsed): void {
@@ -186,6 +191,10 @@ function cmdInit(parsed: Parsed): void {
   const portValue = parsed.flags.get('port');
   const root = parsed.flags.get('root');
   const name = parsed.flags.get('name');
+  const scopeValue = parsed.flags.get('scope');
+  if (scopeValue !== undefined && scopeValue !== 'name' && scopeValue !== 'checkout') {
+    throw new FleetError('usage', '--scope must be name or checkout');
+  }
   const tags = tagsOf(parsed.flags);
 
   if (parsed.flags.has('workspace-file')) {
@@ -212,6 +221,7 @@ function cmdInit(parsed: Parsed): void {
     ...(typeof name === 'string' ? { name } : {}),
     ...(tags.length > 0 ? { tags } : {}),
     ...(typeof configDir === 'string' ? { configDir } : {}),
+    ...(scopeValue === 'name' || scopeValue === 'checkout' ? { scope: scopeValue } : {}),
     force: parsed.flags.has('force'),
   });
   process.stdout.write(`wrote ${documents.hostsFile}\n`);
@@ -287,6 +297,14 @@ function excludesOf(config: WorkspaceConfig, flags: Map<string, string | boolean
 }
 
 async function cmdSync(parsed: Parsed): Promise<void> {
+  const plan = parsed.flags.has('plan');
+  const apply = parsed.flags.has('apply');
+  if (plan === apply) {
+    throw new FleetError('usage', 'sync needs exactly one of --plan or --apply');
+  }
+  if (plan && parsed.flags.has('adopt')) {
+    throw new FleetError('usage', '--adopt is only valid with sync --apply');
+  }
   const config = configOf(parsed.flags);
   const host = hostOf(config, parsed.flags, 'workspace');
   const excludes = excludesOf(config, parsed.flags);
@@ -297,8 +315,9 @@ async function cmdSync(parsed: Parsed): Promise<void> {
       workspaceId: config.name,
       source: config.dir,
       root: host.root,
+      hostIdentity: `${host.ssh}:${host.port}`,
       excludes,
-      mode: parsed.flags.has('plan') ? 'plan' : 'apply',
+      mode: plan ? 'plan' : 'apply',
       adopt: parsed.flags.has('adopt'),
       ...(typeof parsed.flags.get('plan-token') === 'string' ? { planToken: String(parsed.flags.get('plan-token')) } : {}),
     });
@@ -342,6 +361,9 @@ async function cmdRun(parsed: Parsed): Promise<void> {
   const argv = parsed.rest.length > 0 ? parsed.rest : parsed.positional;
   if (argv.length === 0) throw new FleetError('usage', 'run needs a command after --');
   const syncFlag = parsed.flags.get('sync');
+  if (syncFlag !== undefined && syncFlag !== 'never' && syncFlag !== 'plan' && syncFlag !== 'apply') {
+    throw new FleetError('usage', '--sync must be one of auto, never, plan or apply');
+  }
   const sync: RunSyncMode = syncFlag === 'never' || syncFlag === 'plan' || syncFlag === 'apply'
     ? syncFlag
     : parsed.flags.has('plan')
@@ -351,6 +373,9 @@ async function cmdRun(parsed: Parsed): Promise<void> {
         : 'auto';
   if (parsed.flags.has('scratch') && (sync === 'plan' || sync === 'apply')) {
     throw new FleetError('usage', '--scratch has no source tree; sync=plan/apply requires a project workspace');
+  }
+  if (parsed.flags.has('adopt')) {
+    throw new FleetError('usage', '--adopt is only valid for fleet sync --apply');
   }
   const additions = parsed.flags.has('scratch')
     ? []
@@ -483,7 +508,12 @@ async function cmdUpload(parsed: Parsed): Promise<void> {
     throw new FleetError('usage', 'upload needs <local-path> and --to <remote-path>');
   }
   // Uploads always land in the private scratch space, never in a replica root.
-  const config = scratchConfig({ seed: process.cwd(), directory: process.cwd() });
+  const configDir = parsed.flags.get('config-dir');
+  const config = scratchConfig({
+    seed: process.cwd(),
+    directory: process.cwd(),
+    ...(typeof configDir === 'string' ? { configDir } : {}),
+  });
   const host = hostOf(config, parsed.flags, 'transfer');
   const client = await connectSsh(host, { agentPath: agentPath(parsed.flags) });
   try {

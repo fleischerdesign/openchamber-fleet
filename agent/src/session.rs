@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -33,6 +33,7 @@ pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct Capabilities {
     pub workspace_sync: bool,
     pub workspace_probe: bool,
+    pub workspace_preview: bool,
     pub exec: bool,
     pub artifact: bool,
     pub transfer: bool,
@@ -43,6 +44,7 @@ impl Default for Capabilities {
         Self {
             workspace_sync: true,
             workspace_probe: true,
+            workspace_preview: true,
             exec: true,
             artifact: true,
             transfer: true,
@@ -58,6 +60,9 @@ impl Capabilities {
         }
         if self.workspace_probe {
             map.insert("workspace.probe".into(), json!(1));
+        }
+        if self.workspace_preview {
+            map.insert("workspace.preview".into(), json!(1));
         }
         if self.exec {
             map.insert("exec".into(), json!(1));
@@ -75,6 +80,7 @@ impl Capabilities {
         match name {
             "workspace.sync" => self.workspace_sync,
             "workspace.probe" => self.workspace_probe,
+            "workspace.preview" => self.workspace_preview,
             "exec" => self.exec,
             "artifact" => self.artifact,
             "transfer" => self.transfer,
@@ -104,7 +110,13 @@ struct Upload {
 
 struct LeaseBinding {
     workspace_id: String,
+    expires_at: u64,
     handle: LeaseHandle,
+}
+
+struct PreviewTxn {
+    record: TxnRecord,
+    workspace: crate::workspace::Workspace,
 }
 
 pub struct Session {
@@ -114,6 +126,7 @@ pub struct Session {
     registry: Registry,
     leases: HashMap<String, LeaseBinding>,
     transactions: HashMap<String, TxnRecord>,
+    previews: HashMap<String, PreviewTxn>,
     uploads: HashMap<u32, Upload>,
     jobs: HashMap<String, Arc<Job>>,
     out_streams: HashMap<u32, OutStream>,
@@ -138,6 +151,9 @@ impl Drop for Session {
         for job in self.jobs.values() {
             job.terminate_now();
         }
+        for upload in self.uploads.values() {
+            let _ = fs::remove_file(&upload.temporary);
+        }
     }
 }
 
@@ -150,6 +166,7 @@ impl Session {
             registry: Registry::default(),
             leases: HashMap::new(),
             transactions: HashMap::new(),
+            previews: HashMap::new(),
             uploads: HashMap::new(),
             jobs: HashMap::new(),
             out_streams: HashMap::new(),
@@ -190,6 +207,11 @@ impl Session {
             "sync.entries" => self.sync_entries(&request),
             "sync.plan" => self.sync_plan(&request),
             "sync.planPage" => self.sync_plan_page(&request),
+            "sync.previewBegin" => self.sync_preview_begin(&request),
+            "sync.previewEntries" => self.sync_preview_entries(&request),
+            "sync.previewPlan" => self.sync_preview_plan(&request),
+            "sync.previewPage" => self.sync_preview_page(&request),
+            "sync.previewEnd" => self.sync_preview_end(&request),
             "sync.commit" => self.sync_commit(&request),
             "sync.abort" => self.sync_abort(&request),
             "sync.recover" => self.sync_recover(&request),
@@ -297,14 +319,27 @@ impl Session {
             .get("adopt")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        match workspace::open_workspace(id, root, adopt) {
+        let read_only = request
+            .params
+            .get("readOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let opened = if read_only {
+            // A reader must never create a state directory, a root or a manifest.
+            workspace::preview_workspace(id, root)
+        } else {
+            workspace::open_workspace(id, root, adopt)
+        };
+        match opened {
             Ok(workspace) => {
+                let absent = !workspace.state.join("state.json").exists();
                 let result = json!({
                     "workspaceId": workspace.id,
                     "root": workspace.root.to_string_lossy(),
                     "generation": workspace.generation,
                     "manifestDigest": workspace.manifest.digest,
                     "recovery": workspace.recovery.is_some(),
+                    "absent": absent,
                 });
                 self.registry.insert(workspace);
                 Action::Reply(rpc::response(&request.id, result))
@@ -341,10 +376,15 @@ impl Session {
             .get("ttlMs")
             .and_then(Value::as_u64)
             .unwrap_or(workspace::DEFAULT_LEASE_MS);
+        let recovery_lease = request
+            .params
+            .get("recovery")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let Some(workspace) = self.registry.get(id) else {
             return Action::Reply(rpc::error(&request.id, "WORKSPACE_UNKNOWN", id, false));
         };
-        if workspace.recovery.is_some() {
+        if workspace.recovery.is_some() && !recovery_lease {
             return Action::Reply(rpc::error(
                 &request.id,
                 "RECOVERY_REQUIRED",
@@ -377,10 +417,12 @@ impl Session {
                     "generation": generation,
                     "expiresAt": handle.meta.expires_at,
                 });
+                let expires_at = handle.meta.expires_at;
                 self.leases.insert(
                     operation.to_string(),
                     LeaseBinding {
                         workspace_id: id.to_string(),
+                        expires_at,
                         handle,
                     },
                 );
@@ -390,17 +432,54 @@ impl Session {
         }
     }
 
+    /// A lease that outlived its advertised TTL is released lazily instead of
+    /// blocking the workspace until the connection ends.
+    fn active_lease(&mut self, lease: &str) -> Option<&LeaseBinding> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or(0);
+        let expired = self
+            .leases
+            .get(lease)
+            .map(|binding| now > binding.expires_at)
+            .unwrap_or(false);
+        if expired {
+            if let Some(binding) = self.leases.remove(lease) {
+                binding.handle.release();
+            }
+        }
+        self.leases.get(lease)
+    }
+
     fn workspace_release(&mut self, request: &Request) -> Action {
         let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
             return usage_error(request, "leaseId is required");
         };
-        match self.leases.remove(lease) {
-            Some(binding) => {
-                binding.handle.release();
-                Action::Reply(rpc::response(&request.id, json!({"ok": true})))
-            }
-            None => Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false)),
+        let Some(binding) = self.active_lease(lease) else {
+            return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        };
+        let workspace_id = binding.workspace_id.clone();
+        let transaction_active = self
+            .transactions
+            .values()
+            .any(|record| record.workspace == workspace_id);
+        let job_active = self.jobs.values().any(|job| {
+            let record = job.status();
+            record.workspace == workspace_id && !record.is_terminal()
+        });
+        if transaction_active || job_active {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "WORKSPACE_BUSY",
+                "lease still owns a transaction or job",
+                true,
+            ));
         }
+        if let Some(binding) = self.leases.remove(lease) {
+            binding.handle.release();
+        }
+        Action::Reply(rpc::response(&request.id, json!({"ok": true})))
     }
 
     fn workspace_probe(&mut self, request: &Request) -> Action {
@@ -426,7 +505,7 @@ impl Session {
         let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
             return usage_error(request, "leaseId is required");
         };
-        let Some(binding) = self.leases.get(lease) else {
+        let Some(binding) = self.active_lease(lease) else {
             return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
         };
         if binding.workspace_id != workspace_id {
@@ -504,6 +583,168 @@ impl Session {
             Ok(()) => Action::Reply(rpc::response(&request.id, json!({"accepted": true}))),
             Err(error) => Action::Reply(error_response(&request.id, &error)),
         }
+    }
+
+    /// Read-only planning against a snapshot, including an absent replica.
+    /// No root, state directory or journal is created.
+    fn sync_preview_begin(&mut self, request: &Request) -> Action {
+        let Some(workspace_id) = request.params.get("workspaceId").and_then(Value::as_str) else {
+            return usage_error(request, "workspaceId is required");
+        };
+        let Some(root) = request.params.get("root").and_then(Value::as_str) else {
+            return usage_error(request, "root is required");
+        };
+        let policy: Policy = match request.params.get("policy") {
+            Some(value) => match serde_json::from_value(value.clone()) {
+                Ok(policy) => policy,
+                Err(error) => return usage_error(request, &format!("invalid policy: {error}")),
+            },
+            None => Policy::default(),
+        };
+        let workspace = match workspace::preview_workspace(workspace_id, root) {
+            Ok(workspace) => workspace,
+            Err(error) => return Action::Reply(error_response(&request.id, &error)),
+        };
+        if workspace.recovery.is_some() {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "RECOVERY_REQUIRED",
+                "workspace has an unfinished transaction; inspect it with fleet recover",
+                true,
+            ));
+        }
+        let state = if workspace.state.join("state.json").exists() {
+            "READY"
+        } else {
+            "ABSENT"
+        };
+        let txn_id = format!("txn-{}", identity_fragment());
+        let record = TxnRecord {
+            txn_id: txn_id.clone(),
+            workspace: workspace.id.clone(),
+            base_generation: workspace.generation,
+            phase: "entries".into(),
+            policy,
+            entries: Vec::new(),
+            plan_digest: None,
+            changes: Vec::new(),
+            needed: Vec::new(),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis() as u64)
+                .unwrap_or(0),
+        };
+        let generation = workspace.generation;
+        self.previews
+            .insert(txn_id.clone(), PreviewTxn { record, workspace });
+        Action::Reply(rpc::response(
+            &request.id,
+            json!({"txnId": txn_id, "generation": generation, "state": state}),
+        ))
+    }
+
+    fn sync_preview_entries(&mut self, request: &Request) -> Action {
+        let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
+            return usage_error(request, "txnId is required");
+        };
+        let entries = match request.params.get("entries") {
+            Some(value) => {
+                match serde_json::from_value::<Vec<crate::model::Entry>>(value.clone()) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        return usage_error(request, &format!("invalid entries: {error}"))
+                    }
+                }
+            }
+            None => return usage_error(request, "entries are required"),
+        };
+        let Some(preview) = self.previews.get_mut(txn_id) else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
+        };
+        match sync::add_entries(&mut preview.record, entries, &preview.workspace) {
+            Ok(()) => Action::Reply(rpc::response(&request.id, json!({"accepted": true}))),
+            Err(error) => Action::Reply(error_response(&request.id, &error)),
+        }
+    }
+
+    fn sync_preview_plan(&mut self, request: &Request) -> Action {
+        let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
+            return usage_error(request, "txnId is required");
+        };
+        let Some(preview) = self.previews.get_mut(txn_id) else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
+        };
+        match sync::compute(&mut preview.record, &preview.workspace) {
+            Ok(result) => Action::Reply(rpc::response(
+                &request.id,
+                json!({
+                    "planDigest": result.plan_digest,
+                    "changes": result.changes.len(),
+                    "needed": result.needed.len(),
+                }),
+            )),
+            Err(error) => Action::Reply(error_response(&request.id, &error)),
+        }
+    }
+
+    fn sync_preview_page(&mut self, request: &Request) -> Action {
+        let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
+            return usage_error(request, "txnId is required");
+        };
+        let Some(kind) = request.params.get("kind").and_then(Value::as_str) else {
+            return usage_error(request, "kind is required");
+        };
+        let offset = request
+            .params
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let limit = request
+            .params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(5000)
+            .min(5000) as usize;
+        let Some(preview) = self.previews.get(txn_id) else {
+            return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
+        };
+        let (items, total) = match kind {
+            "changes" => (
+                preview
+                    .record
+                    .changes
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|change| json!({"action": change.action, "path": change.path}))
+                    .collect::<Vec<_>>(),
+                preview.record.changes.len(),
+            ),
+            "needed" => (
+                preview
+                    .record
+                    .needed
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|digest| json!(digest))
+                    .collect::<Vec<_>>(),
+                preview.record.needed.len(),
+            ),
+            _ => return usage_error(request, "kind must be changes or needed"),
+        };
+        Action::Reply(rpc::response(
+            &request.id,
+            json!({"items": items, "total": total, "offset": offset}),
+        ))
+    }
+
+    fn sync_preview_end(&mut self, request: &Request) -> Action {
+        let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
+            return usage_error(request, "txnId is required");
+        };
+        self.previews.remove(txn_id);
+        Action::Reply(rpc::response(&request.id, json!({"ok": true})))
     }
 
     fn sync_plan(&mut self, request: &Request) -> Action {
@@ -817,17 +1058,15 @@ impl Session {
             }
         }
         let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
-        let file = match File::open(&target) {
-            Ok(file) => file,
-            Err(error) => {
-                return Action::Reply(rpc::error(
-                    &request.id,
-                    "INTERNAL",
-                    &error.to_string(),
-                    false,
-                ))
-            }
-        };
+        let mut file = reader.into_inner();
+        if let Err(error) = file.seek(SeekFrom::Start(0)) {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "INTERNAL",
+                &error.to_string(),
+                false,
+            ));
+        }
         let stream = self.next_stream;
         self.next_stream += 1;
         let buffer = Buffer::new();
@@ -882,6 +1121,15 @@ impl Session {
         if digest != upload.digest {
             let _ = fs::remove_file(&upload.temporary);
             return Action::Reply(rpc::error(&request.id, "BLOB_CORRUPT", &digest, false));
+        }
+        if let Err(error) = upload.file.sync_all() {
+            let _ = fs::remove_file(&upload.temporary);
+            return Action::Reply(rpc::error(
+                &request.id,
+                "INTERNAL",
+                &error.to_string(),
+                false,
+            ));
         }
         drop(upload.file);
         match upload.kind {
@@ -954,9 +1202,30 @@ impl Session {
         let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
             return usage_error(request, "txnId is required");
         };
+        let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
+            return usage_error(request, "leaseId is required");
+        };
         let Some(plan_digest) = request.params.get("planDigest").and_then(Value::as_str) else {
             return usage_error(request, "planDigest is required");
         };
+        let Some(binding) = self.active_lease(lease) else {
+            return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        };
+        let lease_workspace = binding.workspace_id.clone();
+        let transaction_workspace = self
+            .transactions
+            .get(txn_id)
+            .map(|record| record.workspace.clone());
+        if let Some(workspace_id) = transaction_workspace {
+            if lease_workspace != workspace_id {
+                return Action::Reply(rpc::error(
+                    &request.id,
+                    "LEASE_MISMATCH",
+                    "lease belongs to another workspace",
+                    false,
+                ));
+            }
+        }
         let Some(mut record) = self.transactions.remove(txn_id) else {
             return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
         };
@@ -989,8 +1258,11 @@ impl Session {
         let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
             return usage_error(request, "txnId is required");
         };
-        let workspace_id = match self.transactions.remove(txn_id) {
-            Some(record) => Some(record.workspace),
+        let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
+            return usage_error(request, "leaseId is required");
+        };
+        let workspace_id = match self.transactions.get(txn_id) {
+            Some(record) => Some(record.workspace.clone()),
             None => {
                 let mut found = None;
                 for id in self.registry.ids() {
@@ -1009,6 +1281,18 @@ impl Session {
         let Some(workspace_id) = workspace_id else {
             return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
         };
+        let Some(binding) = self.active_lease(lease) else {
+            return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        };
+        if binding.workspace_id != workspace_id {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "LEASE_MISMATCH",
+                "lease belongs to another workspace",
+                false,
+            ));
+        }
+        self.transactions.remove(txn_id);
         let Some(mut workspace) = self.registry.get(&workspace_id).cloned() else {
             return Action::Reply(rpc::error(
                 &request.id,
@@ -1047,8 +1331,11 @@ impl Session {
         let Some(txn_id) = request.params.get("txnId").and_then(Value::as_str) else {
             return usage_error(request, "txnId is required");
         };
-        let workspace_id = match self.transactions.remove(txn_id) {
-            Some(record) => Some(record.workspace),
+        let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
+            return usage_error(request, "leaseId is required");
+        };
+        let workspace_id = match self.transactions.get(txn_id) {
+            Some(record) => Some(record.workspace.clone()),
             None => {
                 // The transaction may survive a restart only as a journal. Find its workspace.
                 let mut found = None;
@@ -1068,6 +1355,18 @@ impl Session {
         let Some(workspace_id) = workspace_id else {
             return Action::Reply(rpc::error(&request.id, "OPERATION_UNKNOWN", txn_id, false));
         };
+        let Some(binding) = self.active_lease(lease) else {
+            return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
+        };
+        if binding.workspace_id != workspace_id {
+            return Action::Reply(rpc::error(
+                &request.id,
+                "LEASE_MISMATCH",
+                "lease belongs to another workspace",
+                false,
+            ));
+        }
+        self.transactions.remove(txn_id);
         let Some(workspace) = self.registry.get(&workspace_id).cloned() else {
             return Action::Reply(rpc::error(
                 &request.id,
@@ -1091,7 +1390,18 @@ impl Session {
         let Some(workspace_id) = request.params.get("workspaceId").and_then(Value::as_str) else {
             return usage_error(request, "workspaceId is required");
         };
-        let Some(workspace) = self.registry.get(workspace_id) else {
+        let root = request.params.get("root").and_then(Value::as_str);
+        let workspace = if let Some(workspace) = self.registry.get(workspace_id) {
+            Some(workspace.clone())
+        } else if let Some(root) = root {
+            match workspace::preview_workspace(workspace_id, root) {
+                Ok(workspace) => Some(workspace),
+                Err(error) => return Action::Reply(error_response(&request.id, &error)),
+            }
+        } else {
+            None
+        };
+        let Some(workspace) = workspace else {
             return Action::Reply(rpc::error(
                 &request.id,
                 "WORKSPACE_UNKNOWN",
@@ -1099,7 +1409,7 @@ impl Session {
                 false,
             ));
         };
-        match sync::inspect(workspace) {
+        match sync::inspect(&workspace) {
             Some(record) => Action::Reply(rpc::response(
                 &request.id,
                 json!({
@@ -1198,7 +1508,7 @@ impl Session {
         let Some(lease) = request.params.get("leaseId").and_then(Value::as_str) else {
             return usage_error(request, "leaseId is required");
         };
-        let Some(binding) = self.leases.get(lease) else {
+        let Some(binding) = self.active_lease(lease) else {
             return Action::Reply(rpc::error(&request.id, "LEASE_UNKNOWN", lease, false));
         };
         if binding.workspace_id != workspace_id {
@@ -1484,6 +1794,8 @@ fn error_response(id: &Value, message: &str) -> String {
     let known = [
         "WORKSPACE_UNKNOWN",
         "WORKSPACE_BUSY",
+        "WORKSPACE_ROOT_CONFLICT",
+        "WORKSPACE_UNMANAGED",
         "RECOVERY_REQUIRED",
         "GENERATION_MISMATCH",
         "LEASE_UNKNOWN",
@@ -1725,7 +2037,7 @@ mod tests {
         let commit = reply(
             &mut session,
             &json!({"jsonrpc":"2.0","id":"9","method":"sync.commit","params":{
-                "txnId":txn,"planDigest":plan_digest}})
+                "txnId":txn,"leaseId":"op1","planDigest":plan_digest}})
             .to_string(),
         );
         assert_eq!(commit["result"]["generation"], 1, "{commit}");

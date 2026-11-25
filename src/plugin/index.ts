@@ -8,13 +8,15 @@ import { FleetError, friendlyErrorMessage } from '../errors.js';
 import { hostViews, selectHost } from '../hosts.js';
 import { assertRelativePath } from '../paths.js';
 import { commandLabelOf, exitLabelOf, stateLabelOf } from '../labels.js';
-import { runWorkspace, syncForRun } from '../run.js';
+import { runWorkspace, syncForRun, syncOnlyState } from '../run.js';
 import type { RunSyncMode } from '../run.js';
 import { scratchConfig } from '../scratch.js';
 import { replicaState } from '../status.js';
 import { AgentError } from '../v1/errors.js';
 import {
   canonicalArtifactTarget,
+  canonicalTransferSource,
+  canonicalTransferTarget,
   connectSsh,
   downloadFile,
   execCommand,
@@ -234,6 +236,8 @@ function syncOutput(
   const items = result.changes.slice(0, 200);
   return {
     workspace: workspaceLabel(config),
+    workspaceId: config.name,
+    workspaceSource: config.source ?? 'file',
     host: host.alias,
     mode,
     modeLabel: mode === 'apply' ? 'Applied' : 'Planned',
@@ -353,6 +357,8 @@ function runOutput(
             : 'Inspect stderr or call fleet_job_status for a background job.';
   return {
     workspace: workspaceLabel(config),
+    workspaceId: config.name,
+    workspaceSource: config.source ?? 'file',
     target,
     host: host.alias,
     argv,
@@ -388,6 +394,8 @@ function execOutput(
 ): Record<string, unknown> {
   return {
     workspace: workspaceLabel(config),
+    workspaceId: config.name,
+    workspaceSource: config.source ?? 'file',
     host: host.alias,
     argv,
     commandLabel: commandLabelOf(argv),
@@ -444,6 +452,8 @@ export default {
         input: schema({ host: string, target }, ['host']),
         output: output({
           workspace: string,
+          workspaceId: string,
+          workspaceSource: string,
           target: string,
           host: string,
           generation: { type: 'number' },
@@ -457,11 +467,16 @@ export default {
           const config = await workspaceOfTarget(ctx, context, targetOf(input));
           const host = hostOf(config, input, selected === 'scratch' ? 'scratch' : 'workspace');
           const info = await withClient(host, context, (client) => status(client, config.name, host.root, context?.signal));
-          const state = selected === 'scratch' && info.generation === 0 && info.recovery !== true
+          const state = selected === 'scratch'
+            && info.generation === 0
+            && info.recovery !== true
+            && info.state !== 'UNMANAGED'
             ? { label: 'Remote-only', nextStep: 'Upload files into scratch or run a command with fleet_exec.' }
             : replicaState(info);
           return jsonResult({
             workspace: workspaceLabel(config),
+            workspaceId: config.name,
+            workspaceSource: config.source ?? 'file',
             target: selected,
             host: host.alias,
             generation: info.generation,
@@ -481,11 +496,12 @@ export default {
           host: string,
           mode: { type: 'string', enum: ['plan', 'apply'] },
           excludes: stringArray,
-          adopt: boolean,
           planToken: string,
         }, ['host', 'mode']),
         output: output({
           workspace: string,
+          workspaceId: string,
+          workspaceSource: string,
           host: string,
           mode: string,
           modeLabel: string,
@@ -501,26 +517,38 @@ export default {
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input, 'workspace');
-          const mode = input.mode === 'apply' ? 'apply' : 'plan';
+          if (input.mode !== 'plan' && input.mode !== 'apply') {
+            throw new AgentError('INVALID_REQUEST', 'mode must be plan or apply');
+          }
+          const mode = input.mode;
           const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
           const excludes = [...new Set([...config.excludes, ...extra])];
           if (mode === 'apply') {
-            await assertPermission(ctx, context, 'fleet.sync', [`${config.name}@${host.alias}`], {
+            const descriptor = JSON.stringify({
+              workspaceId: config.name,
+              host: host.alias,
+              ssh: host.ssh,
+              port: host.port,
+              root: host.root,
+              mode,
+              excludes,
+              planToken: typeof input.planToken === 'string' ? input.planToken : null,
+            });
+            await assertPermission(ctx, context, 'fleet.sync', [descriptor], {
               workspace: workspaceLabel(config),
               host: host.alias,
               mode,
               excludes,
-              adopt: input.adopt === true,
-            }, [`${config.name}@${host.alias}`]);
+            }, [descriptor]);
           }
           const progress = progressReporter(context);
           const result = await withClient(host, context, (client) => syncWorkspace(client, compileExcludes(excludes), {
             workspaceId: config.name,
             source: config.dir,
             root: host.root,
+            hostIdentity: `${host.ssh}:${host.port}`,
             excludes,
             mode,
-            adopt: input.adopt === true,
             ...(typeof input.planToken === 'string' ? { planToken: input.planToken } : {}),
             signal: context?.signal,
             onProgress: (update: SyncProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
@@ -544,6 +572,8 @@ export default {
         }, ['host', 'argv']),
         output: output({
           workspace: string,
+          workspaceId: string,
+          workspaceSource: string,
           target: string,
           host: string,
           argv: stringArray,
@@ -566,7 +596,14 @@ export default {
           const host = hostOf(config, input, selected === 'scratch' ? 'scratch' : 'workspace');
           const exec = validateExec(config, host, input);
           const metadata = { ...exec.metadata, target: selected, background: input.background === true };
-          const descriptor = JSON.stringify({ ...JSON.parse(exec.descriptor), target: selected });
+          const descriptor = JSON.stringify({
+            ...JSON.parse(exec.descriptor),
+            workspaceId: config.name,
+            ssh: host.ssh,
+            port: host.port,
+            root: host.root,
+            target: selected,
+          });
           await assertPermission(ctx, context, 'fleet.exec', [descriptor], metadata, [descriptor]);
           await assertShellPermission(ctx, context, exec, { target: selected, background: input.background === true });
 
@@ -579,6 +616,7 @@ export default {
               cwd: exec.cwd,
               env: exec.env,
               timeoutMs: exec.timeoutMs,
+              target: selected,
               startupSignal: context?.signal,
               agentPath: agentPath(),
             });
@@ -640,6 +678,8 @@ export default {
         }, ['argv']),
         output: output({
           workspace: string,
+          workspaceId: string,
+          workspaceSource: string,
           target: string,
           host: string,
           argv: stringArray,
@@ -674,6 +714,9 @@ export default {
           const exec = validateExec(config, host, input);
           const extra = Array.isArray(input.excludes) ? input.excludes.map(String) : [];
           const excludes = selected === 'scratch' ? [] : [...new Set([...config.excludes, ...extra])];
+          if (input.sync !== undefined && input.sync !== 'auto' && input.sync !== 'never' && input.sync !== 'plan' && input.sync !== 'apply') {
+            throw new AgentError('INVALID_REQUEST', 'sync must be one of auto, never, plan or apply');
+          }
           const syncMode: RunSyncMode = input.sync === 'never' || input.sync === 'plan' || input.sync === 'apply'
             ? input.sync
             : 'auto';
@@ -690,6 +733,10 @@ export default {
           };
           const descriptor = JSON.stringify({
             ...JSON.parse(exec.descriptor),
+            workspaceId: config.name,
+            ssh: host.ssh,
+            port: host.port,
+            root: host.root,
             target: selected,
             sync: syncMode,
             excludes,
@@ -715,8 +762,20 @@ export default {
                 ...common,
                 argv: exec.argv,
               }), { closeOnAbort: false });
-            if (prepared.required) {
-              return jsonResult(runOutput(config, host, exec.argv, true, 'sync-required', prepared.sync, null, '', false, selected));
+            const syncOnly = syncOnlyState(syncMode, prepared.required);
+            if (syncOnly !== null) {
+              return jsonResult(runOutput(
+                config,
+                host,
+                exec.argv,
+                true,
+                syncOnly,
+                prepared.sync,
+                null,
+                '',
+                false,
+                selected,
+              ));
             }
             const record = await registry.start({
               config,
@@ -727,6 +786,7 @@ export default {
               env: exec.env,
               timeoutMs: exec.timeoutMs,
               ...(typeof prepared.sync?.generation === 'number' ? { expectedGeneration: prepared.sync.generation } : {}),
+              target: selected,
               startupSignal: context?.signal,
               agentPath: agentPath(),
             });
@@ -779,7 +839,7 @@ export default {
 
       tools.add({
         name: 'fleet_hosts',
-        description: 'List configured hosts and their tags. Use it to choose a host or pass tags to fleet_run/host=auto. In a projectless chat this also works without a workspace; target="scratch" lists the global registry.',
+        description: 'List configured hosts and their tags. Use it to choose a host or pass tags to fleet_run/host=auto. In a projectless chat this also works without a workspace; target="scratch" lists only hosts allowed for scratch and defaults operation to scratch.',
         options: { codemode: false },
         input: schema({
           tags: stringArray,
@@ -800,7 +860,11 @@ export default {
             : await hostsWorkspaceOf(ctx, context);
           const operation = input.operation === 'workspace' || input.operation === 'scratch' || input.operation === 'transfer'
             ? input.operation
-            : undefined;
+            : selectedTarget === 'scratch'
+              ? 'scratch'
+              : selectedTarget === 'workspace'
+                ? 'workspace'
+                : undefined;
           const views = hostViews(config).filter((view) => operation === undefined || view.operations.includes(operation));
           let selected: string | null = null;
           if (Array.isArray(input.tags) && input.tags.length > 0) {
@@ -944,14 +1008,26 @@ export default {
           }
           const config = await workspaceOfTarget(ctx, context, 'scratch');
           const host = hostOf(config, input, 'transfer');
-          const source = path.resolve(config.dir, input.localPath);
+          let source: string;
+          try {
+            source = canonicalTransferSource(path.resolve(config.dir, input.localPath));
+          } catch (error) {
+            throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
+          }
           let remotePath: string;
           try {
             remotePath = assertRelativePath(input.remotePath);
           } catch (error) {
             throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
           }
-          await assertPermission(ctx, context, 'fleet.upload', [`${host.alias}:${source}->${remotePath}`], {
+          await assertPermission(ctx, context, 'read', [source], {
+            workspace: workspaceLabel(config),
+            target: 'scratch',
+            host: host.alias,
+            source,
+            destination: remotePath,
+          });
+          await assertPermission(ctx, context, 'fleet.upload', [`${host.alias}@${host.ssh}:${host.port}:${host.root}:${source}->${remotePath}`], {
             workspace: workspaceLabel(config),
             target: 'scratch',
             host: host.alias,
@@ -992,7 +1068,7 @@ export default {
 
       tools.add({
         name: 'fleet_download',
-        description: 'Download one regular file from the selected workspace or session scratch space to a local path. Use this for remote files outside the workspace, such as /tmp logs and generated artifacts.',
+        description: 'Download one regular file from the selected workspace or session scratch space to a local path. The remote path must stay below that workspace root or scratch root; use an absolute remote path only through the workspace that owns it.',
         options: { codemode: false, permission: 'edit' },
         input: schema({
           host: string,
@@ -1024,8 +1100,20 @@ export default {
           } catch (error) {
             throw new AgentError('INVALID_REQUEST', friendlyErrorMessage(error));
           }
-          const destination = path.resolve(config.dir, input.localPath);
-          await assertPermission(ctx, context, 'fleet.download', [`${host.alias}:${remotePath}->${destination}`], {
+          let destination: string;
+          try {
+            destination = canonicalTransferTarget(path.resolve(config.dir, input.localPath), false);
+          } catch (error) {
+            throw new AgentError('PATH_UNSAFE', friendlyErrorMessage(error));
+          }
+          await assertPermission(ctx, context, 'edit', [destination], {
+            workspace: workspaceLabel(config),
+            target: selected,
+            host: host.alias,
+            source: remotePath,
+            destination,
+          }, [`${path.dirname(destination)}/*`]);
+          await assertPermission(ctx, context, 'fleet.download', [`${host.alias}@${host.ssh}:${host.port}:${host.root}:${remotePath}->${destination}`], {
             workspace: workspaceLabel(config),
             target: selected,
             host: host.alias,
@@ -1047,6 +1135,7 @@ export default {
             root: host.root,
             path: remotePath,
             dest: destination,
+            expectedTarget: destination,
             overwrite: input.overwrite === true,
             signal: context?.signal,
             onProgress: (update: TransferProgress) => progress({ ...update, workspace: workspaceLabel(config), host: host.alias }),
@@ -1066,11 +1155,11 @@ export default {
 
       tools.add({
         name: 'fleet_job_status',
-        description: 'Show the state and bounded output tail of a background Fleet job.',
+        description: 'Show the state and bounded output tail of a background Fleet job. The job record carries its own host and target.',
         options: { codemode: false },
-        input: schema({ host: string, jobId: string }, ['jobId']),
+        input: schema({ jobId: string }, ['jobId']),
         output: output({
-          workspace: string, host: string, jobId: string, state: string, stateLabel: string,
+          workspace: string, target: string, host: string, jobId: string, state: string, stateLabel: string,
           runLabel: string, supervised: boolean,
           exitCode: { type: ['number', 'null'] }, exitLabel: string, signal: { type: ['number', 'null'] },
           startedAt: { type: 'number' }, endedAt: { type: ['number', 'null'] },
@@ -1089,9 +1178,9 @@ export default {
         name: 'fleet_job_cancel',
         description: 'Request cancellation of a background Fleet job by id. The final state reports the real outcome.',
         options: { codemode: false, permission: 'fleet.job.cancel' },
-        input: schema({ host: string, jobId: string }, ['jobId']),
+        input: schema({ jobId: string }, ['jobId']),
         output: output({
-          workspace: string, host: string, jobId: string, state: string, stateLabel: string,
+          workspace: string, target: string, host: string, jobId: string, state: string, stateLabel: string,
           runLabel: string, supervised: boolean,
           exitCode: { type: ['number', 'null'] }, exitLabel: string, signal: { type: ['number', 'null'] },
           startedAt: { type: 'number' }, endedAt: { type: ['number', 'null'] },
@@ -1133,12 +1222,23 @@ export default {
         async execute(input, context) {
           const config = await workspaceOf(ctx, context);
           const host = hostOf(config, input, 'workspace');
+          if (input.mode !== undefined && input.mode !== 'abort' && input.mode !== 'recover') {
+            throw new AgentError('INVALID_REQUEST', 'mode must be recover or abort');
+          }
           const mode = input.mode === 'abort' ? 'abort' : 'recover';
-          await assertPermission(ctx, context, 'fleet.recover', [`${config.name}@${host.alias}`], {
+          const descriptor = JSON.stringify({
+            workspaceId: config.name,
+            host: host.alias,
+            ssh: host.ssh,
+            port: host.port,
+            root: host.root,
+            mode,
+          });
+          await assertPermission(ctx, context, 'fleet.recover', [descriptor], {
             workspace: workspaceLabel(config),
             host: host.alias,
             mode,
-          }, [`${config.name}@${host.alias}`]);
+          }, [descriptor]);
           const result = await withClient(host, context, (client) => recoverWorkspace(
             client,
             config.name,

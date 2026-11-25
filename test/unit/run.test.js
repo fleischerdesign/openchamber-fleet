@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { hostViews, selectHost } from '../../dist/hosts.js';
-import { runWorkspace, syncForRun } from '../../dist/run.js';
+import { runWorkspace, syncForRun, syncOnlyState } from '../../dist/run.js';
 import { AgentError } from '../../dist/v1/errors.js';
 
 function workspace() {
@@ -113,6 +113,14 @@ describe('agent-first run', () => {
     assert.equal(result.exec, null);
     assert.equal(executed, false);
     assert.equal(result.sync?.mode, 'plan');
+  });
+
+  test('syncOnlyState never lets a background plan start a job', () => {
+    assert.equal(syncOnlyState('plan', false), 'sync-planned');
+    assert.equal(syncOnlyState('plan', true), 'sync-required');
+    assert.equal(syncOnlyState('apply', true), 'sync-required');
+    assert.equal(syncOnlyState('apply', false), null);
+    assert.equal(syncOnlyState('never', false), null);
   });
 
   test('sync=plan never executes, even when the replica is current', async () => {

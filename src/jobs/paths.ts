@@ -89,7 +89,9 @@ export function writeServiceHeartbeat(env: NodeJS.ProcessEnv = process.env): voi
 
 export function removeServiceHeartbeat(env: NodeJS.ProcessEnv = process.env): void {
   try {
-    removeFile(serviceHeartbeatPath(env));
+    const current = readServiceHeartbeat(env);
+    // A shutting-down old service must not remove its successor's heartbeat.
+    if (current === null || current.pid === process.pid) removeFile(serviceHeartbeatPath(env));
   } catch {
     // Best effort on shutdown.
   }

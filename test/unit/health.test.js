@@ -29,6 +29,10 @@ test('a busy supervisor of another version defers the handover', () => {
   assert.equal(supervisorVersionDecision(record({ version: '0.6.0', activeJobs: 2 }), '0.9.1'), 'defer');
 });
 
+test('a draining supervisor defers even when its version matches', () => {
+  assert.equal(supervisorVersionDecision(record({ version: '0.9.1', draining: true }), '0.9.1'), 'defer');
+});
+
 test('a missing supervisor starts one', () => {
   assert.equal(supervisorVersionDecision(null, '0.9.1'), 'start');
 });

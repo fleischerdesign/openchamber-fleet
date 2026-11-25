@@ -39,6 +39,8 @@ export function readHealthySupervisor(store, now = Date.now()) {
 export function supervisorVersionDecision(record, version) {
     if (!record)
         return 'start';
+    if (record.draining === true)
+        return 'defer';
     if (record.version === version)
         return 'reuse';
     return (record.activeJobs ?? 0) > 0 ? 'defer' : 'replace';

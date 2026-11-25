@@ -77,16 +77,20 @@ export function saveDefaults(directory, options = {}) {
     }
     if (directory.includes('\0'))
         throw new FleetError('config-invalid', 'the default workspace must not contain NUL');
-    const resolved = path.resolve(directory);
+    let resolved;
     let stat;
     try {
+        resolved = fs.realpathSync(path.resolve(directory));
         stat = fs.statSync(resolved);
     }
     catch {
-        throw new FleetError('config-invalid', `default workspace ${resolved} does not exist`);
+        throw new FleetError('config-invalid', `default workspace ${directory} does not exist`);
     }
     if (!stat.isDirectory())
         throw new FleetError('config-invalid', `default workspace ${resolved} is not a directory`);
+    if (isOpenChamberInternalDirectory(resolved)) {
+        throw new FleetError('config-invalid', 'an internal OpenChamber chat directory cannot be the default workspace');
+    }
     const defaults = { version: CONFIG_VERSION, directory: resolved };
     writeJson(file, defaults);
     return defaults;
@@ -121,7 +125,8 @@ export function loadSessionConfig(directory = process.cwd(), options = {}) {
             });
         }
         try {
-            return { config: loadConfig(defaults.directory, options), fallback: true };
+            const resolved = loadConfig(defaults.directory, options);
+            return { config: { ...resolved, source: 'default' }, fallback: true };
         }
         catch (failure) {
             if (failure instanceof FleetError) {
@@ -212,13 +217,13 @@ export function defaultWorkspaceName(cwd = process.cwd()) {
 export function loadConfig(cwd = process.cwd(), options = {}) {
     const explicit = options.config ?? process.env.FLEET_CONFIG;
     if (explicit)
-        return loadLegacyConfig(path.resolve(cwd, explicit));
+        return loadLegacyConfig(path.resolve(cwd, explicit), options);
     const paths = configPaths(cwd, options);
     if (fs.existsSync(paths.projectFile))
         return loadSplitConfig(paths);
     const legacy = path.join(workspaceRoot(cwd), 'fleet.json');
     if (fs.existsSync(legacy))
-        return loadLegacyConfig(legacy);
+        return loadLegacyConfig(legacy, options);
     return loadSplitConfig(paths);
 }
 export function loadConfigDocuments(cwd = process.cwd(), options = {}) {
@@ -321,6 +326,9 @@ export function initProjectConfig(cwd, options) {
                     ssh: legacyHost.ssh,
                     ...(legacyPort === undefined ? {} : { port: legacyPort }),
                     ...(legacyHost.tags.length === 0 ? {} : { tags: [...legacyHost.tags] }),
+                    // A legacy file has no policy. Reusing an existing alias keeps the
+                    // shared allowlist instead of silently widening it.
+                    ...(entry?.allow === undefined ? {} : { allow: [...entry.allow] }),
                 };
                 if (!entry) {
                     registryHosts[legacyAlias] = merged;
@@ -336,15 +344,27 @@ export function initProjectConfig(cwd, options) {
                 }
             }
         }
+        else if (options.scope !== 'name'
+            && !isOpenChamberInternalDirectory(paths.workspaceRoot)
+            && (options.scope === 'checkout' || Object.keys(registryHosts).length > 0)) {
+            // `fleet init` on a project that was using the safe derived view must
+            // persist that view, including checkout identity and default excludes.
+            project = { ...derivedProjectConfig(paths), name, scope: 'checkout' };
+        }
         else {
             project = defaultProjectConfig(name);
         }
     }
+    if (options.scope !== undefined)
+        project = { ...project, scope: options.scope };
     const existing = registryHosts[alias];
     const requested = {
         ssh,
         ...(port === 22 ? {} : { port }),
         ...(tags === undefined || tags.length === 0 ? {} : { tags: [...tags] }),
+        // There is no `init --allow`; changing tags, a target or --force must not
+        // erase a deliberate host policy.
+        ...(existing?.allow === undefined ? {} : { allow: [...existing.allow] }),
     };
     const sameTarget = existing !== undefined && existing.ssh === ssh && (existing.port ?? 22) === port;
     if (existing && !sameTarget && !options.force) {
@@ -504,7 +524,15 @@ function loadSplitConfig(paths) {
     const hosts = {};
     for (const alias of selectedAliases(project, registry)) {
         const entry = registry.hosts[alias];
-        const root = project.roots[alias] ?? defaultRemoteRoot(workspaceName);
+        const configuredRoot = project.roots[alias];
+        const root = configuredRoot === undefined
+            ? defaultRemoteRoot(workspaceName)
+            : scoped
+                // A checkout-scoped project shares settings, never a replica root.
+                // An explicit root is a base directory; the derived identity is
+                // appended so two clones cannot claim the same tree.
+                ? `${configuredRoot.replace(/\/+$/, '')}/${workspaceName}`
+                : configuredRoot;
         hosts[alias] = {
             alias,
             ssh: entry.ssh,
@@ -528,7 +556,7 @@ function loadSplitConfig(paths) {
         source: explicit ? 'project' : 'derived',
     };
 }
-function loadLegacyConfig(file) {
+function loadLegacyConfig(file, options = {}) {
     let raw;
     try {
         raw = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -545,6 +573,12 @@ function loadLegacyConfig(file) {
     const aliases = Object.keys(hostsRaw);
     if (aliases.length === 0)
         throw new FleetError('config-invalid', 'hosts must declare at least one host');
+    // A legacy workspace file does not carry an allowlist. When a shared
+    // registry exists, its policy still applies to aliases it knows about.
+    const registryFile = path.join(configDirOf(options), 'hosts.json');
+    const registry = fs.existsSync(registryFile)
+        ? readHostRegistry(registryFile, false)
+        : emptyHostRegistry();
     const hosts = {};
     for (const alias of aliases) {
         assertAlias(alias);
@@ -556,7 +590,15 @@ function loadLegacyConfig(file) {
             ? defaultRemoteRoot(name)
             : assertRemoteRoot(requireString(entry, 'root', `hosts.${alias}`));
         const tags = readTags(entry.tags, `hosts.${alias}.tags`);
-        hosts[alias] = { alias, ssh, port, root, tags };
+        const allow = registry.hosts[alias]?.allow;
+        hosts[alias] = {
+            alias,
+            ssh,
+            port,
+            root,
+            tags,
+            ...(allow === undefined ? {} : { allow: [...allow] }),
+        };
     }
     return {
         name,
@@ -611,7 +653,9 @@ function parseHostRegistry(value, file) {
             ssh,
             ...(port === undefined ? {} : { port }),
             ...(tags.length === 0 ? {} : { tags }),
-            ...(allow.length === 0 ? {} : { allow }),
+            // An explicit empty array denies every operation; an absent key keeps the
+            // compatibility default of allowing all operations.
+            ...(allow === undefined ? {} : { allow }),
         };
     }
     if (Object.keys(hosts).length === 0) {
@@ -629,7 +673,9 @@ function parseProjectConfig(value, file, nameFallback) {
     if (top.scope !== undefined && top.scope !== 'name' && top.scope !== 'checkout') {
         throw new FleetError('config-invalid', `${file} has an invalid project.scope`);
     }
-    const scope = top.scope === 'checkout' ? 'checkout' : undefined;
+    // Preserve an explicit `name` scope so a later panel save cannot silently
+    // turn a shared workspace into a per-checkout one.
+    const scope = top.scope === 'checkout' || top.scope === 'name' ? top.scope : undefined;
     const hosts = top.hosts === undefined
         ? undefined
         : requireStringArray(top.hosts, 'project.hosts');
@@ -797,7 +843,7 @@ function readExcludes(top) {
 }
 function readAllow(value, where) {
     if (value === undefined)
-        return [];
+        return undefined;
     if (!Array.isArray(value))
         throw new FleetError('config-invalid', `${where} must be an array`);
     const allow = value.map((entry) => {

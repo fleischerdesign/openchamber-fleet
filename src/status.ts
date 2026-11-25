@@ -3,12 +3,13 @@
 export interface ReplicaStateInput {
   readonly generation?: number;
   readonly recovery?: boolean;
+  readonly state?: 'ABSENT' | 'UNMANAGED' | 'READY' | 'RECOVERY';
 }
 
 export type ReplicaTone = 'success' | 'warning' | 'error';
 
 export interface ReplicaState {
-  readonly label: 'Ready' | 'Not synced' | 'Recovery needed';
+  readonly label: 'Ready' | 'Not synced' | 'Recovery needed' | 'Unmanaged';
   readonly tone: ReplicaTone;
   readonly nextStep: string;
   readonly tooltip: string;
@@ -21,6 +22,14 @@ export function replicaState(input: ReplicaStateInput): ReplicaState {
       tone: 'error',
       nextStep: 'Run fleet_recover before the next sync.',
       tooltip: 'The last sync was interrupted; open Fleet recovery before syncing again.',
+    };
+  }
+  if (input.state === 'UNMANAGED') {
+    return {
+      label: 'Unmanaged',
+      tone: 'warning',
+      nextStep: 'Adopt the existing root explicitly, or choose a different root.',
+      tooltip: 'The remote root exists but is not managed by Fleet; a normal sync refuses to overwrite it.',
     };
   }
   if (!input.generation || input.generation <= 0) {

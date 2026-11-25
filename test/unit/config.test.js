@@ -807,3 +807,87 @@ describe('exclude semantics (SYNC-35…SYNC-38)', () => {
     assert.equal(matcher.matches("tmp", true), true);
   });
 });
+
+describe('host policy and checkout identity', () => {
+  test('an explicit empty allowlist denies every operation', () => {
+    const configDir = fs.mkdtempSync(path.join(tmp, 'allow-empty-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { node: { ssh: 'u@h', allow: [] } },
+    }));
+    const config = loadHostsOnlyConfig(tmp, { configDir });
+    assert.deepEqual(config.hosts.node.allow, []);
+    assert.throws(() => selectHost(config, { host: 'node', operation: 'workspace' }), /not allowed/);
+    assert.throws(() => selectHost(config, { host: 'node', operation: 'scratch' }), /not allowed/);
+    assert.equal(selectHost(config, { host: 'node' }).alias, 'node');
+  });
+
+  test('init keeps an existing allowlist when tags or a target change', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'allow-init-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'allow-init-config-'));
+    initProjectConfig(workspace, { alias: 'node', ssh: 'u@h', configDir });
+    const hostsFile = path.join(configDir, 'hosts.json');
+    const hosts = JSON.parse(fs.readFileSync(hostsFile, 'utf8'));
+    hosts.hosts.node.allow = ['scratch'];
+    fs.writeFileSync(hostsFile, JSON.stringify(hosts));
+    initProjectConfig(workspace, { alias: 'node', ssh: 'u@h', tags: ['linux'], configDir });
+    const saved = JSON.parse(fs.readFileSync(hostsFile, 'utf8'));
+    assert.deepEqual(saved.hosts.node.allow, ['scratch']);
+    assert.deepEqual(saved.hosts.node.tags, ['linux']);
+  });
+
+  test('init on a derived project persists checkout scope and safe excludes', () => {
+    const configDir = fs.mkdtempSync(path.join(tmp, 'derived-init-config-'));
+    const other = fs.mkdtempSync(path.join(tmp, 'derived-init-other-'));
+    initProjectConfig(other, { alias: 'node', ssh: 'u@h', configDir });
+    const workspace = fs.mkdtempSync(path.join(tmp, 'derived-init-'));
+    assert.equal(loadSessionConfig(workspace, { configDir }).config.source, 'derived');
+    const documents = initProjectConfig(workspace, { alias: 'node', ssh: 'u@h', configDir });
+    assert.equal(documents.project.scope, 'checkout');
+    assert.deepEqual(documents.project.excludes, ['.git', '.direnv/', 'result*']);
+    const loaded = loadConfig(workspace, { configDir });
+    assert.equal(loaded.source, 'project');
+    assert.match(loaded.name, /^[a-z0-9._-]+-[0-9a-f]{10}$/);
+  });
+
+  test('a checkout-scoped root is a base, never a shared exact root', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'checkout-root-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'checkout-root-config-'));
+    initProjectConfig(workspace, {
+      alias: 'node',
+      ssh: 'u@h',
+      root: '/srv/fleet',
+      scope: 'checkout',
+      configDir,
+    });
+    const loaded = loadConfig(workspace, { configDir });
+    assert.equal(loaded.hosts.node.root, `/srv/fleet/${loaded.name}`);
+  });
+
+  test('legacy aliases still follow the shared allowlist', () => {
+    const workspace = writeConfig({ name: 'legacy', hosts: { node: { ssh: 'u@h' } } });
+    const configDir = fs.mkdtempSync(path.join(tmp, 'legacy-allow-config-'));
+    fs.writeFileSync(path.join(configDir, 'hosts.json'), JSON.stringify({
+      version: 1,
+      hosts: { node: { ssh: 'u@h', allow: ['scratch'] } },
+    }));
+    const config = loadConfig(workspace, { configDir });
+    assert.deepEqual(config.hosts.node.allow, ['scratch']);
+    assert.throws(() => selectHost(config, { host: 'node', operation: 'workspace' }), /not allowed/);
+    assert.equal(selectHost(config, { host: 'node', operation: 'scratch' }).alias, 'node');
+  });
+
+  test('an explicit name scope survives a save', () => {
+    const workspace = fs.mkdtempSync(path.join(tmp, 'name-scope-'));
+    const configDir = fs.mkdtempSync(path.join(tmp, 'name-scope-config-'));
+    const saved = saveConfigDocuments(workspace, {
+      version: 1,
+      hosts: { node: { ssh: 'u@h' } },
+    }, {
+      ...projectDraft({ name: 'shared', scope: 'name' }),
+      hosts: ['node'],
+    }, { configDir });
+    assert.equal(saved.project.scope, 'name');
+    assert.equal(loadConfig(workspace, { configDir }).name, 'shared');
+  });
+});

@@ -75,18 +75,32 @@ export class AgentClient {
         if (this.streams.has(streamId))
             throw new Error(`stream ${streamId} is already collected`);
         return new Promise((resolve, reject) => {
+            const signal = options.signal;
+            const onAbort = () => {
+                clearTimeout(timer);
+                signal?.removeEventListener('abort', onAbort);
+                this.streams.delete(streamId);
+                reject(new AgentError('CANCELLED', 'operation cancelled'));
+            };
             const timer = setTimeout(() => {
                 this.streams.delete(streamId);
+                signal?.removeEventListener('abort', onAbort);
                 reject(new AgentError('OPERATION_UNKNOWN', `stream ${streamId} did not end`, true));
             }, options.timeoutMs ?? 120_000);
+            if (signal?.aborted) {
+                clearTimeout(timer);
+                reject(new AgentError('CANCELLED', 'operation cancelled'));
+                return;
+            }
+            signal?.addEventListener('abort', onAbort, { once: true });
             this.streams.set(streamId, {
                 chunks: [],
                 bytes: 0,
                 nextSeq: 0n,
                 onData: options.onData,
                 ...(options.sink === undefined ? {} : { sink: options.sink }),
-                resolve: (value) => { clearTimeout(timer); resolve(value); },
-                reject: (error) => { clearTimeout(timer); reject(error); },
+                resolve: (value) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); resolve(value); },
+                reject: (error) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(error); },
             });
             void this.credit(streamId, options.initialCredit ?? DEFAULT_CREDIT).catch(() => { });
         });
@@ -120,11 +134,26 @@ export class AgentClient {
         }
         return this.request('stream.end', { streamId });
     }
+    /** Stream an already-open regular file, so the hashed bytes are the uploaded bytes. */
+    async uploadFd(streamId, fd, signal) {
+        const chunkSize = Math.min(MAX_DATA_BYTES, this.info.limits.maxData - DATA_HEADER_BYTES);
+        if (chunkSize < 1)
+            throw new AgentError('UNSUPPORTED_CAPABILITY', 'agent maxData cannot carry a stream payload');
+        let seq = 0n;
+        for await (const value of fs.createReadStream('', { fd, start: 0, autoClose: false, highWaterMark: chunkSize })) {
+            if (signal?.aborted)
+                throw new AgentError('CANCELLED', 'operation cancelled');
+            const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+            await this.writeData(streamId, seq, chunk);
+            seq += 1n;
+        }
+        return this.request('stream.end', { streamId });
+    }
     /** Receive a stream into a file without retaining it in memory. */
     async collectToFile(streamId, file, options = {}) {
         const fd = fs.openSync(file, 'wx', 0o600);
         try {
-            return await this.collect(streamId, {
+            const result = await this.collect(streamId, {
                 ...options,
                 sink: (chunk) => {
                     let offset = 0;
@@ -133,6 +162,8 @@ export class AgentClient {
                     }
                 },
             });
+            fs.fsyncSync(fd);
+            return result;
         }
         finally {
             fs.closeSync(fd);

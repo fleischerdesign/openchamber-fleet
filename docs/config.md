@@ -32,12 +32,17 @@ root. Nothing is written to the repository.
 | `hosts.<alias>.ssh` | `user@host` | required |
 | `hosts.<alias>.port` | integer | default 22 |
 | `hosts.<alias>.tags` | string[] | optional capabilities such as `linux`, `gpu`, `large`; lowercase identifiers, at most 20 |
-| `hosts.<alias>.allow` | string[] | optional operations: `workspace`, `scratch`, `transfer`; omitted means all |
+| `hosts.<alias>.allow` | string[] | optional operations: `workspace`, `scratch`, `transfer`; omitted means all, an explicit empty array denies all |
 
 Tags are how an agent selects a machine without a UI choice: `fleet_hosts` lists them, and
 `fleet_run` accepts `host: "auto"` plus required tags. They describe capability; they are not
-authorization. `allow` is the authorization boundary: a host can be scratch-only or
-transfer-only without becoming a sync target.
+authorization. `allow` is controller-side policy: a host can be scratch-only or transfer-only
+without becoming a sync target. The operations are independent: `workspace` covers sync, status and
+workspace execution; `scratch` covers scratch execution/status; `transfer` covers upload and
+download. A host that may only receive files therefore needs `transfer`, while a scratch-only host
+needs `scratch` and, for uploads, `transfer`. It is not a sandbox — an allowed `exec` still runs with
+the SSH user's full rights. Omitting `allow` keeps the compatibility default of every operation; an
+explicit empty array denies every operation.
 
 The registry must define at least one host. Unknown keys are an error. File mode is `0600`.
 
@@ -56,9 +61,10 @@ directory and the global registry:
 - the default replica root is `~/.cache/openchamber-fleet/<workspace-id>`.
 
 Saving the derived configuration from the panel writes `scope: "checkout"`: the settings file is
-still shared by clones, but each checkout computes its own replica id and default root. `fleet init`
-creates a name-scoped file for compatibility; use `scope: "checkout"` explicitly if that project is
-worked on from several checkouts.
+still shared by clones, but each checkout computes its own replica id and root. `fleet init` on a
+derived project persists the same checkout scope and the derived excludes. Pass `--scope name` to
+`fleet init` when the project deliberately wants one shared replica id across checkouts. An existing
+explicit scope is preserved; a later panel save cannot silently switch it.
 
 ```json
 {
@@ -80,7 +86,7 @@ worked on from several checkouts.
 | `scope` | `name` \| `checkout` | optional; `checkout` keeps replica id per working tree while settings stay shared |
 | `hosts` | string[] | optional allowlist; omitted means every host in the registry |
 | `requires` | string[] | optional capabilities; a host must carry every listed tag |
-| `roots` | object | optional per-host replica-root overrides |
+| `roots` | object | optional per-host replica roots; under `checkout` scope each value is a **base** and the derived workspace id is appended |
 | `excludes` | string[] | baseline rsync-compatible patterns |
 | `env` | object | environment variables passed to remote commands |
 | `shell` | string | `bash`, `sh`, `dash` or `zsh` |
@@ -116,7 +122,12 @@ share the same local project settings. Without a git remote, the canonical works
 Moving a non-git directory therefore creates a new settings identity. A derived replica id also
 includes the canonical checkout path, so two checkouts never share a replica by accident. A file
 written from a derived configuration records `scope: "checkout"` and keeps that guarantee. An
-explicit `fleet init` file without scope uses its `name` and remains opt-in sharing.
+explicit `fleet init --scope name` file uses its `name` and remains opt-in sharing.
+
+The remote URL is a grouping heuristic, not a global repository identity: SSH and HTTPS spellings of
+the same repository do not share settings, and identical relative URLs can collide. A change to
+`origin` changes the settings identity; a move with the same `origin` keeps the settings but not the
+derived replica. Use `--scope name` when a team intentionally wants one identity across checkouts.
 
 ## Default workspace for projectless chats
 
@@ -153,11 +164,13 @@ a private remote directory per session, not a replica:
 ~/.cache/openchamber-fleet/scratch/<session-hash>
 ```
 
-It has no source tree, manifest, generation or recovery journal. Upload a file into scratch, run a
-command there, then download the result. The same `scratch` id is stable for the session. A command
-may still access absolute paths such as `/tmp`; scratch is the safe default working directory, not a
-sandbox. Scratch persists until its directory and agent state are removed; there is no automatic
-quota or garbage collection in this release.
+It has no source tree and no normal sync lifecycle; the agent still records an empty manifest and
+generation 0 as workspace state. Upload a file into scratch, run a command there, then download the
+result. The same `scratch` id is stable for the session. A command may still access absolute paths
+such as `/tmp`; scratch is the safe default working directory, not a sandbox. The agent's
+`transfer.put` is a root-relative file write; "uploads only into scratch" is enforced by the CLI and
+plugin, not by a separate agent identity. Scratch persists until its directory and agent state are
+removed; there is no automatic quota or garbage collection in this release.
 
 ```text
 fleet upload ./report.md --host workstation --to report.md
@@ -171,9 +184,11 @@ and streams in bounded memory. Uploads are accepted only for scratch; downloads 
 an existing replica. A transfer into a replica root is outside the sync manifest and therefore not
 tracked by the next workspace sync.
 
-The workspace's `status`, `sync plan` and `fetch` paths are read-only. On a host without a replica
-they report that it does not exist; they never create a root or a state entry. `sync apply` and an
-explicit `run` create the replica.
+The workspace's `status`, `sync plan`, `sync inspect`/recovery inspection and `fetch` paths are
+read-only. A plan is a read-only preview, works even before the first apply, and never writes a
+transaction journal. On a host without a replica these paths report that it does not exist; they
+never create a root or a state entry. `sync apply`, an upload and an explicit `run` create the
+replica.
 
 ## Resolution order
 
@@ -202,7 +217,8 @@ The legacy shape is accepted for migration:
 `fleet init` writes the split format. When a legacy `fleet.json` exists and no split project
 configuration does, it migrates instead of replacing: the name, hosts, replica roots, excludes,
 environment and shell are preserved. Selecting an alias that already exists in the shared registry
-only adds it to the project; `--force` replaces its SSH target. `fleet init --workspace-file` is the
+only adds it to the project; `--force` replaces its SSH target but preserves an existing
+`allow` list. A legacy alias also inherits the shared allowlist when one exists. `fleet init --workspace-file` is the
 explicit opt-in for the legacy file and writes it at the workspace root.
 
 The OpenChamber panel saves the split format locally and never writes to the repository. It loads

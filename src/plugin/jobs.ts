@@ -20,6 +20,7 @@ interface ActiveJob {
 export interface StartJobInput {
   config: WorkspaceConfig;
   host: HostConfig;
+  target?: 'workspace' | 'scratch';
   sessionID: string;
   argv: string[];
   cwd?: string;
@@ -127,6 +128,7 @@ export class FleetJobRegistry {
       sessionID: input.sessionID,
       workspace: input.config.name,
       directory: this.ctx.location?.directory ?? input.config.dir,
+      ...(input.target === undefined ? {} : { target: input.target }),
       host: input.host.alias,
       argv: [...input.argv],
       state: 'running',

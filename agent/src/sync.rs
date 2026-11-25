@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::model::{digest_of, sha256_hex, Entry, Manifest, Policy};
+use crate::model::{digest_of, Entry, Manifest, Policy};
 use crate::workspace::{self, Workspace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +113,13 @@ pub struct PlanResult {
 }
 
 pub fn plan(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, String> {
+    let result = compute(record, ws)?;
+    persist(ws, record)?;
+    Ok(result)
+}
+
+/// Compute a plan without writing a journal. Used by the read-only preview.
+pub fn compute(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, String> {
     if record.phase != "entries" {
         return Err("INVALID_REQUEST plan already computed".into());
     }
@@ -189,7 +196,6 @@ pub fn plan(record: &mut TxnRecord, ws: &Workspace) -> Result<PlanResult, String
     record.changes = changes.clone();
     record.needed = needed.clone();
     record.entries = desired.entries;
-    persist(ws, record)?;
     Ok(PlanResult {
         plan_digest,
         changes,
@@ -229,7 +235,7 @@ pub fn blob_path(ws: &Workspace, digest: &str) -> PathBuf {
 
 #[cfg(test)]
 pub fn put_blob(ws: &Workspace, digest: &str, bytes: &[u8]) -> Result<(), String> {
-    let actual = format!("sha256:{}", sha256_hex(bytes));
+    let actual = format!("sha256:{}", crate::model::sha256_hex(bytes));
     if actual != digest {
         return Err(format!(
             "BLOB_CORRUPT digest mismatch: expected {digest} got {actual}"
@@ -307,6 +313,13 @@ fn finish(
     desired: Manifest,
     policy: crate::model::CompiledPolicy,
 ) -> Result<(u64, String), String> {
+    if record.changes.is_empty() {
+        // A no-op sync must not invalidate a waiting detached job by bumping
+        // the generation it synchronized against.
+        workspace::clear_journal(&ws.state)?;
+        ws.recovery = None;
+        return Ok((ws.generation, ws.manifest.digest.clone()));
+    }
     apply(ws, &desired, &record.changes, &policy)?;
     let generation = ws.generation + 1;
     let state = workspace::WorkspaceState {

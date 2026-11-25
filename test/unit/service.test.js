@@ -158,6 +158,15 @@ describe('Fleet service configuration route', () => {
       assert.equal(empty.status, 200);
       assert.equal(empty.body.result.directory, undefined);
 
+      const missing = await request(service, 'POST', '/default', {});
+      assert.equal(missing.status, 400);
+      assert.equal(missing.body.error.code, 'INVALID_REQUEST');
+
+      const chat = path.join(tmp, '.config', 'openchamber', 'chats', 'default-route-chat');
+      fs.mkdirSync(chat, { recursive: true });
+      const internal = await request(service, 'POST', '/default', { directory: chat });
+      assert.equal(internal.status, 400);
+
       const saved = await request(service, 'POST', '/default', { directory: project });
       assert.equal(saved.status, 200);
       assert.equal(saved.body.result.directory, fs.realpathSync(project));

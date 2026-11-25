@@ -75,9 +75,12 @@ installed binary per node. That is the trade: one contract instead of three.
 
 ## 6. Synchronization
 
-`begin → entries → plan → blob.put → commit` (§7 of the spec).
+`begin → entries → plan → blob.put → commit` (§7 of the spec), with a separate in-memory preview
+for `mode=plan`.
 
 - The controller sends its desired manifest; the agent diffs it against the last committed one.
+- A preview never writes a journal. It works against an absent replica, so the first plan is
+  available before anything is provisioned.
 - Missing blobs are content-addressed and verified on receipt.
 - Commit applies a journal in place under the lease and only then writes generation + manifest.
 - A crash during apply leaves `RECOVERY`; `sync.inspect` shows the transaction, `sync.abort` works

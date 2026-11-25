@@ -75,7 +75,7 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | ID | Statement | Test |
 |---|---|---|
 | CTX-01 | Status and probe never create a replica root or state entry | `test/v1/protocol.test.js`, `test/unit/operations.test.js` |
-| CTX-02 | `sync plan` is read-only and refuses an absent replica | `test/unit/operations.test.js` |
+| CTX-02 | `sync plan` is read-only, previews an absent replica and writes no journal | `test/unit/operations.test.js`, `test/v1/protocol.test.js` |
 | CTX-03 | A lease is bound to the workspace that acquired it | `test/v1/protocol.test.js` |
 | CTX-04 | `sync=plan` never executes a command | `test/unit/run.test.js` |
 | CTX-05 | `cwd` stays relative to the root and rejects symlink or parent escapes | `test/v1/protocol.test.js` |
@@ -90,6 +90,7 @@ Every row is a statement the implementation must satisfy. Coverage is tracked in
 | WS-09 | A real project derives its own workspace instead of borrowing the default | `test/unit/config.test.js` |
 | WS-10 | Saving a derived config keeps replica ids per checkout while settings stay shared | `test/unit/config.test.js` |
 | HOST-01 | A host's `allow` limits workspace, scratch and transfer operations | `test/unit/config.test.js` |
+| HOST-04 | An explicit empty allowlist denies every operation | `test/unit/config.test.js` |
 | HOST-02 | Invalid host operation names are refused | `test/unit/config.test.js` |
 | HOST-03 | An idle supervisor of another version is replaced; a busy one defers | `test/unit/health.test.js` |
 

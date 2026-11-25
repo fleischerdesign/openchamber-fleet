@@ -25,7 +25,6 @@ export interface RunOptions {
   readonly timeoutMs?: number;
   readonly sync?: RunSyncMode;
   readonly excludes?: readonly string[];
-  readonly adopt?: boolean;
   readonly signal?: AbortSignal;
   readonly onSyncProgress?: (progress: SyncProgress) => void | Promise<void>;
   readonly onExecProgress?: (progress: ExecProgress) => void | Promise<void>;
@@ -132,9 +131,9 @@ export async function syncForRun(
         workspaceId: config.name,
         source: config.dir,
         root: host.root,
+        hostIdentity: `${host.ssh}:${host.port}`,
         excludes,
         mode,
-        adopt: options.adopt === true,
         signal: options.signal,
         onProgress: options.onSyncProgress,
       });
@@ -150,6 +149,16 @@ export async function syncForRun(
   }
 }
 
+/** A plan or a required apply never continues into an execution path. */
+export function syncOnlyState(
+  mode: RunSyncMode,
+  required: boolean,
+): 'sync-required' | 'sync-planned' | null {
+  if (required) return 'sync-required';
+  if (mode === 'plan') return 'sync-planned';
+  return null;
+}
+
 /**
  * The agent's normal execution path: synchronize the workspace (unless the caller explicitly says
  * no), then run the command. The agent never has to call a separate sync tool for routine work.
@@ -162,10 +171,8 @@ export async function runWorkspace(
   operations: RunOperations = defaultOperations,
 ): Promise<RunResult> {
   const { sync, required } = await syncForRun(client, config, host, options, operations);
-  if (required) return { state: 'sync-required', sync, exec: null };
-  if ((options.sync ?? 'auto') === 'plan') {
-    return { state: 'sync-planned', sync, exec: null };
-  }
+  const syncOnly = syncOnlyState(options.sync ?? 'auto', required);
+  if (syncOnly !== null) return { state: syncOnly, sync, exec: null };
   await options.beforeExec?.();
 
   const execOptions: ExecOptions = {

@@ -137,7 +137,7 @@ describe('detached supervisor core', () => {
     assert.equal(store.listCancelIds().length, 0);
   });
 
-  test('recovery interrupts old work and pending requests, never resuming them', async () => {
+  test('recovery interrupts old work but leaves unclaimed requests for the successor', async () => {
     const store = new JobStore(root());
     store.ensure();
     const jobId = 'job-cccccccccccccccccccccccc';
@@ -150,10 +150,47 @@ describe('detached supervisor core', () => {
     const core = new SupervisorCore({ store, instance: 'new', startedAt: 2, version: 'test', executor: fakeExecutor('unused', deferred()).executor });
     await core.recover();
     assert.equal(store.readJob(jobId).state, 'interrupted');
-    assert.equal(store.readJob(pendingId).state, 'interrupted');
+    // An unclaimed request was never acknowledged as started; the draining
+    // successor may still process it. A claimed request must not be resumed.
+    assert.equal(store.readJob(pendingId), null);
     assert.equal(store.readJob(claimedId).state, 'interrupted');
-    assert.deepEqual(store.listRequestIds(), []);
+    assert.deepEqual(store.listRequestIds(), [pendingId]);
     assert.deepEqual(store.listClaimedIds(), []);
+  });
+
+  test('drain finishes accepted work but never claims a new request', async () => {
+    const store = new JobStore(root());
+    store.ensure();
+    const pending = deferred();
+    const { calls, executor } = fakeExecutor('remote-drain', pending);
+    const core = new SupervisorCore({ store, instance: 'inst', startedAt: 1, version: 'test', executor });
+    const runningId = 'job-111111111111111111111111';
+    store.createRequest(request(runningId));
+    await core.tick();
+    await settle();
+    assert.equal(calls.start, 1);
+    assert.equal(core.activeCount(), 1);
+
+    core.beginDrain();
+    const lateId = 'job-222222222222222222222222';
+    store.createRequest(request(lateId));
+    await core.tick();
+    await settle();
+    assert.equal(calls.start, 1, 'a draining supervisor must not start a new request');
+    assert.equal(store.readJob(lateId), null);
+    assert.deepEqual(store.listRequestIds(), [lateId]);
+    assert.equal(core.idle(), false);
+
+    pending.resolve({
+      jobId: 'remote-drain',
+      state: 'succeeded',
+      exitCode: 0,
+      signal: null,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    });
+    await settle();
+    assert.equal(core.idle(), true);
   });
 
   test('queues beyond the active limit and starts the next job when a slot frees', async () => {
